@@ -3,6 +3,7 @@ from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 import os
 import sqlite3
+import requests
 
 client = OpenAI()
 
@@ -96,6 +97,25 @@ def get_watchlist():
     return [row["key"] for row in rows]
 
 
+# ---------------- STOCK DATA ----------------
+
+def get_stock_price(ticker):
+    api_key = os.environ.get("FMP_API_KEY")
+    url = f"https://financialmodelingprep.com/api/v3/quote/{ticker.upper()}?apikey={api_key}"
+
+    try:
+        r = requests.get(url)
+        data = r.json()
+
+        if not data or "price" not in data[0]:
+            return None
+
+        return data[0]["price"]
+
+    except:
+        return None
+
+
 # ---------------- MEMORY ----------------
 
 def add_message(role, content):
@@ -126,7 +146,7 @@ def get_recent_messages(limit=10):
     return messages
 
 
-# Initialize DB once
+# Initialize DB
 init_db()
 
 
@@ -171,6 +191,19 @@ def sms():
             resp.message("Watchlist: " + ", ".join(wl))
         return str(resp)
 
+    # -------- STOCK PRICE COMMAND --------
+
+    if incoming_lower.startswith("price "):
+        ticker = raw_incoming[6:].strip()
+        price = get_stock_price(ticker)
+
+        if price is None:
+            resp.message(f"{ticker.upper()}: N/A")
+        else:
+            resp.message(f"{ticker.upper()}: ${price}")
+
+        return str(resp)
+
     # -------- NORMAL AI --------
 
     try:
@@ -189,7 +222,7 @@ def sms():
 
         add_message("assistant", reply)
 
-    except Exception as e:
+    except Exception:
         reply = "Temporary error."
 
     resp.message(reply)
