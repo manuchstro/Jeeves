@@ -91,10 +91,46 @@ def init_db():
 
 # ---------------- WATCHLIST ----------------
 
+def normalize_watchlist_item(text):
+    cleaned = text.strip().upper()
+    cleaned = re.sub(r"^(ADD|REMOVE)\s+", "", cleaned)
+    cleaned = re.sub(r"\s+(TO|FROM)\s+MY\s+WATCHLIST$", "", cleaned)
+    cleaned = re.sub(r"\s+MY\s+WATCHLIST$", "", cleaned)
+    cleaned = re.sub(r"\s+WATCHLIST$", "", cleaned)
+    cleaned = re.sub(r"[^A-Z0-9.\- ]", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def extract_watchlist_item(text, action):
+    cleaned = text.strip()
+
+    patterns = {
+        "add": [
+            r"^\s*add\s+(.+?)\s+to\s+my\s+watchlist\s*$",
+            r"^\s*add\s+(.+?)\s+to\s+watchlist\s*$",
+            r"^\s*add\s+(.+?)\s*$",
+        ],
+        "remove": [
+            r"^\s*remove\s+(.+?)\s+from\s+my\s+watchlist\s*$",
+            r"^\s*remove\s+(.+?)\s+from\s+watchlist\s*$",
+            r"^\s*remove\s+(.+?)\s*$",
+        ],
+    }
+
+    for pattern in patterns.get(action, []):
+        match = re.match(pattern, cleaned, re.IGNORECASE)
+        if match:
+            item = normalize_watchlist_item(match.group(1))
+            if item:
+                return item
+
+    return None
+
 def add_to_watchlist(item):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("INSERT OR IGNORE INTO watchlist_preferences (key,value) VALUES (?,?)", (item.upper(),"1"))
+    cur.execute("INSERT OR IGNORE INTO watchlist_preferences (key,value) VALUES (?,?)", (item,"1"))
     conn.commit()
     conn.close()
 
@@ -102,15 +138,17 @@ def add_to_watchlist(item):
 def remove_from_watchlist(item):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("DELETE FROM watchlist_preferences WHERE key=?", (item.upper(),))
+    cur.execute("DELETE FROM watchlist_preferences WHERE key=?", (item,))
     conn.commit()
+    deleted = cur.rowcount > 0
     conn.close()
+    return deleted
 
 
 def get_watchlist():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT key FROM watchlist_preferences")
+    cur.execute("SELECT key FROM watchlist_preferences ORDER BY key ASC")
     rows = cur.fetchall()
     conn.close()
     return [r["key"] for r in rows]
@@ -169,10 +207,10 @@ def route(text):
     t = text.lower()
 
     if t.startswith("add "):
-        return ("add", text[4:])
+        return ("add", extract_watchlist_item(text, "add"))
 
     if t.startswith("remove "):
-        return ("remove", text[7:])
+        return ("remove", extract_watchlist_item(text, "remove"))
 
     if "watchlist" in t:
         return ("show", None)
@@ -204,18 +242,24 @@ def sms():
     intent, value = route(msg)
 
     if intent == "add":
+        if not value:
+            resp.message("I don't know what to add.")
+            return str(resp)
         add_to_watchlist(value)
-        resp.message(f"Added {value.upper()}")
+        resp.message(f"Added {value}.")
         return str(resp)
 
     if intent == "remove":
-        remove_from_watchlist(value)
-        resp.message(f"Removed {value.upper()}")
+        if not value:
+            resp.message("I don't know what to remove.")
+            return str(resp)
+        removed = remove_from_watchlist(value)
+        resp.message(f"Removed {value}." if removed else f"{value} is not on your watchlist.")
         return str(resp)
 
     if intent == "show":
         wl = get_watchlist()
-        resp.message("Watchlist: "+", ".join(wl) if wl else "Watchlist is empty")
+        resp.message(f"Watchlist: {', '.join(wl)}" if wl else "Watchlist is empty.")
         return str(resp)
 
     if intent == "fred":
