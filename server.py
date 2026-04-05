@@ -24,15 +24,15 @@ def sms():
         return ""
 
     completion = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[
-        {"role": "system", "content": "You are Jeeves, a concise, intelligent assistant that helps improve financial decision making and alert quality."},
-        {"role": "user", "content": incoming}
-    ]
-)
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "You are Jeeves, a concise, intelligent assistant that helps improve financial decision making and alert quality."},
+            {"role": "user", "content": incoming}
+        ]
+    )
 
-reply = completion.choices[0].message.content
-resp.message(reply)
+    reply = completion.choices[0].message.content
+    resp.message(reply)
 
     return str(resp)
 
