@@ -13,7 +13,7 @@ def home():
 @app.route("/sms", methods=["POST"])
 def sms():
     incoming = request.form.get("Body", "").lower()
-    from_number = request.form.get("From")
+    from_number = request.form.get("From", "").replace("whatsapp:", "")
 
     resp = MessagingResponse()
 
