@@ -216,6 +216,26 @@ def init_db():
     )
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS memory_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category TEXT NOT NULL,
+        memory_key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS interaction_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        intent TEXT NOT NULL,
+        message_text TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -335,6 +355,34 @@ def add_gratitude_entry(entry_text):
     conn.close()
 
 
+def add_memory_observation(category, memory_key, value, confidence=0.6):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO memory_observations (category, memory_key, value, confidence)
+        VALUES (?, ?, ?, ?)
+        """,
+        (category, memory_key, value, confidence),
+    )
+    conn.commit()
+    conn.close()
+
+
+def log_interaction_event(intent, message_text):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO interaction_events (intent, message_text)
+        VALUES (?, ?)
+        """,
+        (intent, message_text),
+    )
+    conn.commit()
+    conn.close()
+
+
 def get_memory_items(scope, limit=20):
     conn = get_conn()
     cur = conn.cursor()
@@ -360,6 +408,40 @@ def get_recent_gratitude(limit=7):
         """
         SELECT entry_text, created_at
         FROM gratitude_entries
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_recent_observations(limit=200):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT category, memory_key, value, confidence, created_at
+        FROM memory_observations
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_recent_interaction_events(limit=60):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT intent, message_text, created_at
+        FROM interaction_events
         ORDER BY id DESC
         LIMIT ?
         """,
@@ -492,6 +574,87 @@ def format_memory_context(user_text):
     return "\n".join(lines)
 
 
+def build_usage_pattern_summary(events):
+    counts = {}
+    for event in events:
+        intent = event["intent"]
+        counts[intent] = counts.get(intent, 0) + 1
+
+    patterns = []
+    if counts.get("fred", 0) >= 3:
+        patterns.append("frequently asks for macro data")
+    if counts.get("watchlist_stats", 0) >= 2:
+        patterns.append("checks market/watchlist performance often")
+    if counts.get("news", 0) >= 2:
+        patterns.append("uses Jeeves for news scanning")
+    if counts.get("none", 0) >= 4:
+        patterns.append("uses Jeeves for broader open-ended conversation")
+
+    return "; ".join(patterns)
+
+
+def consolidate_memory_trends():
+    observations = get_recent_observations(limit=250)
+    if observations:
+        grouped = {}
+        for obs in observations:
+            key = (obs["category"], obs["memory_key"], obs["value"].strip().lower())
+            grouped[key] = grouped.get(key, 0) + 1
+
+        best_by_category = {}
+        for (category, memory_key, normalized_value), count in grouped.items():
+            existing = best_by_category.get(category)
+            if not existing or count > existing["count"]:
+                best_by_category[category] = {
+                    "memory_key": memory_key,
+                    "value": normalized_value,
+                    "count": count,
+                }
+
+        for category, item in best_by_category.items():
+            if item["count"] >= 2 and category in {
+                "preferences",
+                "priorities",
+                "learning_style",
+                "frictions",
+                "taste",
+                "portfolio_profile",
+                "risk_profile",
+            }:
+                upsert_memory(
+                    "long_term",
+                    category,
+                    f"trend_{item['memory_key']}",
+                    item["value"],
+                    source_text="trend_consolidation",
+                    confidence=min(0.95, 0.6 + (item["count"] * 0.08)),
+                )
+                record_memory_embedding(
+                    "long_term",
+                    category,
+                    f"trend_{item['memory_key']}",
+                    item["value"],
+                )
+
+    interaction_events = get_recent_interaction_events(limit=60)
+    usage_summary = build_usage_pattern_summary(interaction_events)
+    if usage_summary:
+        upsert_memory(
+            "working",
+            "usage_patterns",
+            "recent_usage",
+            usage_summary,
+            source_text="interaction_trends",
+            confidence=0.75,
+        )
+        record_memory_embedding(
+            "working",
+            "usage_patterns",
+            "recent_usage",
+            usage_summary,
+        )
+
+
 def extract_memory_updates(text):
     t = text.strip()
     lower = t.lower()
@@ -589,6 +752,12 @@ def process_memory_updates(text):
     updates, gratitude_entry = extract_memory_updates(text)
 
     for update in updates:
+        add_memory_observation(
+            update["category"],
+            update["memory_key"],
+            update["value"],
+            confidence=update["confidence"],
+        )
         upsert_memory(
             update["scope"],
             update["category"],
@@ -606,6 +775,12 @@ def process_memory_updates(text):
 
     if gratitude_entry:
         add_gratitude_entry(gratitude_entry)
+        add_memory_observation(
+            "gratitude",
+            "latest_gratitude",
+            gratitude_entry,
+            confidence=0.9,
+        )
         upsert_memory(
             "working",
             "gratitude",
@@ -621,12 +796,16 @@ def process_memory_updates(text):
             gratitude_entry,
         )
 
+    consolidate_memory_trends()
+
 
 def get_memory_debug_summary():
     return {
         "working_memory": get_memory_items("working", limit=20),
         "long_term_memory": get_memory_items("long_term", limit=20),
         "recent_gratitude": get_recent_gratitude(limit=10),
+        "recent_observations": get_recent_observations(limit=12),
+        "recent_interactions": get_recent_interaction_events(limit=12),
         "semantic_memory_count": len(get_memory_embedding_rows(limit=500)),
     }
 
@@ -1325,8 +1504,7 @@ def debug_memory():
 @app.route("/sms", methods=["POST"])
 def sms():
     msg = request.form.get("Body","")
-    from_number = request.form.get("From","
-        ).replace("whatsapp:","")
+    from_number = request.form.get("From","").replace("whatsapp:","")
 
     resp = MessagingResponse()
 
@@ -1335,6 +1513,7 @@ def sms():
 
     process_memory_updates(msg)
     intent, value = route(msg)
+    log_interaction_event(intent, msg)
 
     if intent == "add":
         if not value:
