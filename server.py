@@ -4,6 +4,8 @@ from twilio.twiml.messaging_response import MessagingResponse
 import os
 import sqlite3
 import requests
+import json
+import re
 from urllib.parse import quote_plus
 
 client = OpenAI()
@@ -46,6 +48,42 @@ Interaction rules:
 
 Objective:
 Help the user make better decisions, faster.
+"""
+
+ROUTER_PROMPT = """
+You are a strict intent router for Jeeves.
+Return ONLY valid JSON.
+
+Supported intents:
+- watchlist_add
+- watchlist_remove
+- watchlist_show
+- macro_series
+- nyt_news
+- none
+
+Rules:
+- Choose macro_series only if the user is asking for a current macro datapoint that maps clearly to a supported FRED series.
+- Choose nyt_news only if the user is asking for current news on a topic.
+- Choose watchlist_add/remove/show only if clearly requested.
+- Choose none if unclear.
+- Do not guess symbols or series beyond the supported mappings.
+
+Supported macro mappings:
+- DGS10 = 10-year treasury yield / 10 year yield / 10-year rate
+- FEDFUNDS = fed funds rate / federal funds rate
+- CPIAUCSL = cpi / inflation / consumer price index
+- UNRATE = unemployment rate / jobless rate
+
+JSON schema:
+{
+  "intent": "watchlist_add|watchlist_remove|watchlist_show|macro_series|nyt_news|none",
+  "watch_item": "string or empty",
+  "series_id": "DGS10|FEDFUNDS|CPIAUCSL|UNRATE or empty",
+  "news_query": "string or empty",
+  "confidence": 0.0,
+  "needs_live_data": true
+}
 """
 
 app = Flask(__name__)
@@ -104,26 +142,44 @@ def init_db():
 
 # ---------------- WATCHLIST ----------------
 
+def normalize_watch_item(item):
+    item = (item or "").strip()
+    item = re.sub(r"\s+", " ", item)
+    return item.upper()
+
+
 def add_to_watchlist(item):
+    item = normalize_watch_item(item)
+    if not item:
+        return False
+
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         "INSERT OR IGNORE INTO watchlist_preferences (key, value) VALUES (?, ?)",
-        (item.upper(), "1")
+        (item, "1")
     )
     conn.commit()
+    changed = cur.rowcount > 0
     conn.close()
+    return changed
 
 
 def remove_from_watchlist(item):
+    item = normalize_watch_item(item)
+    if not item:
+        return False
+
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         "DELETE FROM watchlist_preferences WHERE key = ?",
-        (item.upper(),)
+        (item,)
     )
     conn.commit()
+    changed = cur.rowcount > 0
     conn.close()
+    return changed
 
 
 def get_watchlist():
@@ -196,6 +252,20 @@ def get_fred_latest(series):
     return None
 
 
+def format_macro_result(result):
+    if result is None:
+        return None
+
+    labels = {
+        "DGS10": "10Y Treasury",
+        "FEDFUNDS": "Fed Funds",
+        "CPIAUCSL": "CPI",
+        "UNRATE": "Unemployment"
+    }
+    label = labels.get(result["series"], result["series"])
+    return f"{label}: {result['value']} ({result['date']})"
+
+
 # ---------------- NYT ----------------
 
 def get_nyt_articles(query):
@@ -223,27 +293,133 @@ def get_nyt_articles(query):
         return None
 
 
-# ---------------- ROUTING ----------------
+# ---------------- INTERPRETATION ----------------
 
-def route_macro_query(text):
-    lower = text.lower()
+def simple_router(text):
+    lower = text.lower().strip()
 
-    if "10 year" in lower or "10-year" in lower or "treasury yield" in lower:
-        return get_fred_latest("DGS10")
-    if "fed funds" in lower or "federal funds" in lower:
-        return get_fred_latest("FEDFUNDS")
-    if lower == "cpi" or "inflation" in lower or "consumer price index" in lower:
-        return get_fred_latest("CPIAUCSL")
-    if "unemployment" in lower or "jobless rate" in lower:
-        return get_fred_latest("UNRATE")
+    if any(x in lower for x in ["show watchlist", "what is on my watchlist", "what's on my watchlist", "my watchlist"]):
+        return {"intent": "watchlist_show", "watch_item": "", "series_id": "", "news_query": "", "confidence": 0.95, "needs_live_data": False}
+
+    add_patterns = [
+        r"(?:add|watch|track|put)\s+(.+?)\s+(?:to|on)\s+my watchlist",
+        r"(?:add|watch|track)\s+(.+)$"
+    ]
+    for pattern in add_patterns:
+        m = re.match(pattern, lower)
+        if m:
+            return {"intent": "watchlist_add", "watch_item": m.group(1).strip(), "series_id": "", "news_query": "", "confidence": 0.85, "needs_live_data": False}
+
+    remove_patterns = [
+        r"(?:remove|delete|drop|unwatch)\s+(.+?)\s+(?:from|off)\s+my watchlist",
+        r"(?:remove|delete|drop|unwatch)\s+(.+)$"
+    ]
+    for pattern in remove_patterns:
+        m = re.match(pattern, lower)
+        if m:
+            return {"intent": "watchlist_remove", "watch_item": m.group(1).strip(), "series_id": "", "news_query": "", "confidence": 0.85, "needs_live_data": False}
+
+    macro_map = {
+        "DGS10": ["10 year", "10-year", "10y treasury", "treasury yield", "10 year treasury yield"],
+        "FEDFUNDS": ["fed funds", "federal funds rate"],
+        "CPIAUCSL": ["cpi", "inflation", "consumer price index"],
+        "UNRATE": ["unemployment", "jobless rate", "unemployment rate"]
+    }
+    for series_id, phrases in macro_map.items():
+        if any(p in lower for p in phrases):
+            return {"intent": "macro_series", "watch_item": "", "series_id": series_id, "news_query": "", "confidence": 0.8, "needs_live_data": True}
+
+    if lower.startswith("news "):
+        return {"intent": "nyt_news", "watch_item": "", "series_id": "", "news_query": text[5:].strip(), "confidence": 0.95, "needs_live_data": True}
+
+    if "news on " in lower:
+        return {"intent": "nyt_news", "watch_item": "", "series_id": "", "news_query": text.lower().split("news on ", 1)[1].strip(), "confidence": 0.85, "needs_live_data": True}
+
+    return {"intent": "none", "watch_item": "", "series_id": "", "news_query": "", "confidence": 0.0, "needs_live_data": False}
+
+
+def model_router(text):
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": ROUTER_PROMPT},
+                {"role": "user", "content": text}
+            ]
+        )
+        raw = completion.choices[0].message.content.strip()
+        data = json.loads(raw)
+        return {
+            "intent": data.get("intent", "none"),
+            "watch_item": data.get("watch_item", ""),
+            "series_id": data.get("series_id", ""),
+            "news_query": data.get("news_query", ""),
+            "confidence": float(data.get("confidence", 0.0)),
+            "needs_live_data": bool(data.get("needs_live_data", False))
+        }
+    except Exception:
+        return {"intent": "none", "watch_item": "", "series_id": "", "news_query": "", "confidence": 0.0, "needs_live_data": False}
+
+
+def classify_request(text):
+    rule_result = simple_router(text)
+    if rule_result["intent"] != "none":
+        return rule_result
+
+    model_result = model_router(text)
+    if model_result["confidence"] >= 0.7:
+        return model_result
+
+    return rule_result
+
+
+def handle_routed_request(route):
+    intent = route.get("intent", "none")
+
+    if intent == "watchlist_show":
+        wl = get_watchlist()
+        return "Watchlist is empty" if not wl else "Watchlist: " + ", ".join(wl)
+
+    if intent == "watchlist_add":
+        item = route.get("watch_item", "")
+        normalized = normalize_watch_item(item)
+        if not normalized:
+            return "I don't know."
+        added = add_to_watchlist(normalized)
+        return f"Added {normalized}" if added else f"Already watching {normalized}"
+
+    if intent == "watchlist_remove":
+        item = route.get("watch_item", "")
+        normalized = normalize_watch_item(item)
+        if not normalized:
+            return "I don't know."
+        removed = remove_from_watchlist(normalized)
+        return f"Removed {normalized}" if removed else f"{normalized} was not on the watchlist"
+
+    if intent == "macro_series":
+        series_id = route.get("series_id", "")
+        if not series_id:
+            return "I don't know."
+        result = get_fred_latest(series_id)
+        return format_macro_result(result) if result else f"{series_id}: N/A"
+
+    if intent == "nyt_news":
+        query = route.get("news_query", "").strip()
+        if not query:
+            return "I don't know."
+        result = get_nyt_articles(query)
+        return result if result else "NYT: N/A"
 
     return None
 
 
-def format_macro_result(result):
-    if result is None:
-        return None
-    return f"{result['series']}: {result['value']} ({result['date']})"
+def looks_like_live_data_request(text):
+    lower = text.lower()
+    live_terms = [
+        "yield", "rate", "cpi", "inflation", "unemployment", "latest", "current", "news",
+        "today", "treasury", "fed", "headline", "macro"
+    ]
+    return any(term in lower for term in live_terms)
 
 
 init_db()
@@ -267,31 +443,13 @@ def sms():
     if from_number != MY_NUMBER:
         return ""
 
-    # WATCHLIST
-    if incoming_lower.startswith("add "):
-        item = raw_incoming[4:].strip()
-        add_to_watchlist(item)
-        resp.message(f"Added {item.upper()}")
-        return str(resp)
-
-    if incoming_lower.startswith("remove "):
-        item = raw_incoming[7:].strip()
-        remove_from_watchlist(item)
-        resp.message(f"Removed {item.upper()}")
-        return str(resp)
-
-    if "show watchlist" in incoming_lower:
-        wl = get_watchlist()
-        resp.message("Watchlist is empty" if not wl else "Watchlist: " + ", ".join(wl))
-        return str(resp)
-
     # DEBUG
     if incoming_lower.startswith("debug fred "):
         series = raw_incoming.split(" ")[-1]
         resp.message(str(debug_fred(series))[:1500])
         return str(resp)
 
-    # DIRECT API COMMANDS
+    # DIRECT COMMANDS
     if incoming_lower.startswith("fred "):
         series = raw_incoming.split(" ")[-1]
         result = get_fred_latest(series)
@@ -304,19 +462,19 @@ def sms():
         resp.message(result if result else "NYT: N/A")
         return str(resp)
 
-    # LIGHT INTERPRETATION LAYER
-    macro_result = route_macro_query(raw_incoming)
-    if macro_result is not None:
-        resp.message(format_macro_result(macro_result))
+    # INTERPRETATION LAYER
+    route = classify_request(raw_incoming)
+    routed_response = handle_routed_request(route)
+    if routed_response is not None:
+        resp.message(routed_response)
         return str(resp)
 
-    if "news on " in incoming_lower:
-        query = raw_incoming.lower().split("news on ", 1)[1].strip()
-        result = get_nyt_articles(query)
-        resp.message(result if result else "NYT: N/A")
+    # CAPABILITY GATE FOR LIVE DATA
+    if looks_like_live_data_request(raw_incoming):
+        resp.message("I don't know.")
         return str(resp)
 
-    # AI
+    # AI CHAT
     try:
         add_message("user", raw_incoming)
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + get_recent_messages(10)
