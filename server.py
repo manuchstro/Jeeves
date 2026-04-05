@@ -824,41 +824,34 @@ def get_memory_debug_summary():
         "semantic_memory_count": len(get_memory_embedding_rows(limit=500)),
     }
 
-# ---------------- ALERTS ----------------
+# ---------------- ALERT STORAGE ----------------
 
 def build_event_hash(category, headline):
-    normalized = f"{category.strip().upper()}|{headline.strip().lower()}"
+    normalized = f"{category.upper()}|{headline.strip().lower()}"
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
 
-def normalize_event_text(text):
-    cleaned = (text or "").lower()
-    cleaned = re.sub(r"[^a-z0-9\s]", " ", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned
-
-
 def build_event_fingerprint(candidate):
-    headline = normalize_event_text(candidate.get("headline", ""))
-    snippet = normalize_event_text(candidate.get("snippet", ""))
-    section = normalize_event_text(candidate.get("section", ""))
-    category = candidate.get("category", "").upper()
-
-    if snippet:
-        base = f"{category}|{headline}|{snippet}|{section}"
-    else:
-        base = f"{category}|{headline}|{section}"
-
-    return hashlib.sha256(base.encode("utf-8")).hexdigest()[:16]
+    parts = [
+        candidate.get("category", ""),
+        candidate.get("source", ""),
+        (candidate.get("headline") or "").strip().lower(),
+        (candidate.get("snippet") or "").strip().lower(),
+        (candidate.get("section") or "").strip().lower(),
+        (candidate.get("published_at") or "")[:10],
+    ]
+    joined = " | ".join(parts)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
 
 
 def build_semantic_text(candidate):
-    parts = [
+    return " | ".join([
+        candidate.get("category", ""),
+        candidate.get("source", ""),
         candidate.get("headline", ""),
         candidate.get("snippet", ""),
         candidate.get("section", ""),
-    ]
-    return " | ".join([part.strip() for part in parts if part and part.strip()])
+    ])
 
 
 def count_tier_alerts_today(category, tier):
@@ -870,7 +863,7 @@ def count_tier_alerts_today(category, tier):
         FROM alert_log
         WHERE category = ?
           AND tier = ?
-          AND date(created_at) = date('now')
+          AND DATE(created_at) = DATE('now')
         """,
         (category, tier),
     )
@@ -1362,6 +1355,38 @@ def is_watchlist_stats_question(text):
 
     return has_stats_phrase and has_watchlist_reference
 
+
+def extract_ticker_symbols(text):
+    upper_text = text.upper()
+    raw_tokens = re.findall(r"\b[A-Z]{1,5}\b", upper_text)
+    stopwords = {
+        "WHAT", "WHATS", "IS", "THE", "MY", "PRICE", "STOCK", "QUOTE",
+        "OF", "AND", "FOR", "HOW", "DOING", "TODAY", "AT", "TRADING",
+        "SHARE", "SHARES", "WAS", "ARE",
+    }
+    tickers = []
+
+    for token in raw_tokens:
+        if token in stopwords:
+            continue
+        if token not in tickers:
+            tickers.append(token)
+
+    return tickers
+
+
+def is_ticker_quote_question(text):
+    t = text.lower()
+    quote_terms = [
+        "stock price",
+        "price",
+        "quote",
+        "trading at",
+        "share price",
+        "shares",
+    ]
+    return any(term in t for term in quote_terms) and bool(extract_ticker_symbols(text))
+
 # ---------------- MASSIVE ----------------
 
 def get_massive_watchlist_snapshot(tickers):
@@ -1491,6 +1516,36 @@ def format_watchlist_stats_reply(watchlist, snapshots):
 
     return "Watchlist today: " + "; ".join(parts)
 
+
+def format_ticker_quote_reply(tickers, snapshots):
+    if not tickers:
+        return "I don't know which ticker you mean."
+
+    if snapshots is None:
+        return "Market data is unavailable."
+
+    by_ticker = {item.get("ticker"): item for item in snapshots if item.get("ticker")}
+    parts = []
+    missing = []
+
+    for ticker in tickers:
+        item = by_ticker.get(ticker)
+        if not item:
+            missing.append(ticker)
+            continue
+        price = extract_snapshot_price(item)
+        change = extract_snapshot_change(item)
+        pct = extract_snapshot_pct(item)
+        parts.append(f"{ticker} {format_price(price)} ({format_pct(pct)}, {format_change(change)})")
+
+    if parts and not missing:
+        return "; ".join(parts)
+
+    if parts and missing:
+        return "; ".join(parts) + f". No quote found for: {', '.join(missing)}."
+
+    return f"No quote found for: {', '.join(missing)}."
+
 # ---------------- ROUTER ----------------
 
 def route(text):
@@ -1504,6 +1559,9 @@ def route(text):
 
     if is_watchlist_stats_question(text):
         return ("watchlist_stats", None)
+
+    if is_ticker_quote_question(text):
+        return ("ticker_quote", extract_ticker_symbols(text))
 
     if "watchlist" in t:
         return ("show", None)
@@ -1621,6 +1679,11 @@ def sms():
         if snapshots is None:
             snapshots = get_twelvedata_watchlist_snapshot(wl)
         resp.message(format_watchlist_stats_reply(wl, snapshots))
+        return str(resp)
+
+    if intent == "ticker_quote":
+        snapshots = get_twelvedata_watchlist_snapshot(value)
+        resp.message(format_ticker_quote_reply(value, snapshots))
         return str(resp)
 
     if intent == "fred":
