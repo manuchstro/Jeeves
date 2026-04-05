@@ -17,6 +17,9 @@ app = Flask(__name__)
 MY_NUMBER = os.environ.get("MY_NUMBER")
 DB_PATH = os.environ.get("DB_PATH", "jeeves.db")
 
+FMP_API_KEY = os.environ.get("FMP_API_KEY")
+ALPHA_VANTAGE_API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY")
+
 
 # ---------------- DB ----------------
 
@@ -100,20 +103,32 @@ def get_watchlist():
 # ---------------- STOCK DATA ----------------
 
 def get_stock_price(ticker):
-    api_key = os.environ.get("FMP_API_KEY")
-    url = f"https://financialmodelingprep.com/api/v3/quote/{ticker.upper()}?apikey={api_key}"
+    ticker = ticker.upper()
 
+    # ---- FMP PRIMARY ----
     try:
+        url = f"https://financialmodelingprep.com/api/v3/quote/{ticker}?apikey={FMP_API_KEY}"
         r = requests.get(url)
         data = r.json()
 
-        if not data or "price" not in data[0]:
-            return None
-
-        return data[0]["price"]
-
+        if data and "price" in data[0]:
+            return data[0]["price"]
     except:
-        return None
+        pass
+
+    # ---- ALPHA VANTAGE FALLBACK ----
+    try:
+        url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={ALPHA_VANTAGE_API_KEY}"
+        r = requests.get(url)
+        data = r.json()
+
+        price = data.get("Global Quote", {}).get("05. price")
+        if price:
+            return float(price)
+    except:
+        pass
+
+    return None
 
 
 # ---------------- MEMORY ----------------
@@ -146,7 +161,6 @@ def get_recent_messages(limit=10):
     return messages
 
 
-# Initialize DB
 init_db()
 
 
@@ -169,7 +183,7 @@ def sms():
     if from_number != MY_NUMBER:
         return ""
 
-    # -------- WATCHLIST COMMANDS --------
+    # WATCHLIST
 
     if incoming_lower.startswith("add "):
         item = raw_incoming[4:].strip()
@@ -191,7 +205,7 @@ def sms():
             resp.message("Watchlist: " + ", ".join(wl))
         return str(resp)
 
-    # -------- STOCK PRICE COMMAND --------
+    # STOCK
 
     if incoming_lower.startswith("price "):
         ticker = raw_incoming[6:].strip()
@@ -200,11 +214,11 @@ def sms():
         if price is None:
             resp.message(f"{ticker.upper()}: N/A")
         else:
-            resp.message(f"{ticker.upper()}: ${price}")
+            resp.message(f"{ticker.upper()}: ${round(price, 2)}")
 
         return str(resp)
 
-    # -------- NORMAL AI --------
+    # AI
 
     try:
         add_message("user", raw_incoming)
@@ -222,14 +236,12 @@ def sms():
 
         add_message("assistant", reply)
 
-    except Exception:
+    except:
         reply = "Temporary error."
 
     resp.message(reply)
     return str(resp)
 
-
-# ---------------- RUN ----------------
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
