@@ -2,54 +2,47 @@ from openai import OpenAI
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 import os
-import sqlite3
 import requests
 
 client = OpenAI()
 
-SYSTEM_PROMPT = """
-You are Jeeves, a high-functioning personal assistant.
-
-User profile:
-- UC Berkeley economics student
-- Focus: energy markets, especially uranium
-- Strong interest in geopolitical catalysts and supply dynamics
-- Prefers high-signal, actionable insights over theory
-- Strongly dislikes noise, fluff, and irrelevant macro commentary
-- Values speed, clarity, and decisiveness
-- Comfortable with risk analysis and probabilistic thinking
-- Wants alerts that are timely and meaningful, not obvious or delayed
-
-Behavior:
-- Be direct, efficient, and precise
-- Default to short responses unless depth is clearly needed
-- Prioritize usefulness over completeness
-- Surface implications, not just facts
-- Highlight what actually matters
-- When uncertain, always default to saying "I don't know"
-
-Objective:
-Help the user make better decisions, faster.
-"""
+SYSTEM_PROMPT = """You are Jeeves. Be concise and decision-focused."""
 
 app = Flask(__name__)
 
 MY_NUMBER = os.environ.get("MY_NUMBER")
-DB_PATH = "jeeves.db"
-
 MASSIVE_API_KEY = os.environ.get("MASSIVE_API_KEY")
+FRED_API_KEY = os.environ.get("FRED_API_KEY")
 
+
+# -------- MASSIVE (FIXED) --------
 
 def get_stock_price(ticker):
-    ticker = ticker.upper()
-
     try:
-        url = f"https://api.massive.com/v1/market/quote/{ticker}?apikey={MASSIVE_API_KEY}"
+        url = f"https://api.massive.com/v1/stocks/{ticker.upper()}"
+        headers = {"Authorization": f"Bearer {MASSIVE_API_KEY}"}
+
+        r = requests.get(url, headers=headers)
+        data = r.json()
+
+        return data.get("last")
+    except:
+        return None
+
+
+# -------- FRED TEST --------
+
+def get_fred(series):
+    try:
+        url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series}&api_key={FRED_API_KEY}&file_type=json"
         r = requests.get(url)
         data = r.json()
 
-        return data.get("price")
+        obs = data.get("observations", [])
+        if not obs:
+            return None
 
+        return obs[-1].get("value")
     except:
         return None
 
@@ -66,6 +59,7 @@ def sms():
     if from_number != MY_NUMBER:
         return ""
 
+    # PRICE
     if lower.startswith("price "):
         ticker = raw.split(" ")[-1]
         price = get_stock_price(ticker)
@@ -73,7 +67,19 @@ def sms():
         if price is None:
             resp.message(f"{ticker.upper()}: N/A")
         else:
-            resp.message(f"{ticker.upper()}: ${round(price,2)}")
+            resp.message(f"{ticker.upper()}: ${price}")
+
+        return str(resp)
+
+    # FRED TEST
+    if lower.startswith("fred "):
+        series = raw.split(" ")[-1]
+        val = get_fred(series)
+
+        if val is None:
+            resp.message(f"{series}: N/A")
+        else:
+            resp.message(f"{series}: {val}")
 
         return str(resp)
 
