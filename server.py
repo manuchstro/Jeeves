@@ -6,6 +6,7 @@ import sqlite3
 import requests
 import json
 import re
+import hashlib
 from urllib.parse import quote_plus
 
 client = OpenAI()
@@ -106,6 +107,29 @@ def init_db():
     )
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS alert_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        alert_id TEXT NOT NULL UNIQUE,
+        category TEXT NOT NULL,
+        tier INTEGER NOT NULL,
+        headline TEXT NOT NULL,
+        event_hash TEXT NOT NULL,
+        sent_to_user INTEGER NOT NULL DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS event_hashes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_hash TEXT NOT NULL UNIQUE,
+        category TEXT NOT NULL,
+        headline TEXT NOT NULL,
+        last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -192,6 +216,136 @@ def get_recent_messages(limit=10):
     msgs = [{"role":r["role"],"content":r["content"]} for r in rows]
     msgs.reverse()
     return msgs
+
+# ---------------- ALERTS ----------------
+
+def build_event_hash(category, headline):
+    normalized = f"{category.strip().upper()}|{headline.strip().lower()}"
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def count_tier_alerts_today(category, tier):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM alert_log
+        WHERE category = ?
+          AND tier = ?
+          AND date(created_at) = date('now')
+        """,
+        (category, tier),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row["count"] if row else 0
+
+
+def has_seen_event_hash(event_hash):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM event_hashes WHERE event_hash = ?", (event_hash,))
+    row = cur.fetchone()
+    conn.close()
+    return row is not None
+
+
+def record_event_hash(event_hash, category, headline):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO event_hashes (event_hash, category, headline)
+        VALUES (?, ?, ?)
+        ON CONFLICT(event_hash) DO UPDATE SET
+            last_seen_at = CURRENT_TIMESTAMP
+        """,
+        (event_hash, category, headline),
+    )
+    conn.commit()
+    conn.close()
+
+
+def build_alert_id(category, tier):
+    existing_count = count_tier_alerts_today(category, tier)
+    return f"{category.upper()}{tier}-{existing_count + 1}"
+
+
+def can_send_alert(category, tier, event_hash):
+    if has_seen_event_hash(event_hash):
+        return False, "duplicate_event"
+
+    if tier == 1:
+        return True, "tier_1"
+
+    if tier == 2 and count_tier_alerts_today(category, tier) >= 4:
+        return False, "tier_2_cap_reached"
+
+    return True, "allowed"
+
+
+def log_alert(category, tier, headline, sent_to_user=1):
+    event_hash = build_event_hash(category, headline)
+    allowed, reason = can_send_alert(category, tier, event_hash)
+
+    if not allowed:
+        return {
+            "ok": False,
+            "reason": reason,
+            "event_hash": event_hash,
+        }
+
+    alert_id = build_alert_id(category, tier)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO alert_log (alert_id, category, tier, headline, event_hash, sent_to_user)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (alert_id, category.upper(), tier, headline, event_hash, sent_to_user),
+    )
+    conn.commit()
+    conn.close()
+
+    record_event_hash(event_hash, category.upper(), headline)
+
+    return {
+        "ok": True,
+        "alert_id": alert_id,
+        "event_hash": event_hash,
+        "reason": reason,
+    }
+
+
+def get_alert_debug_summary():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("SELECT COUNT(*) AS count FROM alert_log")
+    alert_count = cur.fetchone()["count"]
+
+    cur.execute("SELECT COUNT(*) AS count FROM event_hashes")
+    hash_count = cur.fetchone()["count"]
+
+    cur.execute(
+        """
+        SELECT alert_id, category, tier, headline, created_at
+        FROM alert_log
+        ORDER BY id DESC
+        LIMIT 10
+        """
+    )
+    recent_alerts = [dict(row) for row in cur.fetchall()]
+    conn.close()
+
+    return {
+        "alert_log_count": alert_count,
+        "event_hash_count": hash_count,
+        "recent_alerts": recent_alerts,
+    }
 
 # ---------------- FRED ----------------
 
@@ -401,11 +555,36 @@ def route(text):
 
 init_db()
 
+@app.route("/", methods=["GET"])
+def home():
+    return "Jeeves is running"
+
+
+@app.route("/debug/alerts", methods=["GET"])
+def debug_alerts():
+    return app.response_class(
+        response=json.dumps(get_alert_debug_summary(), indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/debug/alerts/test", methods=["POST"])
+def debug_alert_test():
+    category = (request.form.get("category") or "P").upper()
+    tier = int(request.form.get("tier") or 2)
+    headline = request.form.get("headline") or "Test alert"
+    result = log_alert(category, tier, headline, sent_to_user=0)
+    return app.response_class(
+        response=json.dumps(result, indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
 @app.route("/sms", methods=["POST"])
 def sms():
     msg = request.form.get("Body","")
-    from_number = request.form.get("From",""
-        ).replace("whatsapp:","")
+    from_number = request.form.get("From","").replace("whatsapp:","")
 
     resp = MessagingResponse()
 
