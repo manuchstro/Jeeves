@@ -59,6 +59,7 @@ Memory rules:
 - Use long-term memory for stable preferences, risk profile, routines, and durable traits.
 - Never pretend memory is certain when it is weak or old.
 - Prefer concise, relevant memory over dumping everything.
+- Retrieve only the memories that matter for the current message.
 """
 
 app = Flask(__name__)
@@ -199,6 +200,19 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         entry_text TEXT NOT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS memory_embeddings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL,
+        category TEXT NOT NULL,
+        memory_key TEXT NOT NULL,
+        embedding_json TEXT NOT NULL,
+        semantic_text TEXT NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(scope, category, memory_key)
     )
     """)
 
@@ -356,9 +370,112 @@ def get_recent_gratitude(limit=7):
     return rows
 
 
-def format_memory_context():
-    working = get_memory_items("working", limit=8)
-    long_term = get_memory_items("long_term", limit=12)
+def build_memory_semantic_text(item):
+    return " | ".join([
+        item.get("scope", ""),
+        item.get("category", ""),
+        item.get("memory_key", ""),
+        item.get("value", ""),
+    ])
+
+
+def record_memory_embedding(scope, category, memory_key, value):
+    semantic_text = build_memory_semantic_text({
+        "scope": scope,
+        "category": category,
+        "memory_key": memory_key,
+        "value": value,
+    })
+    embedding = get_embedding(semantic_text)
+    if not embedding:
+        return
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO memory_embeddings (scope, category, memory_key, embedding_json, semantic_text)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(scope, category, memory_key) DO UPDATE SET
+            embedding_json = excluded.embedding_json,
+            semantic_text = excluded.semantic_text,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (scope, category, memory_key, json.dumps(embedding), semantic_text),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_memory_embedding_rows(limit=100):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT scope, category, memory_key, embedding_json, semantic_text, updated_at
+        FROM memory_embeddings
+        ORDER BY updated_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_relevant_memories(text, limit=8):
+    query_embedding = get_embedding(text)
+    if not query_embedding:
+        working = get_memory_items("working", limit=4)
+        long_term = get_memory_items("long_term", limit=6)
+        return {
+            "working": working,
+            "long_term": long_term,
+        }
+
+    scored = []
+    for row in get_memory_embedding_rows():
+        try:
+            existing_embedding = json.loads(row["embedding_json"])
+        except:
+            continue
+        similarity = cosine_similarity(query_embedding, existing_embedding)
+        scored.append({
+            "scope": row["scope"],
+            "category": row["category"],
+            "memory_key": row["memory_key"],
+            "similarity": similarity,
+        })
+
+    scored.sort(key=lambda item: item["similarity"], reverse=True)
+    picked_keys = {(item["scope"], item["category"], item["memory_key"]) for item in scored[:limit]}
+
+    working = []
+    long_term = []
+    for item in get_memory_items("working", limit=20):
+        key = (item["scope"], item["category"], item["memory_key"])
+        if key in picked_keys:
+            working.append(item)
+    for item in get_memory_items("long_term", limit=30):
+        key = (item["scope"], item["category"], item["memory_key"])
+        if key in picked_keys:
+            long_term.append(item)
+
+    if not working and not long_term:
+        working = get_memory_items("working", limit=4)
+        long_term = get_memory_items("long_term", limit=6)
+
+    return {
+        "working": working[:4],
+        "long_term": long_term[:6],
+    }
+
+
+def format_memory_context(user_text):
+    relevant = get_relevant_memories(user_text, limit=10)
+    working = relevant["working"]
+    long_term = relevant["long_term"]
 
     lines = [MEMORY_INSTRUCTIONS.strip()]
 
@@ -402,6 +519,17 @@ def extract_memory_updates(text):
         (r"\bi hate\s+(.+)", "preferences", "dislike"),
         (r"\bi care about\s+(.+)", "priorities", "care_about"),
         (r"\bfocus on\s+(.+)", "priorities", "focus"),
+        (r"\bi want to learn about\s+(.+)", "learning_style", "learning_targets"),
+        (r"\bi like to learn by\s+(.+)", "learning_style", "learning_method"),
+        (r"\bi learn best by\s+(.+)", "learning_style", "learning_method"),
+        (r"\bi get frustrated by\s+(.+)", "frictions", "frustration"),
+        (r"\bi am frustrated by\s+(.+)", "frictions", "frustration"),
+        (r"\bi like\s+(.+)", "taste", "likes"),
+        (r"\bi love\s+(.+)", "taste", "likes"),
+        (r"\bi enjoy\s+(.+)", "taste", "enjoys"),
+        (r"\bi want\s+(.+)", "goals", "stated_goal"),
+        (r"\bmy portfolio is\s+(.+)", "portfolio_profile", "portfolio_shape"),
+        (r"\bmy holdings are\s+(.+)", "portfolio_profile", "holdings_shape"),
     ]
 
     for pattern, category, memory_key in preference_patterns:
@@ -435,6 +563,25 @@ def extract_memory_updates(text):
             })
             break
 
+    portfolio_patterns = [
+        (r"\bi own\s+(.+)", "portfolio_profile", "holdings"),
+        (r"\bi am heavy in\s+(.+)", "portfolio_profile", "concentration"),
+        (r"\bi am mostly in\s+(.+)", "portfolio_profile", "concentration"),
+        (r"\bi am moving into cash\b", "portfolio_profile", "cash_shift"),
+    ]
+
+    for pattern, category, memory_key in portfolio_patterns:
+        match = re.search(pattern, t, re.IGNORECASE)
+        if match:
+            value = match.group(1).strip() if match.groups() else match.group(0).strip()
+            updates.append({
+                "scope": "long_term",
+                "category": category,
+                "memory_key": memory_key,
+                "value": value,
+                "confidence": 0.8,
+            })
+
     return updates, gratitude_entry
 
 
@@ -450,6 +597,12 @@ def process_memory_updates(text):
             source_text=text,
             confidence=update["confidence"],
         )
+        record_memory_embedding(
+            update["scope"],
+            update["category"],
+            update["memory_key"],
+            update["value"],
+        )
 
     if gratitude_entry:
         add_gratitude_entry(gratitude_entry)
@@ -461,6 +614,12 @@ def process_memory_updates(text):
             source_text=text,
             confidence=0.9,
         )
+        record_memory_embedding(
+            "working",
+            "gratitude",
+            "latest_gratitude",
+            gratitude_entry,
+        )
 
 
 def get_memory_debug_summary():
@@ -468,6 +627,7 @@ def get_memory_debug_summary():
         "working_memory": get_memory_items("working", limit=20),
         "long_term_memory": get_memory_items("long_term", limit=20),
         "recent_gratitude": get_recent_gratitude(limit=10),
+        "semantic_memory_count": len(get_memory_embedding_rows(limit=500)),
     }
 
 # ---------------- ALERTS ----------------
@@ -1165,7 +1325,7 @@ def debug_memory():
 @app.route("/sms", methods=["POST"])
 def sms():
     msg = request.form.get("Body","")
-    from_number = request.form.get("From",""
+    from_number = request.form.get("From","
         ).replace("whatsapp:","")
 
     resp = MessagingResponse()
@@ -1217,7 +1377,7 @@ def sms():
         add_message("user", msg)
         messages = [
             {"role":"system","content":SYSTEM_PROMPT},
-            {"role":"system","content":format_memory_context()},
+            {"role":"system","content":format_memory_context(msg)},
         ] + get_recent_messages()
         completion = client.chat.completions.create(model="gpt-4o-mini",messages=messages)
         reply = completion.choices[0].message.content
