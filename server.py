@@ -27,8 +27,6 @@ Behavior:
 - Surface implications, not just facts
 - Highlight what actually matters
 - When uncertain, always default to saying "I don't know"
-- Maintain a sharp, confident tone without arrogance
-- Keep responses engaging but not verbose
 
 Objective:
 Help the user make better decisions, faster.
@@ -39,28 +37,21 @@ app = Flask(__name__)
 MY_NUMBER = os.environ.get("MY_NUMBER")
 DB_PATH = "jeeves.db"
 
-FMP_API_KEY = os.environ.get("FMP_API_KEY")
-ALPHA_VANTAGE_API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY")
+MASSIVE_API_KEY = os.environ.get("MASSIVE_API_KEY")
 
 
-def get_stock_price_debug(ticker):
-    out = {}
-
-    try:
-        fmp_url = f"https://financialmodelingprep.com/api/v3/quote/{ticker}?apikey={FMP_API_KEY}"
-        fmp = requests.get(fmp_url).json()
-        out["fmp"] = fmp
-    except Exception as e:
-        out["fmp"] = str(e)
+def get_stock_price(ticker):
+    ticker = ticker.upper()
 
     try:
-        av_url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={ALPHA_VANTAGE_API_KEY}"
-        av = requests.get(av_url).json()
-        out["alpha_vantage"] = av
-    except Exception as e:
-        out["alpha_vantage"] = str(e)
+        url = f"https://api.massive.com/v1/market/quote/{ticker}?apikey={MASSIVE_API_KEY}"
+        r = requests.get(url)
+        data = r.json()
 
-    return out
+        return data.get("price")
+
+    except:
+        return None
 
 
 @app.route("/sms", methods=["POST"])
@@ -75,15 +66,15 @@ def sms():
     if from_number != MY_NUMBER:
         return ""
 
-    if lower.startswith("debug price "):
+    if lower.startswith("price "):
         ticker = raw.split(" ")[-1]
-        data = get_stock_price_debug(ticker)
-        resp.message(str(data)[:1500])
-        return str(resp)
+        price = get_stock_price(ticker)
 
-    if lower == "test apis":
-        test = get_stock_price_debug("AAPL")
-        resp.message("API test: " + str(bool(test)))
+        if price is None:
+            resp.message(f"{ticker.upper()}: N/A")
+        else:
+            resp.message(f"{ticker.upper()}: ${round(price,2)}")
+
         return str(resp)
 
     try:
