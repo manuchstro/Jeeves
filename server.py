@@ -15,36 +15,28 @@ MASSIVE_API_KEY = os.environ.get("MASSIVE_API_KEY")
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
 
 
-# -------- MASSIVE (FIXED) --------
+# -------- DEBUG HELPERS --------
 
-def get_stock_price(ticker):
+def debug_massive(ticker):
     try:
         url = f"https://api.massive.com/v1/stocks/{ticker.upper()}"
         headers = {"Authorization": f"Bearer {MASSIVE_API_KEY}"}
-
-        r = requests.get(url, headers=headers)
-        data = r.json()
-
-        return data.get("last")
-    except:
-        return None
+        r = requests.get(url, headers=headers, timeout=10)
+        return {"status": r.status_code, "json": r.json()}
+    except Exception as e:
+        return {"error": str(e)}
 
 
-# -------- FRED TEST --------
-
-def get_fred(series):
+def debug_fred(series):
     try:
-        url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series}&api_key={FRED_API_KEY}&file_type=json"
-        r = requests.get(url)
-        data = r.json()
-
-        obs = data.get("observations", [])
-        if not obs:
-            return None
-
-        return obs[-1].get("value")
-    except:
-        return None
+        url = (
+            "https://api.stlouisfed.org/fred/series/observations"
+            f"?series_id={series}&api_key={FRED_API_KEY}&file_type=json"
+        )
+        r = requests.get(url, timeout=10)
+        return {"status": r.status_code, "json": r.json()}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.route("/sms", methods=["POST"])
@@ -59,30 +51,20 @@ def sms():
     if from_number != MY_NUMBER:
         return ""
 
-    # PRICE
-    if lower.startswith("price "):
+    # ---- DEBUG COMMANDS ----
+    if lower.startswith("debug massive "):
         ticker = raw.split(" ")[-1]
-        price = get_stock_price(ticker)
-
-        if price is None:
-            resp.message(f"{ticker.upper()}: N/A")
-        else:
-            resp.message(f"{ticker.upper()}: ${price}")
-
+        out = debug_massive(ticker)
+        resp.message(str(out)[:1500])
         return str(resp)
 
-    # FRED TEST
-    if lower.startswith("fred "):
+    if lower.startswith("debug fred "):
         series = raw.split(" ")[-1]
-        val = get_fred(series)
-
-        if val is None:
-            resp.message(f"{series}: N/A")
-        else:
-            resp.message(f"{series}: {val}")
-
+        out = debug_fred(series)
+        resp.message(str(out)[:1500])
         return str(resp)
 
+    # ---- NORMAL (no price yet) ----
     try:
         completion = client.chat.completions.create(
             model="gpt-4o-mini",
