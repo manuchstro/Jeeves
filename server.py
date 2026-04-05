@@ -464,7 +464,7 @@ def build_poll_candidates():
         if candidate:
             candidates.append(candidate)
 
-        candidates.extend(get_nyt_headline_candidates("uranium"))
+    candidates.extend(get_nyt_headline_candidates("uranium"))
     return candidates
 
 
