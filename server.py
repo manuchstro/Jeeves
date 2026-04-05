@@ -117,6 +117,20 @@ THEME_KEYWORDS = {
     "kazakhstan": 3,
 }
 
+FEEDBACK_RESPONSES = {
+    "too much noise": "Certainly, noted.",
+    "good alert": "Noted!",
+    "more like this": "Increasing sensitivity.",
+    "late": "Apologies",
+}
+
+STORY_STOPWORDS = {
+    "the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with",
+    "at", "by", "from", "into", "still", "how", "can", "will", "has",
+    "have", "had", "but", "not", "after", "before", "about", "over",
+    "under", "job", "jobs", "says", "say", "new", "latest", "opinion",
+}
+
 # ---------------- DB ----------------
 
 def get_conn():
@@ -233,6 +247,15 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         intent TEXT NOT NULL,
         message_text TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS alert_feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        feedback_type TEXT NOT NULL,
+        source_text TEXT NOT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
     """)
@@ -382,6 +405,37 @@ def log_interaction_event(intent, message_text):
     )
     conn.commit()
     conn.close()
+
+
+def log_alert_feedback(feedback_type, source_text):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO alert_feedback (feedback_type, source_text)
+        VALUES (?, ?)
+        """,
+        (feedback_type, source_text),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_recent_alert_feedback(limit=20):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT feedback_type, source_text, created_at
+        FROM alert_feedback
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
 
 
 def get_memory_items(scope, limit=20):
@@ -821,37 +875,45 @@ def get_memory_debug_summary():
         "recent_gratitude": get_recent_gratitude(limit=30),
         "recent_observations": get_recent_observations(limit=12),
         "recent_interactions": get_recent_interaction_events(limit=30),
+        "recent_alert_feedback": get_recent_alert_feedback(limit=12),
         "semantic_memory_count": len(get_memory_embedding_rows(limit=500)),
     }
 
-# ---------------- ALERT STORAGE ----------------
+# ---------------- ALERTS ----------------
 
 def build_event_hash(category, headline):
-    normalized = f"{category.upper()}|{headline.strip().lower()}"
+    normalized = f"{category.strip().upper()}|{headline.strip().lower()}"
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
 
+def normalize_event_text(text):
+    cleaned = (text or "").lower()
+    cleaned = re.sub(r"[^a-z0-9\s]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
 def build_event_fingerprint(candidate):
-    parts = [
-        candidate.get("category", ""),
-        candidate.get("source", ""),
-        (candidate.get("headline") or "").strip().lower(),
-        (candidate.get("snippet") or "").strip().lower(),
-        (candidate.get("section") or "").strip().lower(),
-        (candidate.get("published_at") or "")[:10],
-    ]
-    joined = " | ".join(parts)
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+    headline = normalize_event_text(candidate.get("headline", ""))
+    snippet = normalize_event_text(candidate.get("snippet", ""))
+    section = normalize_event_text(candidate.get("section", ""))
+    category = candidate.get("category", "").upper()
+
+    if snippet:
+        base = f"{category}|{headline}|{snippet}|{section}"
+    else:
+        base = f"{category}|{headline}|{section}"
+
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()[:16]
 
 
 def build_semantic_text(candidate):
-    return " | ".join([
-        candidate.get("category", ""),
-        candidate.get("source", ""),
+    parts = [
         candidate.get("headline", ""),
         candidate.get("snippet", ""),
         candidate.get("section", ""),
-    ])
+    ]
+    return " | ".join([part.strip() for part in parts if part and part.strip()])
 
 
 def count_tier_alerts_today(category, tier):
@@ -863,7 +925,7 @@ def count_tier_alerts_today(category, tier):
         FROM alert_log
         WHERE category = ?
           AND tier = ?
-          AND DATE(created_at) = DATE('now')
+          AND date(created_at) = date('now')
         """,
         (category, tier),
     )
@@ -1096,6 +1158,51 @@ def get_alert_debug_summary():
         "recent_alerts": recent_alerts,
     }
 
+
+def get_recent_alerts_for_brief(limit=12, include_debug=False):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    if include_debug:
+        cur.execute(
+            """
+            SELECT alert_id, category, tier, headline, sent_to_user, created_at
+            FROM alert_log
+            WHERE DATE(created_at) = DATE('now')
+            ORDER BY tier ASC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT alert_id, category, tier, headline, sent_to_user, created_at
+            FROM alert_log
+            WHERE DATE(created_at) = DATE('now')
+              AND sent_to_user = 1
+            ORDER BY tier ASC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def compose_daily_brief(include_debug=False):
+    alerts = get_recent_alerts_for_brief(limit=12, include_debug=include_debug)
+    if not alerts:
+        return "Nothing to report."
+
+    lines = []
+    for item in alerts[:6]:
+        lines.append(f"{item['category']}{item['tier']}: {item['headline']}")
+
+    return "Daily brief:\n" + "\n".join(lines)
+
 # ---------------- POLLING ----------------
 
 def score_candidate(candidate, watchlist):
@@ -1137,6 +1244,53 @@ def score_candidate(candidate, watchlist):
         "tier": tier,
         "reasons": reasons,
     }
+
+
+def build_story_signature(candidate):
+    text = " ".join([
+        candidate.get("headline", ""),
+        candidate.get("snippet", ""),
+    ]).lower()
+    tokens = re.findall(r"[a-z0-9]+", text)
+    kept = [token for token in tokens if token not in STORY_STOPWORDS and len(token) > 2]
+    kept = kept[:12]
+    return " ".join(sorted(set(kept)))
+
+
+def story_overlap(candidate_a, candidate_b):
+    tokens_a = set(build_story_signature(candidate_a).split())
+    tokens_b = set(build_story_signature(candidate_b).split())
+    if not tokens_a or not tokens_b:
+        return 0.0
+    return len(tokens_a & tokens_b) / max(len(tokens_a), len(tokens_b))
+
+
+def dedupe_candidates(candidates):
+    deduped = []
+    seen_fingerprints = set()
+
+    for candidate in candidates:
+        fingerprint = build_event_fingerprint(candidate)
+        if fingerprint in seen_fingerprints:
+            continue
+
+        duplicate = False
+        for existing in deduped:
+            if candidate.get("category") != existing.get("category"):
+                continue
+            if candidate.get("source") == "FRED" and existing.get("source") == "FRED":
+                continue
+            if story_overlap(candidate, existing) >= 0.6:
+                duplicate = True
+                break
+
+        if duplicate:
+            continue
+
+        seen_fingerprints.add(fingerprint)
+        deduped.append(candidate)
+
+    return deduped
 
 def get_nyt_headline_candidates(query):
     try:
@@ -1194,7 +1348,9 @@ def build_poll_candidates():
             candidates.append(candidate)
 
     candidates.extend(get_nyt_headline_candidates("uranium"))
-    return candidates
+    candidates.extend(get_nyt_headline_candidates("nuclear energy"))
+    candidates.extend(get_nyt_headline_candidates("iran energy"))
+    return dedupe_candidates(candidates)
 
 
 def run_poll_cycle(log_to_alerts=True):
@@ -1356,6 +1512,21 @@ def is_watchlist_stats_question(text):
     return has_stats_phrase and has_watchlist_reference
 
 
+def is_feedback_message(text):
+    return text.strip().lower() in FEEDBACK_RESPONSES
+
+
+def is_daily_brief_question(text):
+    t = text.lower().strip()
+    return t in {
+        "daily brief",
+        "brief me",
+        "what is today's brief",
+        "what's today's brief",
+        "today's brief",
+    }
+
+
 def extract_ticker_symbols(text):
     upper_text = text.upper()
     raw_tokens = re.findall(r"\b[A-Z]{1,5}\b", upper_text)
@@ -1384,7 +1555,11 @@ def is_ticker_quote_question(text):
         "trading at",
         "share price",
         "shares",
+        "performed",
+        "performance",
     ]
+    if "watchlist" in t:
+        return False
     return any(term in t for term in quote_terms) and bool(extract_ticker_symbols(text))
 
 # ---------------- MASSIVE ----------------
@@ -1551,6 +1726,12 @@ def format_ticker_quote_reply(tickers, snapshots):
 def route(text):
     t = text.lower()
 
+    if is_feedback_message(text):
+        return ("alert_feedback", t.strip())
+
+    if is_daily_brief_question(text):
+        return ("daily_brief", None)
+
     if t.startswith("add "):
         return ("add", extract_watchlist_item(text, "add"))
 
@@ -1638,6 +1819,24 @@ def debug_memory():
         mimetype="application/json",
     )
 
+
+@app.route("/debug/daily-brief", methods=["GET"])
+def debug_daily_brief():
+    return app.response_class(
+        response=json.dumps({"brief": compose_daily_brief(include_debug=True)}, indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/tasks/poll", methods=["GET", "POST"])
+def task_poll():
+    return app.response_class(
+        response=json.dumps(run_poll_cycle(log_to_alerts=True), indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
 @app.route("/sms", methods=["POST"])
 def sms():
     msg = request.form.get("Body","")
@@ -1651,6 +1850,19 @@ def sms():
     process_memory_updates(msg)
     intent, value = route(msg)
     log_interaction_event(intent, msg)
+
+    if intent == "alert_feedback":
+        log_alert_feedback(value, msg)
+        upsert_memory(
+            "working",
+            "alert_feedback",
+            "latest_feedback",
+            value,
+            source_text=msg,
+            confidence=0.9,
+        )
+        resp.message(FEEDBACK_RESPONSES[value])
+        return str(resp)
 
     if intent == "add":
         if not value:
@@ -1684,6 +1896,10 @@ def sms():
     if intent == "ticker_quote":
         snapshots = get_twelvedata_watchlist_snapshot(value)
         resp.message(format_ticker_quote_reply(value, snapshots))
+        return str(resp)
+
+    if intent == "daily_brief":
+        resp.message(compose_daily_brief(include_debug=True))
         return str(resp)
 
     if intent == "fred":
