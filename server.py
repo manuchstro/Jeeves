@@ -69,6 +69,7 @@ DB_PATH = os.environ.get("DB_PATH", "jeeves.db")
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
 NYT_API_KEY = os.environ.get("NYT_API_KEY")
 MASSIVE_API_KEY = os.environ.get("MASSIVE_API_KEY")
+TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
 
 FRED_SERIES = {
@@ -401,7 +402,7 @@ def get_memory_items(scope, limit=20):
     return rows
 
 
-def get_recent_gratitude(limit=7):
+def get_recent_gratitude(limit=30):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -435,7 +436,7 @@ def get_recent_observations(limit=200):
     return rows
 
 
-def get_recent_interaction_events(limit=60):
+def get_recent_interaction_events(limit=120):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -789,10 +790,24 @@ def process_memory_updates(text):
             source_text=text,
             confidence=0.9,
         )
+        upsert_memory(
+            "long_term",
+            "gratitude",
+            "gratitude_reflection",
+            gratitude_entry,
+            source_text=text,
+            confidence=0.8,
+        )
         record_memory_embedding(
             "working",
             "gratitude",
             "latest_gratitude",
+            gratitude_entry,
+        )
+        record_memory_embedding(
+            "long_term",
+            "gratitude",
+            "gratitude_reflection",
             gratitude_entry,
         )
 
@@ -803,9 +818,9 @@ def get_memory_debug_summary():
     return {
         "working_memory": get_memory_items("working", limit=20),
         "long_term_memory": get_memory_items("long_term", limit=20),
-        "recent_gratitude": get_recent_gratitude(limit=10),
+        "recent_gratitude": get_recent_gratitude(limit=30),
         "recent_observations": get_recent_observations(limit=12),
-        "recent_interactions": get_recent_interaction_events(limit=12),
+        "recent_interactions": get_recent_interaction_events(limit=30),
         "semantic_memory_count": len(get_memory_embedding_rows(limit=500)),
     }
 
@@ -1368,6 +1383,55 @@ def get_massive_watchlist_snapshot(tickers):
         return None
 
 
+def get_twelvedata_watchlist_snapshot(tickers):
+    if not TWELVEDATA_API_KEY or not tickers:
+        return None
+
+    snapshots = []
+
+    try:
+        for ticker in tickers:
+            url = "https://api.twelvedata.com/quote"
+            params = {
+                "symbol": ticker,
+                "apikey": TWELVEDATA_API_KEY,
+            }
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code != 200:
+                continue
+
+            data = response.json()
+            if data.get("code") or not data.get("symbol"):
+                continue
+
+            try:
+                price = float(data.get("close")) if data.get("close") not in (None, "") else None
+            except:
+                price = None
+
+            try:
+                change = float(data.get("change")) if data.get("change") not in (None, "") else None
+            except:
+                change = None
+
+            try:
+                pct = float(str(data.get("percent_change", "")).replace("%", "")) if data.get("percent_change") not in (None, "") else None
+            except:
+                pct = None
+
+            snapshots.append({
+                "ticker": data.get("symbol"),
+                "price": price,
+                "change": change,
+                "pct": pct,
+                "source": "TWELVEDATA",
+            })
+
+        return snapshots if snapshots else None
+    except:
+        return None
+
+
 def format_price(value):
     if value is None:
         return "N/A"
@@ -1387,10 +1451,25 @@ def format_pct(value):
 
 
 def extract_snapshot_price(snapshot):
+    if snapshot.get("source") == "TWELVEDATA":
+        return snapshot.get("price")
+
     day = snapshot.get("day") or {}
     last_trade = snapshot.get("lastTrade") or {}
     min_bar = snapshot.get("min") or {}
     return day.get("c") or last_trade.get("p") or min_bar.get("c")
+
+
+def extract_snapshot_change(snapshot):
+    if snapshot.get("source") == "TWELVEDATA":
+        return snapshot.get("change")
+    return snapshot.get("todaysChange")
+
+
+def extract_snapshot_pct(snapshot):
+    if snapshot.get("source") == "TWELVEDATA":
+        return snapshot.get("pct")
+    return snapshot.get("todaysChangePerc")
 
 
 def format_watchlist_stats_reply(watchlist, snapshots):
@@ -1406,8 +1485,8 @@ def format_watchlist_stats_reply(watchlist, snapshots):
     for ticker in watchlist:
         item = by_ticker.get(ticker, {})
         price = extract_snapshot_price(item)
-        change = item.get("todaysChange")
-        pct = item.get("todaysChangePerc")
+        change = extract_snapshot_change(item)
+        pct = extract_snapshot_pct(item)
         parts.append(f"{ticker} {format_price(price)} ({format_pct(pct)}, {format_change(change)})")
 
     return "Watchlist today: " + "; ".join(parts)
@@ -1539,6 +1618,8 @@ def sms():
     if intent == "watchlist_stats":
         wl = get_watchlist()
         snapshots = get_massive_watchlist_snapshot(wl)
+        if snapshots is None:
+            snapshots = get_twelvedata_watchlist_snapshot(wl)
         resp.message(format_watchlist_stats_reply(wl, snapshots))
         return str(resp)
 
