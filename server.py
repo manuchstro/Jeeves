@@ -85,6 +85,25 @@ POLL_SERIES = [
     ("E", 2, "UNRATE"),
 ]
 
+THEME_KEYWORDS = {
+    "uranium": 4,
+    "nuclear": 3,
+    "kazatomprom": 4,
+    "ccj": 4,
+    "cameco": 4,
+    "enrichment": 2,
+    "sanction": 2,
+    "sanctions": 2,
+    "strait": 2,
+    "shipping": 2,
+    "energy": 2,
+    "oil": 1,
+    "gas": 1,
+    "iran": 2,
+    "russia": 2,
+    "kazakhstan": 3,
+}
+
 # ---------------- DB ----------------
 
 def get_conn():
@@ -356,6 +375,46 @@ def get_alert_debug_summary():
 
 # ---------------- POLLING ----------------
 
+def score_candidate(candidate, watchlist):
+    headline = candidate["headline"].lower()
+    score = 0
+    reasons = []
+
+    for keyword, points in THEME_KEYWORDS.items():
+        if keyword in headline:
+            score += points
+            reasons.append(f"theme:{keyword}")
+
+    for item in watchlist:
+        if item.lower() in headline:
+            score += 5
+            reasons.append(f"watchlist:{item}")
+
+    if candidate["source"] == "FRED":
+        score += 2
+        reasons.append("source:fred")
+
+        if "cpi" in headline or "10y treasury" in headline or "fed funds" in headline:
+            score += 1
+            reasons.append("macro:core")
+
+    if candidate["source"] == "NYT":
+        score += 1
+        reasons.append("source:nyt")
+
+    if score >= 6:
+        tier = 1
+    elif score >= 3:
+        tier = 2
+    else:
+        tier = 3
+
+    return {
+        "score": score,
+        "tier": tier,
+        "reasons": reasons,
+    }
+
 def get_nyt_headline_candidates(query):
     try:
         q = quote_plus(query)
@@ -405,34 +464,38 @@ def build_poll_candidates():
         if candidate:
             candidates.append(candidate)
 
-    candidates.extend(get_nyt_headline_candidates("uranium"))
+        candidates.extend(get_nyt_headline_candidates("uranium"))
     return candidates
 
 
 def run_poll_cycle(log_to_alerts=True):
     candidates = build_poll_candidates()
+    watchlist = get_watchlist()
     results = []
 
     for candidate in candidates:
+        scoring = score_candidate(candidate, watchlist)
         result = {
             "category": candidate["category"],
-            "tier": candidate["tier"],
+            "tier": scoring["tier"],
             "headline": candidate["headline"],
             "source": candidate["source"],
             "published_at": candidate["published_at"],
+            "score": scoring["score"],
+            "score_reasons": scoring["reasons"],
         }
 
         if log_to_alerts:
             alert_result = log_alert(
                 candidate["category"],
-                candidate["tier"],
+                scoring["tier"],
                 candidate["headline"],
                 sent_to_user=0,
             )
             result["alert_result"] = alert_result
         else:
             event_hash = build_event_hash(candidate["category"], candidate["headline"])
-            allowed, reason = can_send_alert(candidate["category"], candidate["tier"], event_hash)
+            allowed, reason = can_send_alert(candidate["category"], scoring["tier"], event_hash)
             result["alert_result"] = {
                 "ok": allowed,
                 "reason": reason,
