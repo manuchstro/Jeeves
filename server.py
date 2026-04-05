@@ -17,67 +17,14 @@ MY_NUMBER = os.environ.get("MY_NUMBER")
 DB_PATH = os.environ.get("DB_PATH", "jeeves.db")
 
 
+# ---------------- DB ----------------
+
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
-def add_to_watchlist(item):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT OR IGNORE INTO watchlist_preferences (key, value)
-        VALUES (?, ?)
-    """, (item.upper(), "1"))
-    conn.commit()
-    conn.close()
 
-def remove_from_watchlist(item):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        DELETE FROM watchlist_preferences WHERE key = ?
-    """, (item.upper(),))
-    conn.commit()
-    conn.close()
-
-def get_watchlist():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT key FROM watchlist_preferences")
-    rows = cur.fetchall()
-    conn.close()
-    return [row["key"] for row in rows]
-
-def add_to_watchlist(item):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT OR IGNORE INTO watchlist_preferences (key, value)
-        VALUES (?, ?)
-    """, (item.upper(), "1"))
-    conn.commit()
-    conn.close()
-
-
-def remove_from_watchlist(item):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        DELETE FROM watchlist_preferences WHERE key = ?
-    """, (item.upper(),))
-    conn.commit()
-    conn.close()
-
-
-def get_watchlist():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT key FROM watchlist_preferences")
-    rows = cur.fetchall()
-    conn.close()
-    return [row["key"] for row in rows]
-    
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
@@ -116,6 +63,41 @@ def init_db():
     conn.close()
 
 
+# ---------------- WATCHLIST ----------------
+
+def add_to_watchlist(item):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT OR IGNORE INTO watchlist_preferences (key, value) VALUES (?, ?)",
+        (item.upper(), "1")
+    )
+    conn.commit()
+    conn.close()
+
+
+def remove_from_watchlist(item):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM watchlist_preferences WHERE key = ?",
+        (item.upper(),)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_watchlist():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT key FROM watchlist_preferences")
+    rows = cur.fetchall()
+    conn.close()
+    return [row["key"] for row in rows]
+
+
+# ---------------- MEMORY ----------------
+
 def add_message(role, content):
     conn = get_conn()
     cur = conn.cursor()
@@ -144,8 +126,11 @@ def get_recent_messages(limit=10):
     return messages
 
 
+# Initialize DB once
 init_db()
 
+
+# ---------------- ROUTES ----------------
 
 @app.route("/", methods=["GET"])
 def home():
@@ -156,6 +141,7 @@ def home():
 def sms():
     raw_incoming = request.form.get("Body", "").strip()
     incoming_lower = raw_incoming.lower()
+
     from_number = request.form.get("From", "").replace("whatsapp:", "")
 
     resp = MessagingResponse()
@@ -163,26 +149,29 @@ def sms():
     if from_number != MY_NUMBER:
         return ""
 
-    # WATCHLIST COMMANDS
-if incoming_lower.startswith("add "):
-    item = raw_incoming[4:].strip()
-    add_to_watchlist(item)
-    resp.message(f"Added {item.upper()}")
-    return str(resp)
+    # -------- WATCHLIST COMMANDS --------
 
-if incoming_lower.startswith("remove "):
-    item = raw_incoming[7:].strip()
-    remove_from_watchlist(item)
-    resp.message(f"Removed {item.upper()}")
-    return str(resp)
+    if incoming_lower.startswith("add "):
+        item = raw_incoming[4:].strip()
+        add_to_watchlist(item)
+        resp.message(f"Added {item.upper()}")
+        return str(resp)
 
-if "show watchlist" in incoming_lower:
-    wl = get_watchlist()
-    if not wl:
-        resp.message("Watchlist is empty")
-    else:
-        resp.message("Watchlist: " + ", ".join(wl))
-    return str(resp)
+    if incoming_lower.startswith("remove "):
+        item = raw_incoming[7:].strip()
+        remove_from_watchlist(item)
+        resp.message(f"Removed {item.upper()}")
+        return str(resp)
+
+    if "show watchlist" in incoming_lower:
+        wl = get_watchlist()
+        if not wl:
+            resp.message("Watchlist is empty")
+        else:
+            resp.message("Watchlist: " + ", ".join(wl))
+        return str(resp)
+
+    # -------- NORMAL AI --------
 
     try:
         add_message("user", raw_incoming)
@@ -197,14 +186,17 @@ if "show watchlist" in incoming_lower:
         )
 
         reply = completion.choices[0].message.content or "I don't know."
+
         add_message("assistant", reply)
 
-    except Exception:
+    except Exception as e:
         reply = "Temporary error."
 
     resp.message(reply)
     return str(resp)
 
+
+# ---------------- RUN ----------------
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
