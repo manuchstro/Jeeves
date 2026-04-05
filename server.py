@@ -250,6 +250,27 @@ def build_event_hash(category, headline):
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
 
+def normalize_event_text(text):
+    cleaned = (text or "").lower()
+    cleaned = re.sub(r"[^a-z0-9\s]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def build_event_fingerprint(candidate):
+    headline = normalize_event_text(candidate.get("headline", ""))
+    snippet = normalize_event_text(candidate.get("snippet", ""))
+    section = normalize_event_text(candidate.get("section", ""))
+    category = candidate.get("category", "").upper()
+
+    if snippet:
+        base = f"{category}|{headline}|{snippet}|{section}"
+    else:
+        base = f"{category}|{headline}|{section}"
+
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()[:16]
+
+
 def count_tier_alerts_today(category, tier):
     conn = get_conn()
     cur = conn.cursor()
@@ -426,11 +447,15 @@ def get_nyt_headline_candidates(query):
         for doc in docs:
             headline = (doc.get("headline") or {}).get("main")
             pub_date = (doc.get("pub_date") or "")[:19]
+            snippet = doc.get("snippet") or doc.get("abstract") or ""
+            section = doc.get("section_name") or ""
             if headline:
                 candidates.append({
                     "category": "G",
                     "tier": 2,
                     "headline": headline,
+                    "snippet": snippet,
+                    "section": section,
                     "source": "NYT",
                     "published_at": pub_date,
                 })
@@ -451,6 +476,8 @@ def get_fred_candidate(category, tier, series):
         "category": category,
         "tier": tier,
         "headline": headline,
+        "snippet": "",
+        "section": "macro",
         "source": "FRED",
         "published_at": observation["date"],
     }
@@ -479,10 +506,13 @@ def run_poll_cycle(log_to_alerts=True):
             "category": candidate["category"],
             "tier": scoring["tier"],
             "headline": candidate["headline"],
+            "snippet": candidate.get("snippet", ""),
+            "section": candidate.get("section", ""),
             "source": candidate["source"],
             "published_at": candidate["published_at"],
             "score": scoring["score"],
             "score_reasons": scoring["reasons"],
+            "fingerprint": build_event_fingerprint(candidate),
         }
 
         if log_to_alerts:
