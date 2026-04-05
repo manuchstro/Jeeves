@@ -78,6 +78,13 @@ FRED_SERIES = {
     },
 }
 
+POLL_SERIES = [
+    ("E", 2, "CPIAUCSL"),
+    ("E", 2, "DGS10"),
+    ("E", 2, "FEDFUNDS"),
+    ("E", 2, "UNRATE"),
+]
+
 # ---------------- DB ----------------
 
 def get_conn():
@@ -347,6 +354,98 @@ def get_alert_debug_summary():
         "recent_alerts": recent_alerts,
     }
 
+# ---------------- POLLING ----------------
+
+def get_nyt_headline_candidates(query):
+    try:
+        q = quote_plus(query)
+        url = f"https://api.nytimes.com/svc/search/v2/articlesearch.json?q={q}&sort=newest&api-key={NYT_API_KEY}"
+        data = requests.get(url, timeout=10).json()
+        docs = data.get("response", {}).get("docs", [])[:3]
+        candidates = []
+
+        for doc in docs:
+            headline = (doc.get("headline") or {}).get("main")
+            pub_date = (doc.get("pub_date") or "")[:19]
+            if headline:
+                candidates.append({
+                    "category": "G",
+                    "tier": 2,
+                    "headline": headline,
+                    "source": "NYT",
+                    "published_at": pub_date,
+                })
+
+        return candidates
+    except:
+        return []
+
+
+def get_fred_candidate(category, tier, series):
+    observation = get_fred(series)
+    if observation is None:
+        return None
+
+    label = FRED_SERIES.get(series, {}).get("label", series)
+    headline = f"{label}: {observation['value']} ({observation['date']})"
+    return {
+        "category": category,
+        "tier": tier,
+        "headline": headline,
+        "source": "FRED",
+        "published_at": observation["date"],
+    }
+
+
+def build_poll_candidates():
+    candidates = []
+
+    for category, tier, series in POLL_SERIES:
+        candidate = get_fred_candidate(category, tier, series)
+        if candidate:
+            candidates.append(candidate)
+
+    candidates.extend(get_nyt_headline_candidates("uranium"))
+    return candidates
+
+
+def run_poll_cycle(log_to_alerts=True):
+    candidates = build_poll_candidates()
+    results = []
+
+    for candidate in candidates:
+        result = {
+            "category": candidate["category"],
+            "tier": candidate["tier"],
+            "headline": candidate["headline"],
+            "source": candidate["source"],
+            "published_at": candidate["published_at"],
+        }
+
+        if log_to_alerts:
+            alert_result = log_alert(
+                candidate["category"],
+                candidate["tier"],
+                candidate["headline"],
+                sent_to_user=0,
+            )
+            result["alert_result"] = alert_result
+        else:
+            event_hash = build_event_hash(candidate["category"], candidate["headline"])
+            allowed, reason = can_send_alert(candidate["category"], candidate["tier"], event_hash)
+            result["alert_result"] = {
+                "ok": allowed,
+                "reason": reason,
+                "event_hash": event_hash,
+            }
+
+        results.append(result)
+
+    return {
+        "candidate_count": len(candidates),
+        "results": results,
+    }
+
 # ---------------- FRED ----------------
 
 def get_fred(series):
@@ -577,6 +676,24 @@ def debug_alert_test():
     result = log_alert(category, tier, headline, sent_to_user=0)
     return app.response_class(
         response=json.dumps(result, indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/debug/poll/preview", methods=["GET"])
+def debug_poll_preview():
+    return app.response_class(
+        response=json.dumps(run_poll_cycle(log_to_alerts=False), indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/debug/poll/run", methods=["POST"])
+def debug_poll_run():
+    return app.response_class(
+        response=json.dumps(run_poll_cycle(log_to_alerts=True), indent=2),
         status=200,
         mimetype="application/json",
     )
