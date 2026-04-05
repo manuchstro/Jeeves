@@ -5,6 +5,8 @@ from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 import os
 
+SYSTEM_PROMPT = """..."""
+conversation_history[-10:]
 app = Flask(__name__)
 
 MY_NUMBER = os.environ.get("MY_NUMBER")
