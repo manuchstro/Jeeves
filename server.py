@@ -52,6 +52,15 @@ Objective:
 Help the user make better decisions, faster.
 """
 
+MEMORY_INSTRUCTIONS = """
+Memory rules:
+- Use short-term memory for recent back-and-forth only.
+- Use working memory for current state, active concerns, and temporary priorities.
+- Use long-term memory for stable preferences, risk profile, routines, and durable traits.
+- Never pretend memory is certain when it is weak or old.
+- Prefer concise, relevant memory over dumping everything.
+"""
+
 app = Flask(__name__)
 
 MY_NUMBER = os.environ.get("MY_NUMBER")
@@ -170,6 +179,29 @@ def init_db():
     )
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS memory_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL,
+        category TEXT NOT NULL,
+        memory_key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        source_text TEXT,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(scope, category, memory_key)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS gratitude_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entry_text TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -256,6 +288,187 @@ def get_recent_messages(limit=10):
     msgs = [{"role":r["role"],"content":r["content"]} for r in rows]
     msgs.reverse()
     return msgs
+
+# ---------------- MEMORY ----------------
+
+def upsert_memory(scope, category, memory_key, value, source_text=None, confidence=0.6):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO memory_items (scope, category, memory_key, value, source_text, confidence)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(scope, category, memory_key) DO UPDATE SET
+            value = excluded.value,
+            source_text = excluded.source_text,
+            confidence = excluded.confidence,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (scope, category, memory_key, value, source_text, confidence),
+    )
+    conn.commit()
+    conn.close()
+
+
+def add_gratitude_entry(entry_text):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO gratitude_entries (entry_text) VALUES (?)",
+        (entry_text.strip(),),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_memory_items(scope, limit=20):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT scope, category, memory_key, value, confidence, updated_at
+        FROM memory_items
+        WHERE scope = ?
+        ORDER BY updated_at DESC
+        LIMIT ?
+        """,
+        (scope, limit),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_recent_gratitude(limit=7):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT entry_text, created_at
+        FROM gratitude_entries
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def format_memory_context():
+    working = get_memory_items("working", limit=8)
+    long_term = get_memory_items("long_term", limit=12)
+
+    lines = [MEMORY_INSTRUCTIONS.strip()]
+
+    if working:
+        lines.append("Working memory:")
+        for item in working:
+            lines.append(f"- {item['category']}: {item['value']}")
+
+    if long_term:
+        lines.append("Long-term memory:")
+        for item in long_term:
+            lines.append(f"- {item['category']}: {item['value']}")
+
+    return "\n".join(lines)
+
+
+def extract_memory_updates(text):
+    t = text.strip()
+    lower = t.lower()
+    updates = []
+    gratitude_entry = None
+
+    if lower.startswith("grateful for "):
+        gratitude_entry = t[len("grateful for "):].strip()
+    elif "i was grateful for " in lower:
+        gratitude_entry = t[lower.index("i was grateful for ") + len("i was grateful for "):].strip()
+
+    feeling_match = re.search(r"\b(?:i feel|i'm feeling|i am feeling)\s+(.+)", t, re.IGNORECASE)
+    if feeling_match:
+        updates.append({
+            "scope": "working",
+            "category": "emotional_state",
+            "memory_key": "current_state",
+            "value": feeling_match.group(1).strip(),
+            "confidence": 0.7,
+        })
+
+    preference_patterns = [
+        (r"\bi prefer\s+(.+)", "preferences", "preference"),
+        (r"\bi dislike\s+(.+)", "preferences", "dislike"),
+        (r"\bi hate\s+(.+)", "preferences", "dislike"),
+        (r"\bi care about\s+(.+)", "priorities", "care_about"),
+        (r"\bfocus on\s+(.+)", "priorities", "focus"),
+    ]
+
+    for pattern, category, memory_key in preference_patterns:
+        match = re.search(pattern, t, re.IGNORECASE)
+        if match:
+            updates.append({
+                "scope": "long_term",
+                "category": category,
+                "memory_key": memory_key,
+                "value": match.group(1).strip(),
+                "confidence": 0.75,
+            })
+
+    risk_patterns = [
+        r"\bi am risk averse\b",
+        r"\bi am conservative\b",
+        r"\bi take a lot of risk\b",
+        r"\bi am willing to take risk\b",
+        r"\bi am in cash\b",
+    ]
+
+    for pattern in risk_patterns:
+        match = re.search(pattern, lower)
+        if match:
+            updates.append({
+                "scope": "long_term",
+                "category": "risk_profile",
+                "memory_key": "risk_style",
+                "value": match.group(0),
+                "confidence": 0.8,
+            })
+            break
+
+    return updates, gratitude_entry
+
+
+def process_memory_updates(text):
+    updates, gratitude_entry = extract_memory_updates(text)
+
+    for update in updates:
+        upsert_memory(
+            update["scope"],
+            update["category"],
+            update["memory_key"],
+            update["value"],
+            source_text=text,
+            confidence=update["confidence"],
+        )
+
+    if gratitude_entry:
+        add_gratitude_entry(gratitude_entry)
+        upsert_memory(
+            "working",
+            "gratitude",
+            "latest_gratitude",
+            gratitude_entry,
+            source_text=text,
+            confidence=0.9,
+        )
+
+
+def get_memory_debug_summary():
+    return {
+        "working_memory": get_memory_items("working", limit=20),
+        "long_term_memory": get_memory_items("long_term", limit=20),
+        "recent_gratitude": get_recent_gratitude(limit=10),
+    }
 
 # ---------------- ALERTS ----------------
 
@@ -940,16 +1153,27 @@ def debug_poll_run():
         mimetype="application/json",
     )
 
+
+@app.route("/debug/memory", methods=["GET"])
+def debug_memory():
+    return app.response_class(
+        response=json.dumps(get_memory_debug_summary(), indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
 @app.route("/sms", methods=["POST"])
 def sms():
     msg = request.form.get("Body","")
-    from_number = request.form.get("From","").replace("whatsapp:","")
+    from_number = request.form.get("From",""
+        ).replace("whatsapp:","")
 
     resp = MessagingResponse()
 
     if from_number != MY_NUMBER:
         return ""
 
+    process_memory_updates(msg)
     intent, value = route(msg)
 
     if intent == "add":
@@ -991,7 +1215,10 @@ def sms():
 
     try:
         add_message("user", msg)
-        messages = [{"role":"system","content":SYSTEM_PROMPT}] + get_recent_messages()
+        messages = [
+            {"role":"system","content":SYSTEM_PROMPT},
+            {"role":"system","content":format_memory_context()},
+        ] + get_recent_messages()
         completion = client.chat.completions.create(model="gpt-4o-mini",messages=messages)
         reply = completion.choices[0].message.content
         add_message("assistant", reply)
