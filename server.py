@@ -4,6 +4,7 @@ from twilio.twiml.messaging_response import MessagingResponse
 import os
 import sqlite3
 import requests
+from urllib.parse import quote_plus
 
 client = OpenAI()
 
@@ -51,7 +52,6 @@ app = Flask(__name__)
 
 MY_NUMBER = os.environ.get("MY_NUMBER")
 DB_PATH = os.environ.get("DB_PATH", "jeeves.db")
-MASSIVE_API_KEY = os.environ.get("MASSIVE_API_KEY")
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
 NYT_API_KEY = os.environ.get("NYT_API_KEY")
 
@@ -162,49 +162,6 @@ def get_recent_messages(limit=10):
     return msgs
 
 
-# ---------------- MASSIVE ----------------
-
-def massive_snapshot_url(ticker):
-    ticker = ticker.upper()
-    return f"https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}?apiKey={MASSIVE_API_KEY}"
-
-
-def debug_massive(ticker):
-    try:
-        r = requests.get(massive_snapshot_url(ticker), timeout=10)
-        return {
-            "status": r.status_code,
-            "text": r.text[:1200]
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def get_stock_price(ticker):
-    try:
-        r = requests.get(massive_snapshot_url(ticker), timeout=10)
-        data = r.json()
-
-        if data.get("ticker"):
-            day = data.get("day", {})
-            prev = data.get("prevDay", {})
-            last_quote = data.get("lastQuote", {})
-            last_trade = data.get("lastTrade", {})
-
-            if isinstance(day.get("c"), (int, float)):
-                return day.get("c")
-            if isinstance(prev.get("c"), (int, float)):
-                return prev.get("c")
-            if isinstance(last_trade.get("p"), (int, float)):
-                return last_trade.get("p")
-            if isinstance(last_quote.get("P"), (int, float)):
-                return last_quote.get("P")
-    except Exception:
-        pass
-
-    return None
-
-
 # ---------------- FRED ----------------
 
 def debug_fred(series):
@@ -214,10 +171,7 @@ def debug_fred(series):
             f"?series_id={series.upper()}&api_key={FRED_API_KEY}&file_type=json"
         )
         r = requests.get(url, timeout=10)
-        return {
-            "status": r.status_code,
-            "text": r.text[:1200]
-        }
+        return {"status": r.status_code, "text": r.text[:1200]}
     except Exception as e:
         return {"error": str(e)}
 
@@ -240,6 +194,56 @@ def get_fred_latest(series):
         pass
 
     return None
+
+
+# ---------------- NYT ----------------
+
+def get_nyt_articles(query):
+    try:
+        q = quote_plus(query)
+        url = (
+            "https://api.nytimes.com/svc/search/v2/articlesearch.json"
+            f"?q={q}&sort=newest&api-key={NYT_API_KEY}"
+        )
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        docs = data.get("response", {}).get("docs", [])[:3]
+
+        if not docs:
+            return None
+
+        lines = []
+        for doc in docs:
+            headline = doc.get("headline", {}).get("main", "Untitled")
+            pub_date = doc.get("pub_date", "")[:10]
+            lines.append(f"- {headline} ({pub_date})")
+
+        return "NYT:\n" + "\n".join(lines)
+    except Exception:
+        return None
+
+
+# ---------------- ROUTING ----------------
+
+def route_macro_query(text):
+    lower = text.lower()
+
+    if "10 year" in lower or "10-year" in lower or "treasury yield" in lower:
+        return get_fred_latest("DGS10")
+    if "fed funds" in lower or "federal funds" in lower:
+        return get_fred_latest("FEDFUNDS")
+    if lower == "cpi" or "inflation" in lower or "consumer price index" in lower:
+        return get_fred_latest("CPIAUCSL")
+    if "unemployment" in lower or "jobless rate" in lower:
+        return get_fred_latest("UNRATE")
+
+    return None
+
+
+def format_macro_result(result):
+    if result is None:
+        return None
+    return f"{result['series']}: {result['value']} ({result['date']})"
 
 
 init_db()
@@ -282,30 +286,34 @@ def sms():
         return str(resp)
 
     # DEBUG
-    if incoming_lower.startswith("debug massive "):
-        ticker = raw_incoming.split(" ")[-1]
-        resp.message(str(debug_massive(ticker))[:1500])
-        return str(resp)
-
     if incoming_lower.startswith("debug fred "):
         series = raw_incoming.split(" ")[-1]
         resp.message(str(debug_fred(series))[:1500])
         return str(resp)
 
-    # STRUCTURED API TESTS
-    if incoming_lower.startswith("price "):
-        ticker = raw_incoming.split(" ")[-1]
-        price = get_stock_price(ticker)
-        resp.message(f"{ticker.upper()}: N/A" if price is None else f"{ticker.upper()}: ${round(price, 2)}")
-        return str(resp)
-
+    # DIRECT API COMMANDS
     if incoming_lower.startswith("fred "):
         series = raw_incoming.split(" ")[-1]
         result = get_fred_latest(series)
-        if result is None:
-            resp.message(f"{series.upper()}: N/A")
-        else:
-            resp.message(f"{result['series']}: {result['value']} ({result['date']})")
+        resp.message(f"{series.upper()}: N/A" if result is None else format_macro_result(result))
+        return str(resp)
+
+    if incoming_lower.startswith("news "):
+        query = raw_incoming[5:].strip()
+        result = get_nyt_articles(query)
+        resp.message(result if result else "NYT: N/A")
+        return str(resp)
+
+    # LIGHT INTERPRETATION LAYER
+    macro_result = route_macro_query(raw_incoming)
+    if macro_result is not None:
+        resp.message(format_macro_result(macro_result))
+        return str(resp)
+
+    if "news on " in incoming_lower:
+        query = raw_incoming.lower().split("news on ", 1)[1].strip()
+        result = get_nyt_articles(query)
+        resp.message(result if result else "NYT: N/A")
         return str(resp)
 
     # AI
