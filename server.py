@@ -1,3 +1,6 @@
+from openai import OpenAI
+client = OpenAI()
+
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 import os
@@ -20,18 +23,16 @@ def sms():
     if from_number != MY_NUMBER:
         return ""
 
-    if "hello" in incoming:
-        resp.message("System active.")
-    elif "good alert" in incoming:
-        resp.message("Noted.")
-    elif "too much noise" in incoming:
-        resp.message("Reducing noise.")
-    elif "more like this" in incoming:
-        resp.message("Increasing sensitivity.")
-    elif "late" in incoming:
-        resp.message("Improving timing.")
-    else:
-        resp.message("Received.")
+    completion = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[
+        {"role": "system", "content": "You are Jeeves, a concise, intelligent assistant that helps improve financial decision making and alert quality."},
+        {"role": "user", "content": incoming}
+    ]
+)
+
+reply = completion.choices[0].message.content
+resp.message(reply)
 
     return str(resp)
 
