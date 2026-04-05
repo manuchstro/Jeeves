@@ -271,8 +271,6 @@ def format_fred_reply(series, observation, user_text):
 
 def is_watchlist_stats_question(text):
     t = text.lower()
-    if "watchlist" not in t:
-        return False
 
     keywords = [
         "doing",
@@ -288,7 +286,19 @@ def is_watchlist_stats_question(text):
         "how is",
         "how's",
     ]
-    return any(keyword in t for keyword in keywords)
+
+    watchlist_terms = [
+        "watchlist",
+        "my names",
+        "my stocks",
+        "my holdings",
+        "my portfolio",
+    ]
+
+    has_stats_phrase = any(keyword in t for keyword in keywords)
+    has_watchlist_reference = any(term in t for term in watchlist_terms)
+
+    return has_stats_phrase and has_watchlist_reference
 
 # ---------------- MASSIVE ----------------
 
@@ -341,7 +351,7 @@ def format_watchlist_stats_reply(watchlist, snapshots):
         return "Watchlist is empty."
 
     if snapshots is None:
-        return "I don't know."
+        return "Watchlist is loaded, but market data is unavailable."
 
     by_ticker = {item.get("ticker"): item for item in snapshots if item.get("ticker")}
     parts = []
