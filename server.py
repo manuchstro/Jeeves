@@ -9,172 +9,64 @@ client = OpenAI()
 
 SYSTEM_PROMPT = """
 You are Jeeves, a high-functioning personal assistant.
-Be concise, sharp, and decision-focused.
+
+User profile:
+- UC Berkeley economics student
+- Focus: energy markets, especially uranium
+- Strong interest in geopolitical catalysts and supply dynamics
+- Prefers high-signal, actionable insights over theory
+- Strongly dislikes noise, fluff, and irrelevant macro commentary
+- Values speed, clarity, and decisiveness
+- Comfortable with risk analysis and probabilistic thinking
+- Wants alerts that are timely and meaningful, not obvious or delayed
+
+Behavior:
+- Be direct, efficient, and precise
+- Default to short responses unless depth is clearly needed
+- Prioritize usefulness over completeness
+- Surface implications, not just facts
+- Highlight what actually matters
+- When uncertain, always default to saying "I don't know"
+- Maintain a sharp, confident tone without arrogance
+- Keep responses engaging but not verbose
+
+Objective:
+Help the user make better decisions, faster.
 """
 
 app = Flask(__name__)
 
 MY_NUMBER = os.environ.get("MY_NUMBER")
-DB_PATH = os.environ.get("DB_PATH", "jeeves.db")
+DB_PATH = "jeeves.db"
 
 FMP_API_KEY = os.environ.get("FMP_API_KEY")
 ALPHA_VANTAGE_API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY")
 
 
-# ---------------- DB ----------------
+def get_stock_price_debug(ticker):
+    out = {}
 
-def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS conversation_messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS watchlist_preferences (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        key TEXT NOT NULL UNIQUE,
-        value TEXT NOT NULL,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS alert_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        alert_id TEXT,
-        category TEXT,
-        tier INTEGER,
-        headline_hash TEXT,
-        sent_to_user INTEGER DEFAULT 1,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-
-    conn.commit()
-    conn.close()
-
-
-# ---------------- WATCHLIST ----------------
-
-def add_to_watchlist(item):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT OR IGNORE INTO watchlist_preferences (key, value) VALUES (?, ?)",
-        (item.upper(), "1")
-    )
-    conn.commit()
-    conn.close()
-
-
-def remove_from_watchlist(item):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "DELETE FROM watchlist_preferences WHERE key = ?",
-        (item.upper(),)
-    )
-    conn.commit()
-    conn.close()
-
-
-def get_watchlist():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT key FROM watchlist_preferences")
-    rows = cur.fetchall()
-    conn.close()
-    return [row["key"] for row in rows]
-
-
-# ---------------- STOCK DATA ----------------
-
-def get_stock_price(ticker):
-    ticker = ticker.upper()
-
-    # ---- FMP PRIMARY ----
     try:
-        url = f"https://financialmodelingprep.com/api/v3/quote/{ticker}?apikey={FMP_API_KEY}"
-        r = requests.get(url)
-        data = r.json()
+        fmp_url = f"https://financialmodelingprep.com/api/v3/quote/{ticker}?apikey={FMP_API_KEY}"
+        fmp = requests.get(fmp_url).json()
+        out["fmp"] = fmp
+    except Exception as e:
+        out["fmp"] = str(e)
 
-        if data and "price" in data[0]:
-            return data[0]["price"]
-    except:
-        pass
-
-    # ---- ALPHA VANTAGE FALLBACK ----
     try:
-        url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={ALPHA_VANTAGE_API_KEY}"
-        r = requests.get(url)
-        data = r.json()
+        av_url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={ALPHA_VANTAGE_API_KEY}"
+        av = requests.get(av_url).json()
+        out["alpha_vantage"] = av
+    except Exception as e:
+        out["alpha_vantage"] = str(e)
 
-        price = data.get("Global Quote", {}).get("05. price")
-        if price:
-            return float(price)
-    except:
-        pass
-
-    return None
-
-
-# ---------------- MEMORY ----------------
-
-def add_message(role, content):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO conversation_messages (role, content) VALUES (?, ?)",
-        (role, content)
-    )
-    conn.commit()
-    conn.close()
-
-
-def get_recent_messages(limit=10):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT role, content
-        FROM conversation_messages
-        ORDER BY id DESC
-        LIMIT ?
-    """, (limit,))
-    rows = cur.fetchall()
-    conn.close()
-
-    messages = [{"role": row["role"], "content": row["content"]} for row in rows]
-    messages.reverse()
-    return messages
-
-
-init_db()
-
-
-# ---------------- ROUTES ----------------
-
-@app.route("/", methods=["GET"])
-def home():
-    return "Jeeves is running"
+    return out
 
 
 @app.route("/sms", methods=["POST"])
 def sms():
-    raw_incoming = request.form.get("Body", "").strip()
-    incoming_lower = raw_incoming.lower()
+    raw = request.form.get("Body", "").strip()
+    lower = raw.lower()
 
     from_number = request.form.get("From", "").replace("whatsapp:", "")
 
@@ -183,59 +75,26 @@ def sms():
     if from_number != MY_NUMBER:
         return ""
 
-    # WATCHLIST
-
-    if incoming_lower.startswith("add "):
-        item = raw_incoming[4:].strip()
-        add_to_watchlist(item)
-        resp.message(f"Added {item.upper()}")
+    if lower.startswith("debug price "):
+        ticker = raw.split(" ")[-1]
+        data = get_stock_price_debug(ticker)
+        resp.message(str(data)[:1500])
         return str(resp)
 
-    if incoming_lower.startswith("remove "):
-        item = raw_incoming[7:].strip()
-        remove_from_watchlist(item)
-        resp.message(f"Removed {item.upper()}")
+    if lower == "test apis":
+        test = get_stock_price_debug("AAPL")
+        resp.message("API test: " + str(bool(test)))
         return str(resp)
-
-    if "show watchlist" in incoming_lower:
-        wl = get_watchlist()
-        if not wl:
-            resp.message("Watchlist is empty")
-        else:
-            resp.message("Watchlist: " + ", ".join(wl))
-        return str(resp)
-
-    # STOCK
-
-    if incoming_lower.startswith("price "):
-        ticker = raw_incoming[6:].strip()
-        price = get_stock_price(ticker)
-
-        if price is None:
-            resp.message(f"{ticker.upper()}: N/A")
-        else:
-            resp.message(f"{ticker.upper()}: ${round(price, 2)}")
-
-        return str(resp)
-
-    # AI
 
     try:
-        add_message("user", raw_incoming)
-
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT}
-        ] + get_recent_messages(10)
-
         completion = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=messages
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": raw}
+            ]
         )
-
-        reply = completion.choices[0].message.content or "I don't know."
-
-        add_message("assistant", reply)
-
+        reply = completion.choices[0].message.content
     except:
         reply = "Temporary error."
 
