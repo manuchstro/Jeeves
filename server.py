@@ -298,26 +298,29 @@ def get_nyt_articles(query):
 def simple_router(text):
     lower = text.lower().strip()
 
-    if any(x in lower for x in ["show watchlist", "what is on my watchlist", "what's on my watchlist", "my watchlist"]):
-        return {"intent": "watchlist_show", "watch_item": "", "series_id": "", "news_query": "", "confidence": 0.95, "needs_live_data": False}
-
     add_patterns = [
-        r"(?:add|watch|track|put)\s+(.+?)\s+(?:to|on)\s+my watchlist",
-        r"(?:add|watch|track)\s+(.+)$"
+        r"(?:add|watch|track|put)\s+(.+?)\s+(?:to|on)\s+my watchlist$",
+        r"(?:add|watch|track)\s+([a-z0-9 .\\-]+)$"
     ]
     for pattern in add_patterns:
         m = re.match(pattern, lower)
         if m:
-            return {"intent": "watchlist_add", "watch_item": m.group(1).strip(), "series_id": "", "news_query": "", "confidence": 0.85, "needs_live_data": False}
+            return {"intent": "watchlist_add", "watch_item": m.group(1).strip(), "series_id": "", "news_query": "", "confidence": 0.9, "needs_live_data": False}
 
     remove_patterns = [
-        r"(?:remove|delete|drop|unwatch)\s+(.+?)\s+(?:from|off)\s+my watchlist",
-        r"(?:remove|delete|drop|unwatch)\s+(.+)$"
+        r"(?:remove|delete|drop|unwatch)\s+(.+?)\s+(?:from|off)\s+my watchlist$",
+        r"(?:remove|delete|drop|unwatch)\s+([a-z0-9 .\\-]+)$"
     ]
     for pattern in remove_patterns:
         m = re.match(pattern, lower)
         if m:
-            return {"intent": "watchlist_remove", "watch_item": m.group(1).strip(), "series_id": "", "news_query": "", "confidence": 0.85, "needs_live_data": False}
+            return {"intent": "watchlist_remove", "watch_item": m.group(1).strip(), "series_id": "", "news_query": "", "confidence": 0.9, "needs_live_data": False}
+
+    if lower in ["show watchlist", "what is on my watchlist", "what's on my watchlist"]:
+        return {"intent": "watchlist_show", "watch_item": "", "series_id": "", "news_query": "", "confidence": 0.98, "needs_live_data": False}
+
+    if "how often is cpi updated" in lower or "when is cpi updated" in lower:
+        return {"intent": "none", "watch_item": "", "series_id": "", "news_query": "", "confidence": 0.0, "needs_live_data": False}
 
     macro_map = {
         "DGS10": ["10 year", "10-year", "10y treasury", "treasury yield", "10 year treasury yield"],
@@ -360,6 +363,22 @@ def model_router(text):
     except Exception:
         return {"intent": "none", "watch_item": "", "series_id": "", "news_query": "", "confidence": 0.0, "needs_live_data": False}
 
+def handle_macro_meta_question(text):
+    lower = text.lower().strip()
+
+    if "how often is cpi updated" in lower or "when is cpi updated" in lower:
+        return "CPI is typically released monthly."
+
+    if "how often is unemployment updated" in lower or "when is unemployment updated" in lower:
+        return "The unemployment rate is typically released monthly."
+
+    if "how often is fed funds updated" in lower or "when is the fed funds rate updated" in lower:
+        return "Fed Funds updates when the Fed changes the target rate, not on a fixed daily schedule."
+
+    if "how often is the 10 year updated" in lower or "when is the 10 year updated" in lower:
+        return "The 10Y Treasury yield updates on market days."
+
+    return None
 
 def classify_request(text):
     rule_result = simple_router(text)
@@ -462,6 +481,11 @@ def sms():
         resp.message(result if result else "NYT: N/A")
         return str(resp)
 
+  macro_meta = handle_macro_meta_question(raw_incoming)
+if macro_meta is not None:
+    resp.message(macro_meta)
+    return str(resp)
+  
     # INTERPRETATION LAYER
     route = classify_request(raw_incoming)
     routed_response = handle_routed_request(route)
