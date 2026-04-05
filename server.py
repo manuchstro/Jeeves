@@ -56,6 +56,26 @@ MY_NUMBER = os.environ.get("MY_NUMBER")
 DB_PATH = os.environ.get("DB_PATH", "jeeves.db")
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
 NYT_API_KEY = os.environ.get("NYT_API_KEY")
+MASSIVE_API_KEY = os.environ.get("MASSIVE_API_KEY")
+
+FRED_SERIES = {
+    "DGS10": {
+        "label": "10Y Treasury",
+        "frequency": "daily on market days",
+    },
+    "CPIAUCSL": {
+        "label": "CPI",
+        "frequency": "monthly",
+    },
+    "FEDFUNDS": {
+        "label": "Fed Funds",
+        "frequency": "when the Fed changes the target rate",
+    },
+    "UNRATE": {
+        "label": "Unemployment rate",
+        "frequency": "monthly",
+    },
+}
 
 # ---------------- DB ----------------
 
@@ -178,11 +198,15 @@ def get_recent_messages(limit=10):
 def get_fred(series):
     try:
         url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series}&api_key={FRED_API_KEY}&file_type=json"
-        data = requests.get(url).json()
+        data = requests.get(url, timeout=10).json()
         obs = data.get("observations", [])
         for x in reversed(obs):
             if x["value"] != ".":
-                return f"{series}: {x['value']} ({x['date']})"
+                return {
+                    "series": series,
+                    "value": x["value"],
+                    "date": x["date"],
+                }
     except:
         pass
     return None
@@ -193,13 +217,143 @@ def get_news(query):
     try:
         q = quote_plus(query)
         url = f"https://api.nytimes.com/svc/search/v2/articlesearch.json?q={q}&sort=newest&api-key={NYT_API_KEY}"
-        data = requests.get(url).json()
+        data = requests.get(url, timeout=10).json()
         docs = data.get("response",{}).get("docs",[])[:3]
         if not docs:
             return None
         return "\n".join(["- "+d["headline"]["main"] for d in docs])
     except:
         return None
+
+# ---------------- INTERPRETATION ----------------
+
+def is_frequency_question(text):
+    t = text.lower()
+    return "how often" in t or "when is" in t or "when does" in t or "updated" in t or "released" in t
+
+
+def format_month(date_text):
+    parts = date_text.split("-")
+    if len(parts) != 3:
+        return date_text
+    year, month, _ = parts
+    months = {
+        "01": "January",
+        "02": "February",
+        "03": "March",
+        "04": "April",
+        "05": "May",
+        "06": "June",
+        "07": "July",
+        "08": "August",
+        "09": "September",
+        "10": "October",
+        "11": "November",
+        "12": "December",
+    }
+    return f"{months.get(month, month)} {year}"
+
+
+def format_fred_reply(series, observation, user_text):
+    meta = FRED_SERIES.get(series, {"label": series, "frequency": "unknown"})
+    label = meta["label"]
+
+    if observation is None:
+        return "I don't know"
+
+    latest = f"Latest reading: {observation['value']} for {format_month(observation['date'])}."
+
+    if is_frequency_question(user_text):
+        return f"{label} is usually updated {meta['frequency']}. {latest}"
+
+    return f"{label}: {observation['value']} ({observation['date']})"
+
+
+def is_watchlist_stats_question(text):
+    t = text.lower()
+    if "watchlist" not in t:
+        return False
+
+    keywords = [
+        "doing",
+        "performance",
+        "performing",
+        "stats",
+        "today",
+        "moves",
+        "movers",
+        "up",
+        "down",
+        "what happened",
+        "how is",
+        "how's",
+    ]
+    return any(keyword in t for keyword in keywords)
+
+# ---------------- MASSIVE ----------------
+
+def get_massive_watchlist_snapshot(tickers):
+    if not MASSIVE_API_KEY or not tickers:
+        return None
+
+    try:
+        url = "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
+        params = {
+            "tickers": ",".join(tickers),
+            "apiKey": MASSIVE_API_KEY,
+        }
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        return data.get("tickers", [])
+    except:
+        return None
+
+
+def format_price(value):
+    if value is None:
+        return "N/A"
+    return f"{value:.2f}"
+
+
+def format_change(value):
+    if value is None:
+        return "N/A"
+    return f"{value:+.2f}"
+
+
+def format_pct(value):
+    if value is None:
+        return "N/A"
+    return f"{value:+.2f}%"
+
+
+def extract_snapshot_price(snapshot):
+    day = snapshot.get("day") or {}
+    last_trade = snapshot.get("lastTrade") or {}
+    min_bar = snapshot.get("min") or {}
+    return day.get("c") or last_trade.get("p") or min_bar.get("c")
+
+
+def format_watchlist_stats_reply(watchlist, snapshots):
+    if not watchlist:
+        return "Watchlist is empty."
+
+    if snapshots is None:
+        return "I don't know."
+
+    by_ticker = {item.get("ticker"): item for item in snapshots if item.get("ticker")}
+    parts = []
+
+    for ticker in watchlist:
+        item = by_ticker.get(ticker, {})
+        price = extract_snapshot_price(item)
+        change = item.get("todaysChange")
+        pct = item.get("todaysChangePerc")
+        parts.append(f"{ticker} {format_price(price)} ({format_pct(pct)}, {format_change(change)})")
+
+    return "Watchlist today: " + "; ".join(parts)
 
 # ---------------- ROUTER ----------------
 
@@ -212,11 +366,20 @@ def route(text):
     if t.startswith("remove "):
         return ("remove", extract_watchlist_item(text, "remove"))
 
+    if is_watchlist_stats_question(text):
+        return ("watchlist_stats", None)
+
     if "watchlist" in t:
         return ("show", None)
 
     if "10 year" in t or "treasury" in t:
         return ("fred","DGS10")
+
+    if "fed funds" in t or "federal funds" in t:
+        return ("fred","FEDFUNDS")
+
+    if "unemployment" in t or "jobless" in t:
+        return ("fred","UNRATE")
 
     if "inflation" in t or "cpi" in t:
         return ("fred","CPIAUCSL")
@@ -262,9 +425,15 @@ def sms():
         resp.message(f"Watchlist: {', '.join(wl)}" if wl else "Watchlist is empty.")
         return str(resp)
 
+    if intent == "watchlist_stats":
+        wl = get_watchlist()
+        snapshots = get_massive_watchlist_snapshot(wl)
+        resp.message(format_watchlist_stats_reply(wl, snapshots))
+        return str(resp)
+
     if intent == "fred":
         out = get_fred(value)
-        resp.message(out if out else "N/A")
+        resp.message(format_fred_reply(value, out, msg))
         return str(resp)
 
     if intent == "news":
