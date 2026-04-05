@@ -7,6 +7,7 @@ import requests
 import json
 import re
 import hashlib
+import math
 from urllib.parse import quote_plus
 
 client = OpenAI()
@@ -58,6 +59,7 @@ DB_PATH = os.environ.get("DB_PATH", "jeeves.db")
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
 NYT_API_KEY = os.environ.get("NYT_API_KEY")
 MASSIVE_API_KEY = os.environ.get("MASSIVE_API_KEY")
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
 
 FRED_SERIES = {
     "DGS10": {
@@ -153,6 +155,18 @@ def init_db():
         category TEXT NOT NULL,
         headline TEXT NOT NULL,
         last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS event_embeddings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_hash TEXT NOT NULL UNIQUE,
+        category TEXT NOT NULL,
+        headline TEXT NOT NULL,
+        semantic_text TEXT NOT NULL,
+        embedding_json TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
     """)
 
@@ -271,6 +285,15 @@ def build_event_fingerprint(candidate):
     return hashlib.sha256(base.encode("utf-8")).hexdigest()[:16]
 
 
+def build_semantic_text(candidate):
+    parts = [
+        candidate.get("headline", ""),
+        candidate.get("snippet", ""),
+        candidate.get("section", ""),
+    ]
+    return " | ".join([part.strip() for part in parts if part and part.strip()])
+
+
 def count_tier_alerts_today(category, tier):
     conn = get_conn()
     cur = conn.cursor()
@@ -298,6 +321,24 @@ def has_seen_event_hash(event_hash):
     return row is not None
 
 
+def get_recent_event_embeddings(category, limit=20):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT event_hash, headline, semantic_text, embedding_json, created_at
+        FROM event_embeddings
+        WHERE category = ?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (category, limit),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
 def record_event_hash(event_hash, category, headline):
     conn = get_conn()
     cur = conn.cursor()
@@ -314,33 +355,125 @@ def record_event_hash(event_hash, category, headline):
     conn.close()
 
 
+def record_event_embedding(event_hash, category, headline, semantic_text, embedding):
+    if not semantic_text or not embedding:
+        return
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO event_embeddings (event_hash, category, headline, semantic_text, embedding_json)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(event_hash) DO NOTHING
+        """,
+        (event_hash, category, headline, semantic_text, json.dumps(embedding)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_embedding(text):
+    if not text:
+        return None
+
+    try:
+        response = client.embeddings.create(
+            model=EMBEDDING_MODEL,
+            input=text,
+        )
+        return response.data[0].embedding
+    except:
+        return None
+
+
+def cosine_similarity(vec_a, vec_b):
+    if not vec_a or not vec_b or len(vec_a) != len(vec_b):
+        return 0.0
+
+    dot = sum(a * b for a, b in zip(vec_a, vec_b))
+    norm_a = math.sqrt(sum(a * a for a in vec_a))
+    norm_b = math.sqrt(sum(b * b for b in vec_b))
+
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+
+    return dot / (norm_a * norm_b)
+
+
+def find_semantic_duplicate(category, candidate, threshold=0.90):
+    if candidate.get("source") == "FRED":
+        return None
+
+    semantic_text = build_semantic_text(candidate)
+    candidate_embedding = get_embedding(semantic_text)
+    if not candidate_embedding:
+        return None
+
+    best_match = None
+    best_score = 0.0
+
+    for row in get_recent_event_embeddings(category):
+        try:
+            existing_embedding = json.loads(row["embedding_json"])
+        except:
+            continue
+
+        similarity = cosine_similarity(candidate_embedding, existing_embedding)
+        if similarity > best_score:
+            best_score = similarity
+            best_match = row
+
+    if best_match and best_score >= threshold:
+        return {
+            "match": best_match,
+            "similarity": round(best_score, 4),
+            "embedding": candidate_embedding,
+            "semantic_text": semantic_text,
+        }
+
+    return {
+        "match": None,
+        "similarity": round(best_score, 4),
+        "embedding": candidate_embedding,
+        "semantic_text": semantic_text,
+    }
+
+
 def build_alert_id(category, tier):
     existing_count = count_tier_alerts_today(category, tier)
     return f"{category.upper()}{tier}-{existing_count + 1}"
 
 
-def can_send_alert(category, tier, event_hash):
+def can_send_alert(category, tier, event_hash, candidate=None):
     if has_seen_event_hash(event_hash):
-        return False, "duplicate_event"
+        return False, "duplicate_event", None
+
+    semantic_result = None
+    if candidate is not None:
+        semantic_result = find_semantic_duplicate(category, candidate)
+        if semantic_result and semantic_result.get("match") is not None:
+            return False, "semantic_duplicate", semantic_result
 
     if tier == 1:
-        return True, "tier_1"
+        return True, "tier_1", semantic_result
 
     if tier == 2 and count_tier_alerts_today(category, tier) >= 4:
-        return False, "tier_2_cap_reached"
+        return False, "tier_2_cap_reached", semantic_result
 
-    return True, "allowed"
+    return True, "allowed", semantic_result
 
 
-def log_alert(category, tier, headline, sent_to_user=1):
+def log_alert(category, tier, headline, sent_to_user=1, candidate=None):
     event_hash = build_event_hash(category, headline)
-    allowed, reason = can_send_alert(category, tier, event_hash)
+    allowed, reason, semantic_result = can_send_alert(category, tier, event_hash, candidate=candidate)
 
     if not allowed:
         return {
             "ok": False,
             "reason": reason,
             "event_hash": event_hash,
+            "semantic_similarity": semantic_result["similarity"] if semantic_result else None,
         }
 
     alert_id = build_alert_id(category, tier)
@@ -358,12 +491,21 @@ def log_alert(category, tier, headline, sent_to_user=1):
     conn.close()
 
     record_event_hash(event_hash, category.upper(), headline)
+    if candidate is not None and semantic_result:
+        record_event_embedding(
+            event_hash,
+            category.upper(),
+            headline,
+            semantic_result.get("semantic_text", ""),
+            semantic_result.get("embedding"),
+        )
 
     return {
         "ok": True,
         "alert_id": alert_id,
         "event_hash": event_hash,
         "reason": reason,
+        "semantic_similarity": semantic_result["similarity"] if semantic_result else None,
     }
 
 
@@ -521,15 +663,22 @@ def run_poll_cycle(log_to_alerts=True):
                 scoring["tier"],
                 candidate["headline"],
                 sent_to_user=0,
+                candidate=candidate,
             )
             result["alert_result"] = alert_result
         else:
             event_hash = build_event_hash(candidate["category"], candidate["headline"])
-            allowed, reason = can_send_alert(candidate["category"], scoring["tier"], event_hash)
+            allowed, reason, semantic_result = can_send_alert(
+                candidate["category"],
+                scoring["tier"],
+                event_hash,
+                candidate=candidate,
+            )
             result["alert_result"] = {
                 "ok": allowed,
                 "reason": reason,
                 "event_hash": event_hash,
+                "semantic_similarity": semantic_result["similarity"] if semantic_result else None,
             }
 
         results.append(result)
