@@ -2116,6 +2116,38 @@ def compose_daily_brief(include_debug=False):
     return "\n".join(lines)
 
 
+def backfill_event_context_for_reference(match):
+    if not match:
+        return None
+
+    watchlist = get_watchlist()
+    target_hash = match.get("event_hash")
+    target_headline = (match.get("headline") or "").strip().lower()
+
+    for candidate in build_poll_candidates():
+        event_hash = build_event_hash(candidate["category"], candidate["headline"])
+        if event_hash != target_hash and candidate["headline"].strip().lower() != target_headline:
+            continue
+
+        scoring = score_candidate(candidate, watchlist)
+        enriched_candidate = {
+            **candidate,
+            "score": scoring["score"],
+            "selection_reasons": scoring["reasons"],
+            "assigned_tier": scoring["tier"],
+        }
+        upsert_event_context(
+            match.get("alert_id"),
+            event_hash,
+            candidate["category"],
+            scoring["tier"],
+            enriched_candidate,
+        )
+        return get_event_context(event_hash=event_hash)
+
+    return None
+
+
 def expand_brief_event(reference_code):
     resolved = resolve_brief_reference(reference_code)
     if resolved["status"] == "missing":
@@ -2126,6 +2158,8 @@ def expand_brief_event(reference_code):
 
     match = resolved["match"]
     context = get_event_context(event_hash=match["event_hash"])
+    if not context:
+        context = backfill_event_context_for_reference(match)
     if not context:
         return "I don't have enough stored context for that item."
 
