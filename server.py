@@ -9,6 +9,7 @@ import re
 import hashlib
 import math
 import base64
+import random
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from urllib.parse import quote_plus
@@ -42,7 +43,7 @@ Behavior:
 - When uncertain, always default to saying "I don't know"
 - Maintain a sharp, confident tone without arrogance
 - Keep responses engaging but not verbose
-- Avoid Sycophantic behaviour at all costs
+- Avoid being Sycophantic at all costs
 - You are a genuine PERSONAL AI assistant
 
 Interaction rules:
@@ -139,9 +140,9 @@ FEEDBACK_RESPONSES = {
 }
 
 NEWS_QUERIES = [
-    ("uranium", "P"),
-    ("nuclear energy", "P"),
-    ("kazakhstan uranium", "P"),
+    ("uranium", "G"),
+    ("nuclear energy", "E"),
+    ("kazakhstan uranium", "G"),
     ("iran energy", "G"),
     ("energy sanctions", "G"),
     ("fed inflation", "E"),
@@ -149,6 +150,16 @@ NEWS_QUERIES = [
     ("bay area earthquake", "L"),
     ("baja california sur", "L"),
 ]
+
+PROTECTED_MEMORY_CATEGORIES = {
+    "core_traits",
+    "defining_moments",
+    "major_successes",
+    "major_failures",
+    "deep_preferences",
+    "long_term_frictions",
+    "behavior_trends",
+}
 
 STORY_STOPWORDS = {
     "the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with",
@@ -296,6 +307,28 @@ def init_db():
     )
     """)
 
+    for statement in [
+        "ALTER TABLE portfolio_holdings ADD COLUMN source_type TEXT DEFAULT 'manual'",
+        "ALTER TABLE portfolio_holdings ADD COLUMN trusted INTEGER DEFAULT 0",
+        "ALTER TABLE portfolio_holdings ADD COLUMN effective_date TEXT",
+    ]:
+        try:
+            cur.execute(statement)
+        except sqlite3.OperationalError:
+            pass
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_type TEXT NOT NULL,
+        trusted INTEGER NOT NULL DEFAULT 0,
+        effective_date TEXT,
+        holdings_json TEXT NOT NULL,
+        summary_json TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS outbound_messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -407,7 +440,7 @@ def extract_symbols_from_text(text):
     return symbols
 
 
-def upsert_portfolio_symbols(symbols, source_text=None):
+def upsert_portfolio_symbols(symbols, source_text=None, source_type="manual", trusted=False, effective_date=None):
     if not symbols:
         return
 
@@ -416,36 +449,128 @@ def upsert_portfolio_symbols(symbols, source_text=None):
     for index, symbol in enumerate(symbols, start=1):
         cur.execute(
             """
-            INSERT INTO portfolio_holdings (symbol, conviction_rank, note)
-            VALUES (?, ?, ?)
+            INSERT INTO portfolio_holdings (symbol, conviction_rank, note, source_type, trusted, effective_date)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(symbol) DO UPDATE SET
                 conviction_rank = COALESCE(portfolio_holdings.conviction_rank, excluded.conviction_rank),
-                note = COALESCE(portfolio_holdings.note, excluded.note),
+                note = CASE
+                    WHEN excluded.trusted = 1 THEN COALESCE(excluded.note, portfolio_holdings.note)
+                    ELSE COALESCE(portfolio_holdings.note, excluded.note)
+                END,
+                source_type = CASE
+                    WHEN excluded.trusted = 1 THEN excluded.source_type
+                    ELSE portfolio_holdings.source_type
+                END,
+                trusted = CASE
+                    WHEN excluded.trusted = 1 THEN excluded.trusted
+                    ELSE portfolio_holdings.trusted
+                END,
+                effective_date = COALESCE(excluded.effective_date, portfolio_holdings.effective_date),
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (symbol, index, source_text),
+            (symbol, index, source_text, source_type, 1 if trusted else 0, effective_date),
         )
     conn.commit()
     conn.close()
 
 
-def get_portfolio_holdings(limit=8):
+def record_portfolio_snapshot(symbols, source_type="manual", trusted=False, effective_date=None, summary=None):
+    if not symbols:
+        return
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT symbol, conviction_rank, note, updated_at
-        FROM portfolio_holdings
-        ORDER BY
-            CASE WHEN conviction_rank IS NULL THEN 999 ELSE conviction_rank END ASC,
-            symbol ASC
-        LIMIT ?
+        INSERT INTO portfolio_snapshots (source_type, trusted, effective_date, holdings_json, summary_json)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (limit,),
+        (
+            source_type,
+            1 if trusted else 0,
+            effective_date,
+            json.dumps(symbols),
+            json.dumps(summary or {}),
+        ),
     )
+    conn.commit()
+    conn.close()
+
+
+def replace_trusted_portfolio_snapshot(symbols, effective_date=None, summary=None, source_type="gmail"):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM portfolio_holdings WHERE trusted = 1")
+    conn.commit()
+    conn.close()
+
+    upsert_portfolio_symbols(
+        symbols,
+        source_text=json.dumps(summary or {}),
+        source_type=source_type,
+        trusted=True,
+        effective_date=effective_date,
+    )
+    record_portfolio_snapshot(
+        symbols,
+        source_type=source_type,
+        trusted=True,
+        effective_date=effective_date,
+        summary=summary,
+    )
+
+
+def get_portfolio_holdings(limit=8, trusted_only=False):
+    conn = get_conn()
+    cur = conn.cursor()
+    if trusted_only:
+        cur.execute(
+            """
+            SELECT symbol, conviction_rank, note, updated_at, source_type, trusted, effective_date
+            FROM portfolio_holdings
+            WHERE trusted = 1
+            ORDER BY
+                CASE WHEN conviction_rank IS NULL THEN 999 ELSE conviction_rank END ASC,
+                symbol ASC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT symbol, conviction_rank, note, updated_at, source_type, trusted, effective_date
+            FROM portfolio_holdings
+            ORDER BY
+                CASE WHEN conviction_rank IS NULL THEN 999 ELSE conviction_rank END ASC,
+                symbol ASC
+            LIMIT ?
+            """,
+            (limit,),
+        )
     rows = [dict(row) for row in cur.fetchall()]
     conn.close()
     return rows
+
+
+def get_trusted_portfolio_symbols(limit=10):
+    return [item["symbol"] for item in get_portfolio_holdings(limit=limit, trusted_only=True)]
+
+
+def get_latest_trusted_portfolio_snapshot():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT source_type, trusted, effective_date, holdings_json, summary_json, created_at
+        FROM portfolio_snapshots
+        WHERE trusted = 1
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    )
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 # ---------------- MEMORY ----------------
 
@@ -870,6 +995,62 @@ def build_usage_pattern_summary(events):
     return "; ".join(patterns)
 
 
+def is_protected_memory_item(item):
+    return item.get("category") in PROTECTED_MEMORY_CATEGORIES
+
+
+def apply_memory_decay():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, category, confidence, julianday('now') - julianday(updated_at) AS age_days
+        FROM memory_items
+        WHERE scope = 'long_term'
+        """
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+
+    for row in rows:
+        if row["category"] in PROTECTED_MEMORY_CATEGORIES:
+            continue
+        age_days = row["age_days"] or 0
+        if age_days < 7:
+            continue
+        random_factor = 1 + random.uniform(-0.01, 0.01)
+        decay_step = 0.015 * random_factor
+        new_confidence = max(0.25, float(row["confidence"]) - decay_step)
+        if new_confidence < float(row["confidence"]):
+            cur.execute(
+                """
+                UPDATE memory_items
+                SET confidence = ?, updated_at = updated_at
+                WHERE id = ?
+                """,
+                (round(new_confidence, 4), row["id"]),
+            )
+
+    conn.commit()
+    conn.close()
+
+
+def upsert_trend_memory(memory_key, value, confidence=0.78):
+    upsert_memory(
+        "long_term",
+        "behavior_trends",
+        memory_key,
+        value,
+        source_text="trend_consolidation",
+        confidence=confidence,
+    )
+    record_memory_embedding(
+        "long_term",
+        "behavior_trends",
+        memory_key,
+        value,
+    )
+
+
 def consolidate_memory_trends():
     observations = get_recent_observations(limit=250)
     if observations:
@@ -913,6 +1094,38 @@ def consolidate_memory_trends():
                     item["value"],
                 )
 
+            if item["count"] >= 3 and category == "preferences":
+                upsert_memory(
+                    "long_term",
+                    "deep_preferences",
+                    f"core_{item['memory_key']}",
+                    item["value"],
+                    source_text="trend_consolidation",
+                    confidence=min(0.97, 0.7 + (item["count"] * 0.06)),
+                )
+                record_memory_embedding(
+                    "long_term",
+                    "deep_preferences",
+                    f"core_{item['memory_key']}",
+                    item["value"],
+                )
+
+            if item["count"] >= 3 and category == "frictions":
+                upsert_memory(
+                    "long_term",
+                    "long_term_frictions",
+                    f"core_{item['memory_key']}",
+                    item["value"],
+                    source_text="trend_consolidation",
+                    confidence=min(0.97, 0.7 + (item["count"] * 0.06)),
+                )
+                record_memory_embedding(
+                    "long_term",
+                    "long_term_frictions",
+                    f"core_{item['memory_key']}",
+                    item["value"],
+                )
+
     interaction_events = get_recent_interaction_events(limit=60)
     usage_summary = build_usage_pattern_summary(interaction_events)
     if usage_summary:
@@ -930,6 +1143,32 @@ def consolidate_memory_trends():
             "recent_usage",
             usage_summary,
         )
+
+    texts = " ".join(event["message_text"].lower() for event in interaction_events)
+    if texts:
+        recurrent_focus = []
+        if any(term in texts for term in ["uranium", "nuclear", "ccj", "urnm", "uuuu"]):
+            recurrent_focus.append("uranium and nuclear")
+        if any(term in texts for term in ["cpi", "inflation", "fed", "treasury", "unemployment"]):
+            recurrent_focus.append("macro and rates")
+        if any(term in texts for term in ["watchlist", "stock price", "portfolio", "performed today"]):
+            recurrent_focus.append("market performance")
+        if recurrent_focus:
+            upsert_trend_memory("recurrent_focus", "; ".join(recurrent_focus), confidence=0.82)
+
+    feedback = get_recent_alert_feedback(limit=30)
+    if feedback:
+        counts = {}
+        for item in feedback:
+            counts[item["feedback_type"]] = counts.get(item["feedback_type"], 0) + 1
+        if counts.get("too much noise", 0) >= 2:
+            upsert_trend_memory("alert_tolerance", "prefers stricter, lower-noise alerts", confidence=0.86)
+        if counts.get("more like this", 0) >= 1 or counts.get("good alert", 0) >= 2:
+            upsert_trend_memory("alert_preferences", "rewards highly relevant alerts with direct implication", confidence=0.84)
+        if counts.get("late", 0) >= 1:
+            upsert_trend_memory("timing_preference", "cares strongly about alert speed", confidence=0.85)
+
+    apply_memory_decay()
 
 
 def extract_memory_updates(text):
@@ -967,6 +1206,13 @@ def extract_memory_updates(text):
         (r"\bi like\s+(.+)", "taste", "likes"),
         (r"\bi love\s+(.+)", "taste", "likes"),
         (r"\bi enjoy\s+(.+)", "taste", "enjoys"),
+        (r"\bi am someone who\s+(.+)", "core_traits", "identity_statement"),
+        (r"\ba core trait of mine is\s+(.+)", "core_traits", "identity_statement"),
+        (r"\bi am proud of\s+(.+)", "major_successes", "success_memory"),
+        (r"\bmy biggest success was\s+(.+)", "major_successes", "success_memory"),
+        (r"\bmy biggest failure was\s+(.+)", "major_failures", "failure_memory"),
+        (r"\bi regret\s+(.+)", "major_failures", "regret_pattern"),
+        (r"\ba defining moment for me was\s+(.+)", "defining_moments", "defining_memory"),
         (r"\bi want\s+(.+)", "goals", "stated_goal"),
         (r"\bmy portfolio is\s+(.+)", "portfolio_profile", "portfolio_shape"),
         (r"\bmy holdings are\s+(.+)", "portfolio_profile", "holdings_shape"),
@@ -1096,11 +1342,60 @@ def process_memory_updates(text):
     consolidate_memory_trends()
 
 
+def run_nightly_memory_consolidation():
+    consolidate_memory_trends()
+    interaction_events = get_recent_interaction_events(limit=120)
+    observations = get_recent_observations(limit=120)
+
+    if interaction_events:
+        topic_summary = build_usage_pattern_summary(interaction_events)
+        if topic_summary:
+            upsert_memory(
+                "long_term",
+                "behavior_trends",
+                "nightly_usage_summary",
+                topic_summary,
+                source_text="nightly_consolidation",
+                confidence=0.8,
+            )
+            record_memory_embedding(
+                "long_term",
+                "behavior_trends",
+                "nightly_usage_summary",
+                topic_summary,
+            )
+
+    if observations:
+        categories = {}
+        for obs in observations:
+            categories[obs["category"]] = categories.get(obs["category"], 0) + 1
+        if categories:
+            strongest = sorted(categories.items(), key=lambda item: item[1], reverse=True)[:3]
+            summary = "; ".join(f"{name}:{count}" for name, count in strongest)
+            upsert_memory(
+                "working",
+                "nightly_summary",
+                "recent_personal_signal",
+                summary,
+                source_text="nightly_consolidation",
+                confidence=0.72,
+            )
+            record_memory_embedding(
+                "working",
+                "nightly_summary",
+                "recent_personal_signal",
+                summary,
+            )
+
+    apply_memory_decay()
+
+
 def get_memory_debug_summary():
     return {
         "working_memory": get_memory_items("working", limit=20),
         "long_term_memory": get_memory_items("long_term", limit=20),
         "portfolio_holdings": get_portfolio_holdings(limit=12),
+        "trusted_portfolio_snapshot": get_latest_trusted_portfolio_snapshot(),
         "recent_gratitude": get_recent_gratitude(limit=30),
         "recent_observations": get_recent_observations(limit=12),
         "recent_interactions": get_recent_interaction_events(limit=30),
@@ -1163,10 +1458,39 @@ def count_tier_alerts_today(category, tier):
     return row["count"] if row else 0
 
 
+def prune_old_event_memory(hours=36):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        DELETE FROM event_hashes
+        WHERE datetime(last_seen_at) < datetime('now', ?)
+        """,
+        (f"-{hours} hours",),
+    )
+    cur.execute(
+        """
+        DELETE FROM event_embeddings
+        WHERE datetime(created_at) < datetime('now', ?)
+        """,
+        (f"-{hours} hours",),
+    )
+    conn.commit()
+    conn.close()
+
+
 def has_seen_event_hash(event_hash):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id FROM event_hashes WHERE event_hash = ?", (event_hash,))
+    cur.execute(
+        """
+        SELECT id
+        FROM event_hashes
+        WHERE event_hash = ?
+          AND datetime(last_seen_at) >= datetime('now', '-36 hours')
+        """,
+        (event_hash,),
+    )
     row = cur.fetchone()
     conn.close()
     return row is not None
@@ -1180,6 +1504,7 @@ def get_recent_event_embeddings(category, limit=20):
         SELECT event_hash, headline, semantic_text, embedding_json, created_at
         FROM event_embeddings
         WHERE category = ?
+          AND datetime(created_at) >= datetime('now', '-36 hours')
         ORDER BY id DESC
         LIMIT ?
         """,
@@ -1298,6 +1623,7 @@ def build_alert_id(category, tier):
 
 def can_send_alert(category, tier, event_hash, candidate=None):
     feedback_profile = get_feedback_profile(limit=20)
+    prune_old_event_memory(hours=36)
 
     if has_seen_event_hash(event_hash):
         return False, "duplicate_event", None
@@ -1451,6 +1777,22 @@ def build_market_section(title, symbols, snapshots, max_items=4):
     return f"{title}: " + "; ".join(parts)
 
 
+def get_portfolio_market_section(max_items=4):
+    trusted_symbols = get_trusted_portfolio_symbols(limit=max_items + 2)
+    if not trusted_symbols:
+        return None
+    snapshots = get_twelvedata_watchlist_snapshot(trusted_symbols[:max_items])
+    return build_market_section("Portfolio", trusted_symbols[:max_items], snapshots, max_items=max_items)
+
+
+def get_watchlist_market_section(max_items=4):
+    watchlist = get_watchlist()
+    if not watchlist:
+        return None
+    snapshots = get_twelvedata_watchlist_snapshot(watchlist[:max_items])
+    return build_market_section("Watchlist", watchlist[:max_items], snapshots, max_items=max_items)
+
+
 def compose_daily_brief(include_debug=False):
     feedback_profile = get_feedback_profile(limit=20)
     alerts = get_recent_alerts_for_brief(limit=12, include_debug=include_debug)
@@ -1465,19 +1807,13 @@ def compose_daily_brief(include_debug=False):
             lines.append(f"{item['category']}{item['tier']}: {item['headline']}")
 
     if is_trading_day_now():
-        portfolio_symbols = [item["symbol"] for item in get_portfolio_holdings(limit=5)]
-        if portfolio_symbols:
-            portfolio_snapshots = get_twelvedata_watchlist_snapshot(portfolio_symbols)
-            section = build_market_section("Portfolio", portfolio_symbols, portfolio_snapshots, max_items=4)
-            if section:
-                lines.append(section)
+        portfolio_section = get_portfolio_market_section(max_items=4)
+        if portfolio_section:
+            lines.append(portfolio_section)
 
-        watchlist = get_watchlist()
-        if watchlist:
-            watchlist_snapshots = get_twelvedata_watchlist_snapshot(watchlist[:5])
-            section = build_market_section("Watchlist", watchlist[:5], watchlist_snapshots, max_items=4)
-            if section:
-                lines.append(section)
+        watchlist_section = get_watchlist_market_section(max_items=4)
+        if watchlist_section:
+            lines.append(watchlist_section)
 
     if not lines:
         return "Nothing to report."
@@ -1520,25 +1856,32 @@ def send_whatsapp_message(body):
 
 def score_candidate(candidate, watchlist):
     headline = candidate["headline"].lower()
+    combined_text = " ".join([
+        candidate.get("headline", ""),
+        candidate.get("snippet", ""),
+        candidate.get("section", ""),
+    ]).lower()
     score = 0
     reasons = []
     feedback_profile = get_feedback_profile(limit=20)
-    portfolio_symbols = [item["symbol"] for item in get_portfolio_holdings(limit=10)]
+    trusted_portfolio_symbols = get_trusted_portfolio_symbols(limit=10)
+    has_trusted_portfolio_match = False
 
     for keyword, points in THEME_KEYWORDS.items():
-        if keyword in headline:
+        if keyword in combined_text:
             score += points
             reasons.append(f"theme:{keyword}")
 
     for item in watchlist:
-        if item.lower() in headline:
+        if item.lower() in combined_text:
             score += 5
             reasons.append(f"watchlist:{item}")
 
-    for item in portfolio_symbols:
-        if item.lower() in headline:
+    for item in trusted_portfolio_symbols:
+        if item.lower() in combined_text:
             score += 6
             reasons.append(f"portfolio:{item}")
+            has_trusted_portfolio_match = True
 
     if candidate["source"] == "FRED":
         score += 2
@@ -1552,7 +1895,7 @@ def score_candidate(candidate, watchlist):
         score += 1
         reasons.append("source:nyt")
 
-    if candidate["category"] == "P":
+    if candidate["category"] == "P" and has_trusted_portfolio_match:
         score += 2
         reasons.append("category:portfolio")
     elif candidate["category"] == "E":
@@ -1579,6 +1922,10 @@ def score_candidate(candidate, watchlist):
         tier = 2
     else:
         tier = 3
+
+    if candidate["category"] == "P" and not has_trusted_portfolio_match:
+        tier = max(tier, 3)
+        reasons.append("portfolio:awaiting_trusted_data")
 
     return {
         "score": score,
@@ -1641,16 +1988,12 @@ def classify_news_category(query, headline, snippet, section, watchlist=None):
         snippet or "",
         section or "",
     ]).lower()
-    watchlist = watchlist or []
-
-    if any(item.lower() in text for item in watchlist):
-        return "P"
     if any(term in text for term in ["bay area", "san francisco", "berkeley", "baja california", "bcs", "earthquake"]):
         return "L"
     if any(term in text for term in ["fed", "inflation", "cpi", "rates", "rate cut", "jobs", "employment", "treasury"]):
         return "E"
     if any(term in text for term in ["uranium", "nuclear", "cameco", "ccj", "kazatomprom", "kazakhstan"]):
-        return "P"
+        return "G"
     if any(term in text for term in ["iran", "russia", "sanction", "war", "shipping", "strait", "conflict"]):
         return "G"
     return "G"
@@ -2268,6 +2611,16 @@ def debug_daily_brief():
     )
 
 
+@app.route("/debug/memory/consolidate", methods=["POST"])
+def debug_memory_consolidate():
+    run_nightly_memory_consolidation()
+    return app.response_class(
+        response=json.dumps(get_memory_debug_summary(), indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
 @app.route("/tasks/poll", methods=["GET", "POST"])
 def task_poll():
     return app.response_class(
@@ -2292,12 +2645,23 @@ def task_daily_brief():
 
 @app.route("/tasks/gratitude", methods=["GET", "POST"])
 def task_gratitude():
+    run_nightly_memory_consolidation()
     prompt = "What is one thing you were grateful for today?"
     result = send_whatsapp_message(prompt)
     if result.get("ok"):
         log_outbound_message("gratitude", prompt)
     return app.response_class(
         response=json.dumps({"message": prompt, "send_result": result}, indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/tasks/memory-consolidation", methods=["GET", "POST"])
+def task_memory_consolidation():
+    run_nightly_memory_consolidation()
+    return app.response_class(
+        response=json.dumps({"ok": True, "memory": get_memory_debug_summary()}, indent=2),
         status=200,
         mimetype="application/json",
     )
@@ -2347,6 +2711,7 @@ def sms():
 
     if intent == "portfolio_update":
         upsert_portfolio_symbols(value, source_text=msg)
+        record_portfolio_snapshot(value, source_type="manual", trusted=False, summary={"source_text": msg})
         resp.message(f"Portfolio noted: {', '.join(value)}.")
         return str(resp)
 
