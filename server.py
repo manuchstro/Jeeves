@@ -8,6 +8,7 @@ import json
 import re
 import hashlib
 import math
+import base64
 from urllib.parse import quote_plus
 
 client = OpenAI()
@@ -71,6 +72,9 @@ NYT_API_KEY = os.environ.get("NYT_API_KEY")
 MASSIVE_API_KEY = os.environ.get("MASSIVE_API_KEY")
 TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM")
 
 FRED_SERIES = {
     "DGS10": {
@@ -1242,6 +1246,38 @@ def compose_daily_brief(include_debug=False):
 
     return "Daily brief:\n" + "\n".join(lines)
 
+
+def ensure_whatsapp_prefix(number):
+    if not number:
+        return None
+    return number if number.startswith("whatsapp:") else f"whatsapp:{number}"
+
+
+def send_whatsapp_message(body):
+    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM, MY_NUMBER]):
+        return {"ok": False, "reason": "missing_twilio_config"}
+
+    try:
+        auth = base64.b64encode(f"{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}".encode("utf-8")).decode("utf-8")
+        response = requests.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
+            headers={
+                "Authorization": f"Basic {auth}",
+            },
+            data={
+                "From": ensure_whatsapp_prefix(TWILIO_WHATSAPP_FROM),
+                "To": ensure_whatsapp_prefix(MY_NUMBER),
+                "Body": body,
+            },
+            timeout=20,
+        )
+        if response.status_code >= 300:
+            return {"ok": False, "reason": "twilio_error", "status_code": response.status_code, "response": response.text[:300]}
+        data = response.json()
+        return {"ok": True, "sid": data.get("sid")}
+    except Exception as exc:
+        return {"ok": False, "reason": "exception", "error": str(exc)}
+
 # ---------------- POLLING ----------------
 
 def score_candidate(candidate, watchlist):
@@ -1919,6 +1955,28 @@ def debug_daily_brief():
 def task_poll():
     return app.response_class(
         response=json.dumps(run_poll_cycle(log_to_alerts=True), indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/tasks/daily-brief", methods=["GET", "POST"])
+def task_daily_brief():
+    brief = compose_daily_brief(include_debug=True)
+    result = send_whatsapp_message(brief)
+    return app.response_class(
+        response=json.dumps({"message": brief, "send_result": result}, indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/tasks/gratitude", methods=["GET", "POST"])
+def task_gratitude():
+    prompt = "What is one thing you were grateful for today?"
+    result = send_whatsapp_message(prompt)
+    return app.response_class(
+        response=json.dumps({"message": prompt, "send_result": result}, indent=2),
         status=200,
         mimetype="application/json",
     )
