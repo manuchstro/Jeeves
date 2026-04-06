@@ -155,6 +155,14 @@ NEWS_QUERIES = [
 ]
 
 CURRENTS_MIN_INTERVAL_MINUTES = 5
+AI_ALERT_SHORTLIST_MAX = 6
+ALERT_DECISION_MODEL = os.environ.get("ALERT_DECISION_MODEL", "gpt-4o")
+
+SOURCE_GUIDANCE = {
+    "NYT": "Strong for broad politics, geopolitics, and explanatory reporting. Not ideal for fastest market-moving headlines.",
+    "CURRENTS": "Broad, fast headline feed with varying outlet quality. Good for discovery, weaker for deep context alone.",
+    "FRED": "Authoritative macro/economic data. Strong for releases, weak for narrative interpretation.",
+}
 
 PROTECTED_MEMORY_CATEGORIES = {
     "core_traits",
@@ -1087,6 +1095,33 @@ def format_memory_context(user_text):
             lines.append(f"- {item['category']}: {item['value']}")
 
     return "\n".join(lines)
+
+
+def build_alert_memory_context(candidates):
+    combined_text = "\n".join(
+        filter(
+            None,
+            [
+                " ".join([
+                    candidate.get("headline", ""),
+                    candidate.get("snippet", ""),
+                    candidate.get("section", ""),
+                ])
+                for candidate in candidates
+            ],
+        )
+    )
+
+    relevant = get_relevant_memories(combined_text or "alert relevance", limit=12)
+    trusted_portfolio = get_trusted_portfolio_symbols(limit=20)
+    watchlist = get_watchlist()[:20]
+
+    return {
+        "working": relevant["working"],
+        "long_term": relevant["long_term"],
+        "watchlist": watchlist,
+        "trusted_portfolio": trusted_portfolio,
+    }
 
 
 def build_usage_pattern_summary(events):
@@ -2766,53 +2801,210 @@ def build_poll_candidates():
     return dedupe_candidates(candidates), source_debug
 
 
-def run_poll_cycle(log_to_alerts=True, send_messages=False):
-    candidates, source_debug = build_poll_candidates()
-    watchlist = get_watchlist()
-    results = []
-
+def prepare_alert_shortlist(candidates, watchlist, limit=AI_ALERT_SHORTLIST_MAX):
+    scored = []
     for candidate in candidates:
         scoring = score_candidate(candidate, watchlist)
-        candidate = {
+        scored.append({
             **candidate,
             "score": scoring["score"],
             "selection_reasons": scoring["reasons"],
             "assigned_tier": scoring["tier"],
+        })
+
+    scored.sort(
+        key=lambda item: (
+            item.get("assigned_tier", 3),
+            -item.get("score", 0),
+            item.get("published_at", ""),
+        )
+    )
+    return scored[:limit], scored
+
+
+def build_alert_decision_prompt(candidates, memory_context):
+    candidate_lines = []
+    for idx, candidate in enumerate(candidates, start=1):
+        source_guidance = SOURCE_GUIDANCE.get(candidate.get("source"), "")
+        candidate_lines.append(
+            "\n".join([
+                f"Candidate {idx}",
+                f"id: C{idx}",
+                f"headline: {candidate.get('headline', '')}",
+                f"snippet: {candidate.get('snippet', '')}",
+                f"section: {candidate.get('section', '')}",
+                f"source: {candidate.get('source', '')}",
+                f"source_refs: {', '.join(candidate.get('source_refs', []))}",
+                f"published_at: {candidate.get('published_at', '')}",
+                f"initial_category: {candidate.get('category', '')}",
+                f"initial_tier: {candidate.get('assigned_tier', '')}",
+                f"initial_score: {candidate.get('score', '')}",
+                f"selection_reasons: {', '.join(candidate.get('selection_reasons', []))}",
+                f"source_guidance: {source_guidance}",
+            ])
+        )
+
+    working_lines = [f"- {item['category']}: {item['value']}" for item in memory_context.get("working", [])]
+    long_term_lines = [f"- {item['category']}: {item['value']}" for item in memory_context.get("long_term", [])]
+
+    return f"""
+You are Jeeves deciding whether Manu should actually receive alerts.
+
+Rules:
+- Use meaning and relevance, not static keyword logic.
+- Portfolio relevance must be extremely strict. Do not treat a story as portfolio-critical unless it truly matches trusted portfolio state.
+- Use watchlist, memory, current patterns, and source quality.
+- It is acceptable to send zero alerts.
+- Prefer fewer, better alerts.
+- Return valid JSON only.
+
+Trusted portfolio:
+{", ".join(memory_context.get("trusted_portfolio", [])) or "none"}
+
+Watchlist:
+{", ".join(memory_context.get("watchlist", [])) or "none"}
+
+Working memory:
+{chr(10).join(working_lines) or "- none"}
+
+Long-term memory:
+{chr(10).join(long_term_lines) or "- none"}
+
+Candidates:
+{chr(10).join(candidate_lines)}
+
+Return this exact shape:
+{{
+  "decisions": [
+    {{
+      "candidate_id": "C1",
+      "send": true,
+      "category": "G",
+      "tier": 2,
+      "why": "short reason"
+    }}
+  ]
+}}
+"""
+
+
+def ai_decide_alert_candidates(candidates):
+    if not candidates:
+        return {}
+
+    memory_context = build_alert_memory_context(candidates)
+    prompt = build_alert_decision_prompt(candidates, memory_context)
+
+    try:
+        completion = client.chat.completions.create(
+            model=ALERT_DECISION_MODEL,
+            messages=[
+                {"role": "system", "content": "You are Jeeves. Return JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+        )
+        payload = json.loads(completion.choices[0].message.content)
+    except:
+        return {}
+
+    decision_map = {}
+    for item in payload.get("decisions", []):
+        candidate_id = item.get("candidate_id")
+        if not candidate_id:
+            continue
+        decision_map[candidate_id] = {
+            "send": bool(item.get("send")),
+            "category": (item.get("category") or "").upper()[:1] or None,
+            "tier": int(item.get("tier") or 3),
+            "why": (item.get("why") or "").strip(),
         }
+    return decision_map
+
+
+def run_poll_cycle(log_to_alerts=True, send_messages=False):
+    candidates, source_debug = build_poll_candidates()
+    watchlist = get_watchlist()
+    results = []
+    shortlist, scored_candidates = prepare_alert_shortlist(candidates, watchlist, limit=AI_ALERT_SHORTLIST_MAX)
+    ai_decisions = ai_decide_alert_candidates(shortlist)
+
+    shortlist_lookup = {}
+    for idx, candidate in enumerate(shortlist, start=1):
+        shortlist_lookup[build_event_hash(candidate["category"], candidate["headline"])] = {
+            **candidate,
+            "candidate_id": f"C{idx}",
+            "ai_decision": ai_decisions.get(f"C{idx}", {}),
+        }
+
+    for candidate in scored_candidates:
+        event_hash = build_event_hash(candidate["category"], candidate["headline"])
+        shortlist_item = shortlist_lookup.get(event_hash)
+        ai_decision = (shortlist_item or {}).get("ai_decision", {})
+        effective_category = ai_decision.get("category") or candidate["category"]
+        effective_tier = ai_decision.get("tier") if shortlist_item else candidate["assigned_tier"]
+        if effective_tier is None:
+            effective_tier = candidate["assigned_tier"]
+
         result = {
-            "category": candidate["category"],
-            "tier": scoring["tier"],
+            "category": effective_category,
+            "tier": effective_tier,
             "headline": candidate["headline"],
             "snippet": candidate.get("snippet", ""),
             "section": candidate.get("section", ""),
             "source": candidate["source"],
             "source_refs": candidate.get("source_refs", [get_candidate_source_label(candidate)]),
             "published_at": candidate["published_at"],
-            "score": scoring["score"],
-            "score_reasons": scoring["reasons"],
+            "score": candidate["score"],
+            "score_reasons": candidate["selection_reasons"],
             "fingerprint": build_event_fingerprint(candidate),
+            "shortlisted": shortlist_item is not None,
+            "ai_candidate_id": shortlist_item.get("candidate_id") if shortlist_item else None,
+            "ai_send": ai_decision.get("send") if shortlist_item else None,
+            "ai_why": ai_decision.get("why") if shortlist_item else None,
         }
 
         if log_to_alerts:
+            if shortlist_item and not ai_decision.get("send"):
+                result["alert_result"] = {
+                    "ok": False,
+                    "reason": "ai_filtered_out",
+                }
+                results.append(result)
+                continue
+
+            effective_candidate = {
+                **candidate,
+                "category": effective_category,
+                "assigned_tier": effective_tier,
+                "selection_reasons": candidate["selection_reasons"] + ([f"ai:{ai_decision.get('why')}"] if ai_decision.get("why") else []),
+            }
             alert_result = log_alert(
-                candidate["category"],
-                scoring["tier"],
+                effective_category,
+                effective_tier,
                 candidate["headline"],
                 sent_to_user=1 if send_messages else 0,
-                candidate=candidate,
+                candidate=effective_candidate,
             )
             result["alert_result"] = alert_result
             if send_messages and alert_result.get("ok"):
-                alert_message = format_alert_message(candidate, alert_result)
+                alert_message = format_alert_message(effective_candidate, alert_result)
                 send_result = send_whatsapp_message(alert_message)
                 result["send_result"] = send_result
                 if send_result.get("ok"):
                     log_outbound_message("alert", alert_message)
         else:
-            event_hash = build_event_hash(candidate["category"], candidate["headline"])
+            if shortlist_item and not ai_decision.get("send"):
+                result["alert_result"] = {
+                    "ok": False,
+                    "reason": "ai_filtered_out",
+                }
+                results.append(result)
+                continue
+
             allowed, reason, semantic_result = can_send_alert(
-                candidate["category"],
-                scoring["tier"],
+                effective_category,
+                effective_tier,
                 event_hash,
                 candidate=candidate,
             )
@@ -2827,6 +3019,7 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False):
 
     return {
         "candidate_count": len(candidates),
+        "shortlist_count": len(shortlist),
         "source_debug": source_debug,
         "results": results,
     }
