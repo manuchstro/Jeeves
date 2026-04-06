@@ -152,7 +152,7 @@ NEWS_QUERIES = [
     ("baja california sur", "L"),
 ]
 
-CURRENTS_MIN_INTERVAL_MINUTES = 90
+CURRENTS_MIN_INTERVAL_MINUTES = 5
 
 PROTECTED_MEMORY_CATEGORIES = {
     "core_traits",
@@ -2662,6 +2662,12 @@ def get_fred_candidate(category, tier, series):
 def build_poll_candidates():
     candidates = []
     watchlist = get_watchlist()
+    source_debug = {
+        "nyt_queries": len(NEWS_QUERIES),
+        "currents_due": source_poll_due("CURRENTS", CURRENTS_MIN_INTERVAL_MINUTES),
+        "currents_query": None,
+        "currents_added": 0,
+    }
 
     for category, tier, series in POLL_SERIES:
         candidate = get_fred_candidate(category, tier, series)
@@ -2671,17 +2677,20 @@ def build_poll_candidates():
     for query, category_hint in NEWS_QUERIES:
         candidates.extend(get_nyt_headline_candidates(query, category_hint=category_hint, watchlist=watchlist))
 
-    if source_poll_due("CURRENTS", CURRENTS_MIN_INTERVAL_MINUTES):
+    if source_debug["currents_due"]:
         query_index = int(datetime.now(LOCAL_TZ).timestamp() // (CURRENTS_MIN_INTERVAL_MINUTES * 60)) % len(NEWS_QUERIES)
         query, category_hint = NEWS_QUERIES[query_index]
-        candidates.extend(get_currents_candidates(query, category_hint=category_hint, watchlist=watchlist))
+        source_debug["currents_query"] = query
+        current_candidates = get_currents_candidates(query, category_hint=category_hint, watchlist=watchlist)
+        source_debug["currents_added"] = len(current_candidates)
+        candidates.extend(current_candidates)
         mark_source_polled("CURRENTS", note=query)
 
-    return dedupe_candidates(candidates)
+    return dedupe_candidates(candidates), source_debug
 
 
 def run_poll_cycle(log_to_alerts=True):
-    candidates = build_poll_candidates()
+    candidates, source_debug = build_poll_candidates()
     watchlist = get_watchlist()
     results = []
 
@@ -2735,6 +2744,7 @@ def run_poll_cycle(log_to_alerts=True):
 
     return {
         "candidate_count": len(candidates),
+        "source_debug": source_debug,
         "results": results,
     }
 
