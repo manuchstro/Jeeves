@@ -2209,6 +2209,20 @@ def format_brief_source_suffix(item):
     return f" [{', '.join(refs[:2])}]"
 
 
+def format_source_refs_list(refs, limit=3):
+    refs = [ref for ref in (refs or []) if ref]
+    if not refs:
+        return ""
+    return ", ".join(refs[:limit])
+
+
+def format_alert_message(candidate, alert_result):
+    code = alert_result.get("alert_id") or f"{candidate['category']}{candidate.get('assigned_tier', candidate.get('tier', 2))}"
+    source_text = format_source_refs_list(candidate.get("source_refs"), limit=3)
+    suffix = f" [{source_text}]" if source_text else ""
+    return f"{code}: {candidate['headline']}{suffix}"
+
+
 def compose_daily_brief(include_debug=False):
     feedback_profile = get_feedback_profile(limit=20)
     alerts = get_recent_alerts_for_brief(limit=12, include_debug=include_debug)
@@ -2689,7 +2703,7 @@ def build_poll_candidates():
     return dedupe_candidates(candidates), source_debug
 
 
-def run_poll_cycle(log_to_alerts=True):
+def run_poll_cycle(log_to_alerts=True, send_messages=False):
     candidates, source_debug = build_poll_candidates()
     watchlist = get_watchlist()
     results = []
@@ -2721,10 +2735,16 @@ def run_poll_cycle(log_to_alerts=True):
                 candidate["category"],
                 scoring["tier"],
                 candidate["headline"],
-                sent_to_user=0,
+                sent_to_user=1 if send_messages else 0,
                 candidate=candidate,
             )
             result["alert_result"] = alert_result
+            if send_messages and alert_result.get("ok"):
+                alert_message = format_alert_message(candidate, alert_result)
+                send_result = send_whatsapp_message(alert_message)
+                result["send_result"] = send_result
+                if send_result.get("ok"):
+                    log_outbound_message("alert", alert_message)
         else:
             event_hash = build_event_hash(candidate["category"], candidate["headline"])
             allowed, reason, semantic_result = can_send_alert(
@@ -3330,7 +3350,7 @@ def debug_memory_consolidate():
 @app.route("/tasks/poll", methods=["GET", "POST"])
 def task_poll():
     return app.response_class(
-        response=json.dumps(run_poll_cycle(log_to_alerts=True), indent=2),
+        response=json.dumps(run_poll_cycle(log_to_alerts=True, send_messages=True), indent=2),
         status=200,
         mimetype="application/json",
     )
