@@ -2961,6 +2961,25 @@ def interpret_expand_request(text):
     return match.group(1).upper()
 
 
+def interpret_event_reference(text):
+    t = text.strip()
+
+    direct_match = re.match(r"^\s*([A-Za-z]\d(?:\.\d+|-\d+)?)\s*$", t, re.IGNORECASE)
+    if direct_match:
+        return direct_match.group(1).upper()
+
+    followup_patterns = [
+        r"^\s*(?:expand(?:\s+on)?|follow up on|follow-up on|tell me more about|more on|what about|talk about)\s+([A-Za-z]\d(?:\.\d+|-\d+)?)\s*$",
+        r"^\s*([A-Za-z]\d(?:\.\d+|-\d+)?)\s+(?:please|details|context|more)\s*$",
+    ]
+    for pattern in followup_patterns:
+        match = re.match(pattern, t, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+
+    return None
+
+
 def is_full_article_request(text):
     t = text.lower().strip()
     patterns = [
@@ -3282,7 +3301,7 @@ def format_ticker_quote_reply(tickers, snapshots):
 def route(text):
     t = text.lower()
     market_question = interpret_market_data_question(text)
-    expand_reference = interpret_expand_request(text)
+    expand_reference = interpret_event_reference(text)
 
     if is_feedback_message(text):
         return ("alert_feedback", t.strip())
