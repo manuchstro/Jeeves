@@ -2280,11 +2280,65 @@ def normalize_ticker_candidate(token):
     return cleaned
 
 
+KNOWN_MARKET_NAME_MAP = {
+    "bitcoin": "BTC",
+    "btc": "BTC",
+    "ethereum": "ETH",
+    "eth": "ETH",
+    "solana": "SOL",
+    "sol": "SOL",
+}
+
+
+def get_known_market_symbols():
+    symbols = set(get_watchlist())
+    symbols.update(get_trusted_portfolio_symbols(limit=30))
+    symbols.update(item["symbol"] for item in get_portfolio_holdings(limit=30))
+    symbols.update(KNOWN_MARKET_NAME_MAP.values())
+    return {symbol for symbol in symbols if symbol}
+
+
+def has_market_intent(text, tickers=None):
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+
+    finance_question_patterns = [
+        r"\b(?:what is|what's)\b.+\b(?:price|quote|stock price|share price|performance)\b",
+        r"\bhow (?:has|is|did)\b.+\b(?:performed|performing|doing|trading)\b",
+        r"\b(?:show me|tell me)\b.+\b(?:price|quote|performance)\b",
+        r"\b(?:price|quote|stock price|share price|performance)\s+of\b",
+    ]
+    explicit_finance_reference = any(
+        re.search(pattern, t, re.IGNORECASE) for pattern in finance_question_patterns
+    )
+    has_market_noun = bool(
+        re.search(r"\b(?:stock|ticker|shares?|price|quote|performance|performed|trading)\b", t, re.IGNORECASE)
+    )
+
+    if re.search(r"\bquoted you\b|\bquote you\b|\bthis chat\b|\bfuture chats?\b", t):
+        return False
+
+    if tickers and explicit_finance_reference:
+        return True
+
+    if tickers and has_market_noun:
+        return True
+
+    if tickers and has_market_noun and re.search(r"\b(?:what|how|show|tell)\b", t):
+        return True
+
+    return False
+
+
 def extract_market_tickers(text):
+    known_symbols = get_known_market_symbols()
     patterns = [
         r"\b([A-Za-z]{1,5})\b(?=\s+(?:stock|shares?|ticker)\b)",
         r"(?:price|quote|performance|performed|trading at|traded at)\s+(?:of\s+)?(?:the\s+)?([A-Za-z]{1,5})\b",
-        r"(?:what is|what's|how is|how has|show me|tell me)\s+(?:the\s+)?([A-Za-z]{1,5})\b(?=(?:\s+stock|\s+ticker|\s+shares|\s+price|\s+quote|\s+performance|\s+performed|\b))",
+        r"(?:what is|what's|how is|how has|how did|show me|tell me)\s+(?:the\s+)?([A-Za-z]{1,5})\b(?=(?:\s+stock|\s+ticker|\s+shares|\s+price|\s+quote|\s+performance|\s+performed|\b))",
+        r"(?:what is|what's|how is|how has|how did)\s+(?:the\s+)?(?:price|quote|performance|stock price|share price)\s+(?:of\s+)?([A-Za-z]{1,5})\b",
+        r"\b([A-Za-z]{1,5})\b\s+(?:price|quote|performance|stock price|share price)\b",
     ]
 
     tickers = []
@@ -2294,14 +2348,14 @@ def extract_market_tickers(text):
             if ticker and ticker not in tickers:
                 tickers.append(ticker)
 
-    if tickers:
-        return tickers
+    lower_text = (text or "").lower()
+    for name, mapped_symbol in KNOWN_MARKET_NAME_MAP.items():
+        if re.search(rf"\b{re.escape(name)}\b", lower_text) and mapped_symbol not in tickers:
+            tickers.append(mapped_symbol)
 
-    fallback_tokens = re.findall(r"\b[A-Za-z]{1,5}\b", text)
-    for token in fallback_tokens:
-        ticker = normalize_ticker_candidate(token)
-        if ticker and ticker not in tickers:
-            tickers.append(ticker)
+    for symbol in known_symbols:
+        if re.search(rf"\b{re.escape(symbol)}\b", text, re.IGNORECASE) and symbol not in tickers:
+            tickers.append(symbol)
 
     return tickers
 
@@ -2311,24 +2365,8 @@ def interpret_market_data_question(text):
     if "watchlist" in t:
         return None
 
-    market_terms = [
-        "stock",
-        "ticker",
-        "quote",
-        "price",
-        "share price",
-        "shares",
-        "performance",
-        "performed",
-        "trading at",
-        "traded at",
-    ]
-
-    if not any(term in t for term in market_terms):
-        return None
-
     tickers = extract_market_tickers(text)
-    if not tickers:
+    if not tickers or not has_market_intent(text, tickers=tickers):
         return None
 
     return {
