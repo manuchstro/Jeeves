@@ -821,6 +821,11 @@ def feedback_context_allowed():
     return row is not None and row["message_type"] in {"daily_brief", "alert"}
 
 
+def article_request_context_allowed():
+    recent_intent = get_last_non_feedback_intent(limit=8)
+    return recent_intent in {"daily_brief", "event_expand", "alert_delivery"}
+
+
 def get_memory_items(scope, limit=20):
     conn = get_conn()
     cur = conn.cursor()
@@ -2655,6 +2660,25 @@ def interpret_expand_request(text):
     return match.group(1).upper()
 
 
+def is_full_article_request(text):
+    t = text.lower().strip()
+    patterns = [
+        r"\bentire article\b",
+        r"\bfull article\b",
+        r"\bwhole article\b",
+        r"\bverbatim\b",
+        r"\bpaste\b.+\barticle\b",
+    ]
+    return any(re.search(pattern, t, re.IGNORECASE) for pattern in patterns)
+
+
+def format_full_article_unavailable_reply():
+    return (
+        "I do not store the full article body from this source. "
+        "I can expand using the context I have, summarize it further, or give you the source link."
+    )
+
+
 def is_portfolio_show_question(text):
     t = text.lower().strip()
     phrases = {
@@ -2965,6 +2989,9 @@ def route(text):
     if is_daily_brief_question(text):
         return ("daily_brief", None)
 
+    if is_full_article_request(text):
+        return ("full_article_request", None)
+
     if expand_reference:
         return ("event_expand", expand_reference)
 
@@ -3209,6 +3236,13 @@ def sms():
 
     if intent == "daily_brief":
         resp.message(compose_daily_brief(include_debug=True))
+        return str(resp)
+
+    if intent == "full_article_request":
+        if article_request_context_allowed():
+            resp.message(format_full_article_unavailable_reply())
+        else:
+            resp.message("I don't know which article you mean.")
         return str(resp)
 
     if intent == "event_expand":
