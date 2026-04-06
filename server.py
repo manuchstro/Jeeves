@@ -1905,6 +1905,8 @@ def log_alert(category, tier, headline, sent_to_user=1, candidate=None):
     allowed, reason, semantic_result = can_send_alert(category, tier, event_hash, candidate=candidate)
 
     if not allowed:
+        if candidate is not None:
+            upsert_event_context(None, event_hash, category, tier, candidate)
         return {
             "ok": False,
             "reason": reason,
