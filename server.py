@@ -9,6 +9,8 @@ import re
 import hashlib
 import math
 import base64
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from urllib.parse import quote_plus
 
 client = OpenAI()
@@ -75,6 +77,7 @@ EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM")
+LOCAL_TZ = ZoneInfo("America/Los_Angeles")
 
 FRED_SERIES = {
     "DGS10": {
@@ -127,6 +130,18 @@ FEEDBACK_RESPONSES = {
     "more like this": "Increasing sensitivity.",
     "late": "Apologies",
 }
+
+NEWS_QUERIES = [
+    ("uranium", "P"),
+    ("nuclear energy", "P"),
+    ("kazakhstan uranium", "P"),
+    ("iran energy", "G"),
+    ("energy sanctions", "G"),
+    ("fed inflation", "E"),
+    ("jobs report", "E"),
+    ("bay area earthquake", "L"),
+    ("baja california sur", "L"),
+]
 
 STORY_STOPWORDS = {
     "the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with",
@@ -264,6 +279,25 @@ def init_db():
     )
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS portfolio_holdings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol TEXT NOT NULL UNIQUE,
+        conviction_rank INTEGER,
+        note TEXT,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS outbound_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_type TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -330,6 +364,71 @@ def get_watchlist():
     rows = cur.fetchall()
     conn.close()
     return [r["key"] for r in rows]
+
+
+def normalize_symbol(token):
+    cleaned = re.sub(r"[^A-Za-z]", "", token or "").upper()
+    if 1 <= len(cleaned) <= 5:
+        return cleaned
+    return None
+
+
+def extract_symbols_from_text(text):
+    raw_tokens = re.findall(r"\b[A-Za-z]{1,5}\b", text or "")
+    blocked = {
+        "I", "MY", "AM", "IN", "AND", "THE", "WITH", "HEAVY", "MOSTLY",
+        "CASH", "RISK", "STOCK", "PRICE", "WHAT", "WHATS", "HOW", "HAS",
+        "HAVE", "TODAY", "PORTFOLIO", "HOLDINGS", "OWN",
+    }
+    symbols = []
+    for token in raw_tokens:
+        symbol = normalize_symbol(token)
+        if not symbol or symbol in blocked:
+            continue
+        if symbol not in symbols:
+            symbols.append(symbol)
+    return symbols
+
+
+def upsert_portfolio_symbols(symbols, source_text=None):
+    if not symbols:
+        return
+
+    conn = get_conn()
+    cur = conn.cursor()
+    for index, symbol in enumerate(symbols, start=1):
+        cur.execute(
+            """
+            INSERT INTO portfolio_holdings (symbol, conviction_rank, note)
+            VALUES (?, ?, ?)
+            ON CONFLICT(symbol) DO UPDATE SET
+                conviction_rank = COALESCE(portfolio_holdings.conviction_rank, excluded.conviction_rank),
+                note = COALESCE(portfolio_holdings.note, excluded.note),
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (symbol, index, source_text),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_portfolio_holdings(limit=8):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT symbol, conviction_rank, note, updated_at
+        FROM portfolio_holdings
+        ORDER BY
+            CASE WHEN conviction_rank IS NULL THEN 999 ELSE conviction_rank END ASC,
+            symbol ASC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
 
 # ---------------- MEMORY ----------------
 
@@ -425,6 +524,20 @@ def log_alert_feedback(feedback_type, source_text):
     conn.close()
 
 
+def log_outbound_message(message_type, body):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO outbound_messages (message_type, body)
+        VALUES (?, ?)
+        """,
+        (message_type, body),
+    )
+    conn.commit()
+    conn.close()
+
+
 def get_recent_alert_feedback(limit=20):
     conn = get_conn()
     cur = conn.cursor()
@@ -447,25 +560,36 @@ def get_feedback_profile(limit=20):
     sensitivity = 0
     urgency = 0
     affirmations = 0
+    noise = 0
 
     for item in recent:
         feedback_type = item["feedback_type"]
         if feedback_type == "more like this":
-            sensitivity += 1
+            sensitivity += 2
         elif feedback_type == "too much noise":
-            sensitivity -= 1
+            sensitivity -= 2
+            noise += 1
         elif feedback_type == "late":
-            urgency += 1
+            urgency += 2
         elif feedback_type == "good alert":
             affirmations += 1
 
-    sensitivity = max(-2, min(2, sensitivity))
-    urgency = max(0, min(2, urgency))
+    sensitivity = max(-4, min(4, sensitivity))
+    urgency = max(0, min(4, urgency))
+    tier2_cap = max(2, min(6, 4 + math.floor(sensitivity / 2)))
+    brief_tier_limit = 2 if noise >= 2 else 3
+    require_higher_score = sensitivity < 0
+    promote_quick_alerts = urgency >= 2
 
     return {
         "sensitivity": sensitivity,
         "urgency": urgency,
         "affirmations": affirmations,
+        "noise": noise,
+        "tier2_cap": tier2_cap,
+        "brief_tier_limit": brief_tier_limit,
+        "require_higher_score": require_higher_score,
+        "promote_quick_alerts": promote_quick_alerts,
     }
 
 
@@ -478,7 +602,24 @@ def get_last_non_feedback_intent(limit=6):
 
 
 def feedback_context_allowed():
-    return get_last_non_feedback_intent(limit=6) in {"daily_brief"}
+    recent_intent = get_last_non_feedback_intent(limit=6)
+    if recent_intent in {"daily_brief", "alert_delivery"}:
+        return True
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT message_type
+        FROM outbound_messages
+        WHERE datetime(created_at) >= datetime('now', '-3 hours')
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row is not None and row["message_type"] in {"daily_brief", "alert"}
 
 
 def get_memory_items(scope, limit=20):
@@ -848,6 +989,7 @@ def extract_memory_updates(text):
 
 def process_memory_updates(text):
     updates, gratitude_entry = extract_memory_updates(text)
+    portfolio_symbols = []
 
     for update in updates:
         add_memory_observation(
@@ -870,6 +1012,8 @@ def process_memory_updates(text):
             update["memory_key"],
             update["value"],
         )
+        if update["category"] == "portfolio_profile":
+            portfolio_symbols.extend(extract_symbols_from_text(update["value"]))
 
     if gratitude_entry:
         add_gratitude_entry(gratitude_entry)
@@ -908,6 +1052,9 @@ def process_memory_updates(text):
             gratitude_entry,
         )
 
+    if portfolio_symbols:
+        upsert_portfolio_symbols(portfolio_symbols, source_text=text)
+
     consolidate_memory_trends()
 
 
@@ -915,6 +1062,7 @@ def get_memory_debug_summary():
     return {
         "working_memory": get_memory_items("working", limit=20),
         "long_term_memory": get_memory_items("long_term", limit=20),
+        "portfolio_holdings": get_portfolio_holdings(limit=12),
         "recent_gratitude": get_recent_gratitude(limit=30),
         "recent_observations": get_recent_observations(limit=12),
         "recent_interactions": get_recent_interaction_events(limit=30),
@@ -1111,6 +1259,8 @@ def build_alert_id(category, tier):
 
 
 def can_send_alert(category, tier, event_hash, candidate=None):
+    feedback_profile = get_feedback_profile(limit=20)
+
     if has_seen_event_hash(event_hash):
         return False, "duplicate_event", None
 
@@ -1123,7 +1273,7 @@ def can_send_alert(category, tier, event_hash, candidate=None):
     if tier == 1:
         return True, "tier_1", semantic_result
 
-    if tier == 2 and count_tier_alerts_today(category, tier) >= 4:
+    if tier == 2 and count_tier_alerts_today(category, tier) >= feedback_profile["tier2_cap"]:
         return False, "tier_2_cap_reached", semantic_result
 
     return True, "allowed", semantic_result
@@ -1235,16 +1385,66 @@ def get_recent_alerts_for_brief(limit=12, include_debug=False):
     return rows
 
 
+def is_trading_day_now():
+    return datetime.now(LOCAL_TZ).weekday() < 5
+
+
+def build_market_section(title, symbols, snapshots, max_items=4):
+    if not symbols or not snapshots:
+        return None
+
+    by_ticker = {item.get("ticker"): item for item in snapshots if item.get("ticker")}
+    parts = []
+    for symbol in symbols[:max_items]:
+        item = by_ticker.get(symbol)
+        if not item:
+            continue
+        price = extract_snapshot_price(item)
+        change = extract_snapshot_change(item)
+        pct = extract_snapshot_pct(item)
+        if price is None and change is None and pct is None:
+            continue
+        if change in (0, 0.0, None) and pct in (0, 0.0, None):
+            continue
+        parts.append(f"{symbol} {format_price(price)} ({format_pct(pct)}, {format_change(change)})")
+
+    if not parts:
+        return None
+    return f"{title}: " + "; ".join(parts)
+
+
 def compose_daily_brief(include_debug=False):
+    feedback_profile = get_feedback_profile(limit=20)
     alerts = get_recent_alerts_for_brief(limit=12, include_debug=include_debug)
-    if not alerts:
-        return "Nothing to report."
+    brief_tier_limit = feedback_profile["brief_tier_limit"]
+    filtered_alerts = [item for item in alerts if item["tier"] <= brief_tier_limit]
+    filtered_alerts = filtered_alerts[:5]
 
     lines = []
-    for item in alerts[:6]:
-        lines.append(f"{item['category']}{item['tier']}: {item['headline']}")
+    if filtered_alerts:
+        lines.append("Daily brief:")
+        for item in filtered_alerts:
+            lines.append(f"{item['category']}{item['tier']}: {item['headline']}")
 
-    return "Daily brief:\n" + "\n".join(lines)
+    if is_trading_day_now():
+        portfolio_symbols = [item["symbol"] for item in get_portfolio_holdings(limit=5)]
+        if portfolio_symbols:
+            portfolio_snapshots = get_twelvedata_watchlist_snapshot(portfolio_symbols)
+            section = build_market_section("Portfolio", portfolio_symbols, portfolio_snapshots, max_items=4)
+            if section:
+                lines.append(section)
+
+        watchlist = get_watchlist()
+        if watchlist:
+            watchlist_snapshots = get_twelvedata_watchlist_snapshot(watchlist[:5])
+            section = build_market_section("Watchlist", watchlist[:5], watchlist_snapshots, max_items=4)
+            if section:
+                lines.append(section)
+
+    if not lines:
+        return "Nothing to report."
+
+    return "\n".join(lines)
 
 
 def ensure_whatsapp_prefix(number):
@@ -1285,6 +1485,7 @@ def score_candidate(candidate, watchlist):
     score = 0
     reasons = []
     feedback_profile = get_feedback_profile(limit=20)
+    portfolio_symbols = [item["symbol"] for item in get_portfolio_holdings(limit=10)]
 
     for keyword, points in THEME_KEYWORDS.items():
         if keyword in headline:
@@ -1295,6 +1496,11 @@ def score_candidate(candidate, watchlist):
         if item.lower() in headline:
             score += 5
             reasons.append(f"watchlist:{item}")
+
+    for item in portfolio_symbols:
+        if item.lower() in headline:
+            score += 6
+            reasons.append(f"portfolio:{item}")
 
     if candidate["source"] == "FRED":
         score += 2
@@ -1308,17 +1514,30 @@ def score_candidate(candidate, watchlist):
         score += 1
         reasons.append("source:nyt")
 
+    if candidate["category"] == "P":
+        score += 2
+        reasons.append("category:portfolio")
+    elif candidate["category"] == "E":
+        score += 1
+        reasons.append("category:macro")
+    elif candidate["category"] == "L":
+        score += 1
+        reasons.append("category:local")
+
     if feedback_profile["sensitivity"] != 0:
         score += feedback_profile["sensitivity"]
         reasons.append(f"feedback:sensitivity:{feedback_profile['sensitivity']:+d}")
 
     if feedback_profile["urgency"] > 0 and candidate["source"] == "NYT":
-        score += 1
+        score += min(2, feedback_profile["urgency"])
         reasons.append("feedback:urgency")
 
-    if score >= 6:
+    tier_1_threshold = 8 if feedback_profile["require_higher_score"] else 6
+    tier_2_threshold = 4 if feedback_profile["promote_quick_alerts"] else 3
+
+    if score >= tier_1_threshold:
         tier = 1
-    elif score >= 3:
+    elif score >= tier_2_threshold:
         tier = 2
     else:
         tier = 3
@@ -1376,12 +1595,35 @@ def dedupe_candidates(candidates):
 
     return deduped
 
-def get_nyt_headline_candidates(query):
+
+def classify_news_category(query, headline, snippet, section, watchlist=None):
+    text = " ".join([
+        query or "",
+        headline or "",
+        snippet or "",
+        section or "",
+    ]).lower()
+    watchlist = watchlist or []
+
+    if any(item.lower() in text for item in watchlist):
+        return "P"
+    if any(term in text for term in ["bay area", "san francisco", "berkeley", "baja california", "bcs", "earthquake"]):
+        return "L"
+    if any(term in text for term in ["fed", "inflation", "cpi", "rates", "rate cut", "jobs", "employment", "treasury"]):
+        return "E"
+    if any(term in text for term in ["uranium", "nuclear", "cameco", "ccj", "kazatomprom", "kazakhstan"]):
+        return "P"
+    if any(term in text for term in ["iran", "russia", "sanction", "war", "shipping", "strait", "conflict"]):
+        return "G"
+    return "G"
+
+
+def get_nyt_headline_candidates(query, category_hint=None, watchlist=None):
     try:
         q = quote_plus(query)
         url = f"https://api.nytimes.com/svc/search/v2/articlesearch.json?q={q}&sort=newest&api-key={NYT_API_KEY}"
         data = requests.get(url, timeout=10).json()
-        docs = data.get("response", {}).get("docs", [])[:3]
+        docs = data.get("response", {}).get("docs", [])[:2]
         candidates = []
 
         for doc in docs:
@@ -1390,8 +1632,9 @@ def get_nyt_headline_candidates(query):
             snippet = doc.get("snippet") or doc.get("abstract") or ""
             section = doc.get("section_name") or ""
             if headline:
+                category = category_hint or classify_news_category(query, headline, snippet, section, watchlist=watchlist)
                 candidates.append({
-                    "category": "G",
+                    "category": category,
                     "tier": 2,
                     "headline": headline,
                     "snippet": snippet,
@@ -1425,15 +1668,16 @@ def get_fred_candidate(category, tier, series):
 
 def build_poll_candidates():
     candidates = []
+    watchlist = get_watchlist()
 
     for category, tier, series in POLL_SERIES:
         candidate = get_fred_candidate(category, tier, series)
         if candidate:
             candidates.append(candidate)
 
-    candidates.extend(get_nyt_headline_candidates("uranium"))
-    candidates.extend(get_nyt_headline_candidates("nuclear energy"))
-    candidates.extend(get_nyt_headline_candidates("iran energy"))
+    for query, category_hint in NEWS_QUERIES:
+        candidates.extend(get_nyt_headline_candidates(query, category_hint=category_hint, watchlist=watchlist))
+
     return dedupe_candidates(candidates)
 
 
@@ -1609,6 +1853,34 @@ def is_daily_brief_question(text):
         "what's today's brief",
         "today's brief",
     }
+
+
+def is_portfolio_show_question(text):
+    t = text.lower().strip()
+    phrases = {
+        "what's in my portfolio",
+        "whats in my portfolio",
+        "show my portfolio",
+        "what is in my portfolio",
+        "show portfolio",
+    }
+    return t in phrases
+
+
+def extract_portfolio_symbols(text):
+    patterns = [
+        r"^\s*add\s+(.+?)\s+to\s+my\s+portfolio\s*$",
+        r"^\s*my portfolio is\s+(.+?)\s*$",
+        r"^\s*i own\s+(.+?)\s*$",
+        r"^\s*my holdings are\s+(.+?)\s*$",
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, text.strip(), re.IGNORECASE)
+        if match:
+            symbols = extract_symbols_from_text(match.group(1))
+            if symbols:
+                return symbols
+    return None
 
 
 def normalize_ticker_candidate(token):
@@ -1854,6 +2126,13 @@ def route(text):
     if is_daily_brief_question(text):
         return ("daily_brief", None)
 
+    portfolio_symbols = extract_portfolio_symbols(text)
+    if portfolio_symbols:
+        return ("portfolio_update", portfolio_symbols)
+
+    if is_portfolio_show_question(text):
+        return ("portfolio_show", None)
+
     if t.startswith("add "):
         return ("add", extract_watchlist_item(text, "add"))
 
@@ -1964,6 +2243,8 @@ def task_poll():
 def task_daily_brief():
     brief = compose_daily_brief(include_debug=True)
     result = send_whatsapp_message(brief)
+    if result.get("ok"):
+        log_outbound_message("daily_brief", brief)
     return app.response_class(
         response=json.dumps({"message": brief, "send_result": result}, indent=2),
         status=200,
@@ -1975,6 +2256,8 @@ def task_daily_brief():
 def task_gratitude():
     prompt = "What is one thing you were grateful for today?"
     result = send_whatsapp_message(prompt)
+    if result.get("ok"):
+        log_outbound_message("gratitude", prompt)
     return app.response_class(
         response=json.dumps({"message": prompt, "send_result": result}, indent=2),
         status=200,
@@ -2017,6 +2300,16 @@ def sms():
             return str(resp)
         add_to_watchlist(value)
         resp.message(f"Added {value}.")
+        return str(resp)
+
+    if intent == "portfolio_update":
+        upsert_portfolio_symbols(value, source_text=msg)
+        resp.message(f"Portfolio noted: {', '.join(value)}.")
+        return str(resp)
+
+    if intent == "portfolio_show":
+        holdings = [item["symbol"] for item in get_portfolio_holdings(limit=12)]
+        resp.message(f"Portfolio: {', '.join(holdings)}" if holdings else "Portfolio is empty.")
         return str(resp)
 
     if intent == "remove":
