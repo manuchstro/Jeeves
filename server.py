@@ -438,6 +438,45 @@ def get_recent_alert_feedback(limit=20):
     return rows
 
 
+def get_feedback_profile(limit=20):
+    recent = get_recent_alert_feedback(limit=limit)
+    sensitivity = 0
+    urgency = 0
+    affirmations = 0
+
+    for item in recent:
+        feedback_type = item["feedback_type"]
+        if feedback_type == "more like this":
+            sensitivity += 1
+        elif feedback_type == "too much noise":
+            sensitivity -= 1
+        elif feedback_type == "late":
+            urgency += 1
+        elif feedback_type == "good alert":
+            affirmations += 1
+
+    sensitivity = max(-2, min(2, sensitivity))
+    urgency = max(0, min(2, urgency))
+
+    return {
+        "sensitivity": sensitivity,
+        "urgency": urgency,
+        "affirmations": affirmations,
+    }
+
+
+def get_last_non_feedback_intent(limit=6):
+    events = get_recent_interaction_events(limit=limit)
+    for event in events:
+        if event["intent"] != "alert_feedback":
+            return event["intent"]
+    return None
+
+
+def feedback_context_allowed():
+    return get_last_non_feedback_intent(limit=6) in {"daily_brief"}
+
+
 def get_memory_items(scope, limit=20):
     conn = get_conn()
     cur = conn.cursor()
@@ -1209,6 +1248,7 @@ def score_candidate(candidate, watchlist):
     headline = candidate["headline"].lower()
     score = 0
     reasons = []
+    feedback_profile = get_feedback_profile(limit=20)
 
     for keyword, points in THEME_KEYWORDS.items():
         if keyword in headline:
@@ -1231,6 +1271,14 @@ def score_candidate(candidate, watchlist):
     if candidate["source"] == "NYT":
         score += 1
         reasons.append("source:nyt")
+
+    if feedback_profile["sensitivity"] != 0:
+        score += feedback_profile["sensitivity"]
+        reasons.append(f"feedback:sensitivity:{feedback_profile['sensitivity']:+d}")
+
+    if feedback_profile["urgency"] > 0 and candidate["source"] == "NYT":
+        score += 1
+        reasons.append("feedback:urgency")
 
     if score >= 6:
         tier = 1
@@ -1527,40 +1575,77 @@ def is_daily_brief_question(text):
     }
 
 
-def extract_ticker_symbols(text):
-    upper_text = text.upper()
-    raw_tokens = re.findall(r"\b[A-Z]{1,5}\b", upper_text)
+def normalize_ticker_candidate(token):
+    cleaned = re.sub(r"[^A-Za-z]", "", token or "").upper()
+    if not cleaned or len(cleaned) > 5:
+        return None
+
     stopwords = {
         "WHAT", "WHATS", "IS", "THE", "MY", "PRICE", "STOCK", "QUOTE",
         "OF", "AND", "FOR", "HOW", "DOING", "TODAY", "AT", "TRADING",
-        "SHARE", "SHARES", "WAS", "ARE",
+        "SHARE", "SHARES", "WAS", "ARE", "HAS", "PERFORMED", "WITH",
+        "SHOW", "TELL", "ME", "ABOUT",
     }
-    tickers = []
+    if cleaned in stopwords:
+        return None
+    return cleaned
 
-    for token in raw_tokens:
-        if token in stopwords:
-            continue
-        if token not in tickers:
-            tickers.append(token)
+
+def extract_market_tickers(text):
+    patterns = [
+        r"\b([A-Za-z]{1,5})\b(?=\s+(?:stock|shares?|ticker)\b)",
+        r"(?:price|quote|performance|performed|trading at|traded at)\s+(?:of\s+)?(?:the\s+)?([A-Za-z]{1,5})\b",
+        r"(?:what is|what's|how is|how has|show me|tell me)\s+(?:the\s+)?([A-Za-z]{1,5})\b(?=(?:\s+stock|\s+ticker|\s+shares|\s+price|\s+quote|\s+performance|\s+performed|\b))",
+    ]
+
+    tickers = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            ticker = normalize_ticker_candidate(match.group(1))
+            if ticker and ticker not in tickers:
+                tickers.append(ticker)
+
+    if tickers:
+        return tickers
+
+    fallback_tokens = re.findall(r"\b[A-Za-z]{1,5}\b", text)
+    for token in fallback_tokens:
+        ticker = normalize_ticker_candidate(token)
+        if ticker and ticker not in tickers:
+            tickers.append(ticker)
 
     return tickers
 
 
-def is_ticker_quote_question(text):
+def interpret_market_data_question(text):
     t = text.lower()
-    quote_terms = [
-        "stock price",
-        "price",
+    if "watchlist" in t:
+        return None
+
+    market_terms = [
+        "stock",
+        "ticker",
         "quote",
-        "trading at",
+        "price",
         "share price",
         "shares",
-        "performed",
         "performance",
+        "performed",
+        "trading at",
+        "traded at",
     ]
-    if "watchlist" in t:
-        return False
-    return any(term in t for term in quote_terms) and bool(extract_ticker_symbols(text))
+
+    if not any(term in t for term in market_terms):
+        return None
+
+    tickers = extract_market_tickers(text)
+    if not tickers:
+        return None
+
+    return {
+        "intent": "ticker_quote",
+        "tickers": tickers,
+    }
 
 # ---------------- MASSIVE ----------------
 
@@ -1725,6 +1810,7 @@ def format_ticker_quote_reply(tickers, snapshots):
 
 def route(text):
     t = text.lower()
+    market_question = interpret_market_data_question(text)
 
     if is_feedback_message(text):
         return ("alert_feedback", t.strip())
@@ -1741,8 +1827,8 @@ def route(text):
     if is_watchlist_stats_question(text):
         return ("watchlist_stats", None)
 
-    if is_ticker_quote_question(text):
-        return ("ticker_quote", extract_ticker_symbols(text))
+    if market_question:
+        return (market_question["intent"], market_question["tickers"])
 
     if "watchlist" in t:
         return ("show", None)
@@ -1852,6 +1938,9 @@ def sms():
     log_interaction_event(intent, msg)
 
     if intent == "alert_feedback":
+        if not feedback_context_allowed():
+            resp.message("Feedback only applies to alerts or daily briefs.")
+            return str(resp)
         log_alert_feedback(value, msg)
         upsert_memory(
             "working",
