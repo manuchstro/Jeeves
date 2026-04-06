@@ -211,6 +211,42 @@ def init_db():
     """)
 
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS event_contexts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_hash TEXT NOT NULL UNIQUE,
+        alert_id TEXT,
+        category TEXT NOT NULL,
+        tier INTEGER,
+        source TEXT,
+        headline TEXT NOT NULL,
+        snippet TEXT,
+        section TEXT,
+        published_at TEXT,
+        fingerprint TEXT,
+        semantic_text TEXT,
+        body_text TEXT,
+        web_url TEXT,
+        score INTEGER,
+        selection_reasons_json TEXT,
+        raw_payload_json TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS brief_event_map (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        brief_run_id TEXT NOT NULL,
+        reference_code TEXT NOT NULL,
+        alert_id TEXT,
+        event_hash TEXT NOT NULL,
+        headline TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS event_hashes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         event_hash TEXT NOT NULL UNIQUE,
@@ -1549,6 +1585,227 @@ def record_event_embedding(event_hash, category, headline, semantic_text, embedd
     conn.close()
 
 
+def serialize_json(value, fallback=None):
+    try:
+        return json.dumps(value)
+    except:
+        return json.dumps(fallback if fallback is not None else {})
+
+
+def build_candidate_body_text(candidate):
+    if not candidate:
+        return ""
+
+    parts = []
+    for value in [
+        candidate.get("body_text"),
+        candidate.get("lead_paragraph"),
+        candidate.get("abstract"),
+        candidate.get("snippet"),
+    ]:
+        cleaned = (value or "").strip()
+        if cleaned and cleaned not in parts:
+            parts.append(cleaned)
+
+    if candidate.get("source") == "FRED" and not parts:
+        parts.append(candidate.get("headline", ""))
+
+    return "\n\n".join(parts).strip()
+
+
+def upsert_event_context(alert_id, event_hash, category, tier, candidate):
+    if not candidate:
+        return
+
+    body_text = build_candidate_body_text(candidate)
+    selection_reasons = candidate.get("selection_reasons", [])
+    raw_payload = candidate.get("raw_payload", candidate)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO event_contexts (
+            event_hash, alert_id, category, tier, source, headline, snippet, section,
+            published_at, fingerprint, semantic_text, body_text, web_url, score,
+            selection_reasons_json, raw_payload_json, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(event_hash) DO UPDATE SET
+            alert_id = excluded.alert_id,
+            category = excluded.category,
+            tier = excluded.tier,
+            source = excluded.source,
+            headline = excluded.headline,
+            snippet = excluded.snippet,
+            section = excluded.section,
+            published_at = excluded.published_at,
+            fingerprint = excluded.fingerprint,
+            semantic_text = excluded.semantic_text,
+            body_text = excluded.body_text,
+            web_url = excluded.web_url,
+            score = excluded.score,
+            selection_reasons_json = excluded.selection_reasons_json,
+            raw_payload_json = excluded.raw_payload_json,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            event_hash,
+            alert_id,
+            category.upper(),
+            tier,
+            candidate.get("source"),
+            candidate.get("headline"),
+            candidate.get("snippet", ""),
+            candidate.get("section", ""),
+            candidate.get("published_at"),
+            build_event_fingerprint(candidate),
+            build_semantic_text(candidate),
+            body_text,
+            candidate.get("web_url", ""),
+            candidate.get("score"),
+            serialize_json(selection_reasons, fallback=[]),
+            serialize_json(raw_payload, fallback={}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_event_context(event_hash=None, alert_id=None):
+    if not event_hash and not alert_id:
+        return None
+
+    conn = get_conn()
+    cur = conn.cursor()
+    if event_hash:
+        cur.execute(
+            """
+            SELECT *
+            FROM event_contexts
+            WHERE event_hash = ?
+            LIMIT 1
+            """,
+            (event_hash,),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT *
+            FROM event_contexts
+            WHERE alert_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (alert_id,),
+        )
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def build_brief_display_codes(alerts):
+    counts = {}
+    order = {}
+    for item in alerts:
+        base = f"{item['category']}{item['tier']}"
+        counts[base] = counts.get(base, 0) + 1
+
+    for item in alerts:
+        base = f"{item['category']}{item['tier']}"
+        order[base] = order.get(base, 0) + 1
+        item["display_code"] = base if counts[base] == 1 else f"{base}.{order[base]}"
+
+    return alerts
+
+
+def store_brief_event_map(alerts):
+    if not alerts:
+        return
+
+    brief_run_id = datetime.now(LOCAL_TZ).strftime("%Y%m%d%H%M%S")
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        DELETE FROM brief_event_map
+        WHERE id NOT IN (
+            SELECT id
+            FROM brief_event_map
+            ORDER BY id DESC
+            LIMIT 200
+        )
+        """
+    )
+
+    for item in alerts:
+        reference_codes = [item["display_code"]]
+        if item.get("alert_id"):
+            reference_codes.append(item["alert_id"])
+        base_code = f"{item['category']}{item['tier']}"
+        if item["display_code"] != base_code:
+            reference_codes.append(base_code)
+
+        for reference_code in reference_codes:
+            cur.execute(
+                """
+                INSERT INTO brief_event_map (brief_run_id, reference_code, alert_id, event_hash, headline)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    brief_run_id,
+                    reference_code.upper(),
+                    item.get("alert_id"),
+                    item["event_hash"],
+                    item["headline"],
+                ),
+            )
+
+    conn.commit()
+    conn.close()
+
+
+def resolve_brief_reference(reference_code):
+    ref = (reference_code or "").strip().upper()
+    if not ref:
+        return {"status": "missing"}
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT brief_run_id
+        FROM brief_event_map
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    )
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return {"status": "missing"}
+
+    brief_run_id = row["brief_run_id"]
+    cur.execute(
+        """
+        SELECT reference_code, alert_id, event_hash, headline
+        FROM brief_event_map
+        WHERE brief_run_id = ?
+          AND reference_code = ?
+        ORDER BY id DESC
+        """,
+        (brief_run_id, ref),
+    )
+    matches = [dict(item) for item in cur.fetchall()]
+    conn.close()
+
+    if not matches:
+        return {"status": "missing"}
+    if len(matches) > 1:
+        return {"status": "ambiguous", "matches": matches}
+    return {"status": "ok", "match": matches[0]}
+
+
 def get_embedding(text):
     if not text:
         return None
@@ -1670,6 +1927,8 @@ def log_alert(category, tier, headline, sent_to_user=1, candidate=None):
     conn.close()
 
     record_event_hash(event_hash, category.upper(), headline)
+    if candidate is not None:
+        upsert_event_context(alert_id, event_hash, category, tier, candidate)
     if candidate is not None and semantic_result:
         record_event_embedding(
             event_hash,
@@ -1723,10 +1982,26 @@ def get_recent_alerts_for_brief(limit=12, include_debug=False):
     if include_debug:
         cur.execute(
             """
-            SELECT alert_id, category, tier, headline, sent_to_user, created_at
-            FROM alert_log
-            WHERE DATE(created_at) = DATE('now')
-            ORDER BY tier ASC, id DESC
+            SELECT
+                a.alert_id,
+                a.category,
+                a.tier,
+                a.headline,
+                a.event_hash,
+                a.sent_to_user,
+                a.created_at,
+                e.source,
+                e.snippet,
+                e.section,
+                e.published_at,
+                e.body_text,
+                e.web_url,
+                e.selection_reasons_json
+            FROM alert_log a
+            LEFT JOIN event_contexts e
+              ON e.event_hash = a.event_hash
+            WHERE DATE(a.created_at) = DATE('now')
+            ORDER BY a.tier ASC, a.id DESC
             LIMIT ?
             """,
             (limit,),
@@ -1734,11 +2009,27 @@ def get_recent_alerts_for_brief(limit=12, include_debug=False):
     else:
         cur.execute(
             """
-            SELECT alert_id, category, tier, headline, sent_to_user, created_at
-            FROM alert_log
-            WHERE DATE(created_at) = DATE('now')
-              AND sent_to_user = 1
-            ORDER BY tier ASC, id DESC
+            SELECT
+                a.alert_id,
+                a.category,
+                a.tier,
+                a.headline,
+                a.event_hash,
+                a.sent_to_user,
+                a.created_at,
+                e.source,
+                e.snippet,
+                e.section,
+                e.published_at,
+                e.body_text,
+                e.web_url,
+                e.selection_reasons_json
+            FROM alert_log a
+            LEFT JOIN event_contexts e
+              ON e.event_hash = a.event_hash
+            WHERE DATE(a.created_at) = DATE('now')
+              AND a.sent_to_user = 1
+            ORDER BY a.tier ASC, a.id DESC
             LIMIT ?
             """,
             (limit,),
@@ -1799,12 +2090,14 @@ def compose_daily_brief(include_debug=False):
     brief_tier_limit = feedback_profile["brief_tier_limit"]
     filtered_alerts = [item for item in alerts if item["tier"] <= brief_tier_limit]
     filtered_alerts = filtered_alerts[:5]
+    filtered_alerts = build_brief_display_codes(filtered_alerts)
 
     lines = []
     if filtered_alerts:
         lines.append("Daily brief:")
         for item in filtered_alerts:
-            lines.append(f"{item['category']}{item['tier']}: {item['headline']}")
+            lines.append(f"{item['display_code']}: {item['headline']}")
+        store_brief_event_map(filtered_alerts)
 
     if is_trading_day_now():
         portfolio_section = get_portfolio_market_section(max_items=4)
@@ -1819,6 +2112,68 @@ def compose_daily_brief(include_debug=False):
         return "Nothing to report."
 
     return "\n".join(lines)
+
+
+def expand_brief_event(reference_code):
+    resolved = resolve_brief_reference(reference_code)
+    if resolved["status"] == "missing":
+        return "I don't know which brief item that is."
+    if resolved["status"] == "ambiguous":
+        headlines = [item["headline"] for item in resolved["matches"][:2]]
+        return "That code is ambiguous. Be more specific."
+
+    match = resolved["match"]
+    context = get_event_context(event_hash=match["event_hash"])
+    if not context:
+        return "I don't have enough stored context for that item."
+
+    reasons = []
+    try:
+        reasons = json.loads(context.get("selection_reasons_json") or "[]")
+    except:
+        reasons = []
+
+    prompt = f"""
+You are Jeeves. Expand briefly on this alert item for Manu.
+
+Reference code: {reference_code}
+Headline: {context.get("headline", "")}
+Snippet: {context.get("snippet", "")}
+Section: {context.get("section", "")}
+Source: {context.get("source", "")}
+Published at: {context.get("published_at", "")}
+Selection reasons: {", ".join(reasons)}
+Stored article/body text:
+{context.get("body_text", "")}
+
+Write a short response with exactly these parts:
+1. What happened
+2. Why it matters
+3. Why Jeeves selected it
+
+Keep it concise and specific. Do not mention missing data unless necessary.
+"""
+
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are Jeeves. Be concise, specific, and useful."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        return completion.choices[0].message.content.strip()
+    except:
+        lines = [
+            f"{reference_code}: {context.get('headline', '')}",
+        ]
+        if context.get("snippet"):
+            lines.append(context["snippet"])
+        if reasons:
+            lines.append("Why selected: " + ", ".join(reasons[:3]))
+        if context.get("web_url"):
+            lines.append(context["web_url"])
+        return "\n".join(lines)
 
 
 def ensure_whatsapp_prefix(number):
@@ -2011,7 +2366,10 @@ def get_nyt_headline_candidates(query, category_hint=None, watchlist=None):
             headline = (doc.get("headline") or {}).get("main")
             pub_date = (doc.get("pub_date") or "")[:19]
             snippet = doc.get("snippet") or doc.get("abstract") or ""
+            abstract = doc.get("abstract") or ""
+            lead_paragraph = doc.get("lead_paragraph") or ""
             section = doc.get("section_name") or ""
+            web_url = doc.get("web_url") or ""
             if headline:
                 category = category_hint or classify_news_category(query, headline, snippet, section, watchlist=watchlist)
                 candidates.append({
@@ -2019,9 +2377,18 @@ def get_nyt_headline_candidates(query, category_hint=None, watchlist=None):
                     "tier": 2,
                     "headline": headline,
                     "snippet": snippet,
+                    "abstract": abstract,
+                    "lead_paragraph": lead_paragraph,
+                    "body_text": build_candidate_body_text({
+                        "lead_paragraph": lead_paragraph,
+                        "abstract": abstract,
+                        "snippet": snippet,
+                    }),
                     "section": section,
                     "source": "NYT",
                     "published_at": pub_date,
+                    "web_url": web_url,
+                    "raw_payload": doc,
                 })
 
         return candidates
@@ -2036,14 +2403,17 @@ def get_fred_candidate(category, tier, series):
 
     label = FRED_SERIES.get(series, {}).get("label", series)
     headline = f"{label}: {observation['value']} ({observation['date']})"
+    body_text = f"{label} latest reading is {observation['value']} as of {observation['date']}."
     return {
         "category": category,
         "tier": tier,
         "headline": headline,
         "snippet": "",
+        "body_text": body_text,
         "section": "macro",
         "source": "FRED",
         "published_at": observation["date"],
+        "raw_payload": observation,
     }
 
 
@@ -2069,6 +2439,12 @@ def run_poll_cycle(log_to_alerts=True):
 
     for candidate in candidates:
         scoring = score_candidate(candidate, watchlist)
+        candidate = {
+            **candidate,
+            "score": scoring["score"],
+            "selection_reasons": scoring["reasons"],
+            "assigned_tier": scoring["tier"],
+        }
         result = {
             "category": candidate["category"],
             "tier": scoring["tier"],
@@ -2234,6 +2610,13 @@ def is_daily_brief_question(text):
         "what's today's brief",
         "today's brief",
     }
+
+
+def interpret_expand_request(text):
+    match = re.match(r"^\s*expand(?:\s+on)?\s+([A-Za-z]\d(?:\.\d+|-\d+)?)\s*$", text.strip(), re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).upper()
 
 
 def is_portfolio_show_question(text):
@@ -2538,12 +2921,16 @@ def format_ticker_quote_reply(tickers, snapshots):
 def route(text):
     t = text.lower()
     market_question = interpret_market_data_question(text)
+    expand_reference = interpret_expand_request(text)
 
     if is_feedback_message(text):
         return ("alert_feedback", t.strip())
 
     if is_daily_brief_question(text):
         return ("daily_brief", None)
+
+    if expand_reference:
+        return ("event_expand", expand_reference)
 
     portfolio_symbols = extract_portfolio_symbols(text)
     if portfolio_symbols:
@@ -2786,6 +3173,10 @@ def sms():
 
     if intent == "daily_brief":
         resp.message(compose_daily_brief(include_debug=True))
+        return str(resp)
+
+    if intent == "event_expand":
+        resp.message(expand_brief_event(value))
         return str(resp)
 
     if intent == "fred":
