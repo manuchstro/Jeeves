@@ -305,6 +305,16 @@ def init_db():
     )
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS security_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_type TEXT NOT NULL,
+        source_number TEXT,
+        message_text TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -543,6 +553,27 @@ def log_outbound_message(message_type, body):
     )
     conn.commit()
     conn.close()
+
+
+def log_security_event(event_type, source_number=None, message_text=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO security_events (event_type, source_number, message_text)
+        VALUES (?, ?, ?)
+        """,
+        (event_type, source_number, message_text),
+    )
+    conn.commit()
+    conn.close()
+
+
+def build_suspicious_message_warning(source_number):
+    timestamp = datetime.now(LOCAL_TZ).strftime("%-I:%M %p PT on %B %-d")
+    if source_number:
+        return f"Warning. Suspicious message activity at {timestamp} from {source_number}. Check Twilio logs."
+    return f"Warning. Suspicious message activity at {timestamp}. Check Twilio logs."
 
 
 def get_recent_alert_feedback(limit=20):
@@ -2279,6 +2310,11 @@ def sms():
     resp = MessagingResponse()
 
     if from_number != MY_NUMBER:
+        log_security_event("unauthorized_message", source_number=from_number, message_text=msg)
+        warning = build_suspicious_message_warning(from_number)
+        result = send_whatsapp_message(warning)
+        if result.get("ok"):
+            log_outbound_message("security_warning", warning)
         return ""
 
     process_memory_updates(msg)
