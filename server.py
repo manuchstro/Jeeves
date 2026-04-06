@@ -86,6 +86,8 @@ EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM")
+RAILWAY_GIT_COMMIT_SHA = os.environ.get("RAILWAY_GIT_COMMIT_SHA") or os.environ.get("SOURCE_COMMIT")
+RAILWAY_DEPLOYMENT_ID = os.environ.get("RAILWAY_DEPLOYMENT_ID")
 LOCAL_TZ = ZoneInfo("America/Los_Angeles")
 
 FRED_SERIES = {
@@ -400,6 +402,16 @@ def init_db():
         source_number TEXT,
         message_text TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS deploy_announcements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        deploy_key TEXT NOT NULL UNIQUE,
+        commit_sha TEXT,
+        deployment_id TEXT,
+        announced_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
     """)
 
@@ -744,6 +756,36 @@ def log_outbound_message(message_type, body):
     )
     conn.commit()
     conn.close()
+
+
+def get_current_deploy_key():
+    commit_sha = (RAILWAY_GIT_COMMIT_SHA or "").strip()
+    deployment_id = (RAILWAY_DEPLOYMENT_ID or "").strip()
+
+    if deployment_id and commit_sha:
+        return f"{deployment_id}:{commit_sha}"
+    if deployment_id:
+        return deployment_id
+    if commit_sha:
+        return commit_sha
+    return None
+
+
+def mark_deploy_announced(deploy_key):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO deploy_announcements (deploy_key, commit_sha, deployment_id)
+        VALUES (?, ?, ?)
+        ON CONFLICT(deploy_key) DO NOTHING
+        """,
+        (deploy_key, RAILWAY_GIT_COMMIT_SHA, RAILWAY_DEPLOYMENT_ID),
+    )
+    conn.commit()
+    inserted = cur.rowcount > 0
+    conn.close()
+    return inserted
 
 
 def log_security_event(event_type, source_number=None, message_text=None):
@@ -2388,6 +2430,27 @@ def send_whatsapp_message(body):
     except Exception as exc:
         return {"ok": False, "reason": "exception", "error": str(exc)}
 
+
+def announce_current_deploy_once():
+    deploy_key = get_current_deploy_key()
+    if not deploy_key:
+        return {"ok": False, "reason": "missing_deploy_key"}
+
+    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM, MY_NUMBER]):
+        return {"ok": False, "reason": "missing_twilio_config"}
+
+    inserted = mark_deploy_announced(deploy_key)
+    if not inserted:
+        return {"ok": False, "reason": "already_announced"}
+
+    short_sha = (RAILWAY_GIT_COMMIT_SHA or "unknown")[:7]
+    message = f"Jeeves updated: deployed commit {short_sha}."
+    result = send_whatsapp_message(message)
+    if result.get("ok"):
+        log_outbound_message("deploy_update", message)
+        return {"ok": True, "message": message}
+    return result
+
 # ---------------- POLLING ----------------
 
 def score_candidate(candidate, watchlist):
@@ -3273,6 +3336,7 @@ def route(text):
     return ("none", None)
 
 init_db()
+announce_current_deploy_once()
 
 @app.route("/", methods=["GET"])
 def home():
