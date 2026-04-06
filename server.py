@@ -12,7 +12,7 @@ import base64
 import random
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 client = OpenAI()
 
@@ -81,6 +81,7 @@ FRED_API_KEY = os.environ.get("FRED_API_KEY")
 NYT_API_KEY = os.environ.get("NYT_API_KEY")
 MASSIVE_API_KEY = os.environ.get("MASSIVE_API_KEY")
 TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY")
+CURRENTS_API_KEY = os.environ.get("CURRENTS_API_KEY")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
@@ -151,6 +152,8 @@ NEWS_QUERIES = [
     ("baja california sur", "L"),
 ]
 
+CURRENTS_MIN_INTERVAL_MINUTES = 90
+
 PROTECTED_MEMORY_CATEGORIES = {
     "core_traits",
     "defining_moments",
@@ -174,6 +177,14 @@ def get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def extract_url_domain(url):
+    try:
+        netloc = urlparse(url or "").netloc.lower()
+        return netloc[4:] if netloc.startswith("www.") else netloc
+    except:
+        return ""
 
 
 def init_db():
@@ -366,6 +377,14 @@ def init_db():
     """)
 
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS source_poll_state (
+        source_name TEXT PRIMARY KEY,
+        last_polled_at DATETIME,
+        note TEXT
+    )
+    """)
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS outbound_messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         message_type TEXT NOT NULL,
@@ -383,6 +402,17 @@ def init_db():
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
     """)
+
+    conn.commit()
+
+    for statement in [
+        "ALTER TABLE event_contexts ADD COLUMN source_label TEXT",
+        "ALTER TABLE event_contexts ADD COLUMN source_refs_json TEXT",
+    ]:
+        try:
+            cur.execute(statement)
+        except sqlite3.OperationalError:
+            pass
 
     conn.commit()
     conn.close()
@@ -1597,6 +1627,25 @@ def serialize_json(value, fallback=None):
         return json.dumps(fallback if fallback is not None else {})
 
 
+def get_candidate_source_label(candidate):
+    source = candidate.get("source") or ""
+    if source == "NYT":
+        return "NYT"
+    if source == "FRED":
+        return "FRED"
+    if source == "CURRENTS":
+        domain = extract_url_domain(candidate.get("web_url", ""))
+        return f"{domain} via Currents" if domain else "Currents"
+    return source or "Unknown"
+
+
+def get_candidate_source_refs(candidate):
+    refs = candidate.get("source_refs") or []
+    if refs:
+        return list(dict.fromkeys(refs))
+    return [get_candidate_source_label(candidate)]
+
+
 def build_candidate_body_text(candidate):
     if not candidate:
         return ""
@@ -1625,6 +1674,8 @@ def upsert_event_context(alert_id, event_hash, category, tier, candidate):
     body_text = build_candidate_body_text(candidate)
     selection_reasons = candidate.get("selection_reasons", [])
     raw_payload = candidate.get("raw_payload", candidate)
+    source_label = get_candidate_source_label(candidate)
+    source_refs = get_candidate_source_refs(candidate)
 
     conn = get_conn()
     cur = conn.cursor()
@@ -1633,9 +1684,9 @@ def upsert_event_context(alert_id, event_hash, category, tier, candidate):
         INSERT INTO event_contexts (
             event_hash, alert_id, category, tier, source, headline, snippet, section,
             published_at, fingerprint, semantic_text, body_text, web_url, score,
-            selection_reasons_json, raw_payload_json, updated_at
+            source_label, source_refs_json, selection_reasons_json, raw_payload_json, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(event_hash) DO UPDATE SET
             alert_id = excluded.alert_id,
             category = excluded.category,
@@ -1650,6 +1701,8 @@ def upsert_event_context(alert_id, event_hash, category, tier, candidate):
             body_text = excluded.body_text,
             web_url = excluded.web_url,
             score = excluded.score,
+            source_label = excluded.source_label,
+            source_refs_json = excluded.source_refs_json,
             selection_reasons_json = excluded.selection_reasons_json,
             raw_payload_json = excluded.raw_payload_json,
             updated_at = CURRENT_TIMESTAMP
@@ -1669,6 +1722,8 @@ def upsert_event_context(alert_id, event_hash, category, tier, candidate):
             body_text,
             candidate.get("web_url", ""),
             candidate.get("score"),
+            source_label,
+            serialize_json(source_refs, fallback=[]),
             serialize_json(selection_reasons, fallback=[]),
             serialize_json(raw_payload, fallback={}),
         ),
@@ -1809,6 +1864,52 @@ def resolve_brief_reference(reference_code):
     if len(matches) > 1:
         return {"status": "ambiguous", "matches": matches}
     return {"status": "ok", "match": matches[0]}
+
+
+def get_source_poll_state(source_name):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT source_name, last_polled_at, note
+        FROM source_poll_state
+        WHERE source_name = ?
+        LIMIT 1
+        """,
+        (source_name,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def source_poll_due(source_name, min_interval_minutes):
+    row = get_source_poll_state(source_name)
+    if not row or not row.get("last_polled_at"):
+        return True
+    try:
+        last = datetime.fromisoformat(row["last_polled_at"])
+        now = datetime.now()
+        return (now - last).total_seconds() >= (min_interval_minutes * 60)
+    except:
+        return True
+
+
+def mark_source_polled(source_name, note=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO source_poll_state (source_name, last_polled_at, note)
+        VALUES (?, CURRENT_TIMESTAMP, ?)
+        ON CONFLICT(source_name) DO UPDATE SET
+            last_polled_at = CURRENT_TIMESTAMP,
+            note = excluded.note
+        """,
+        (source_name, note or ""),
+    )
+    conn.commit()
+    conn.close()
 
 
 def get_embedding(text):
@@ -2003,6 +2104,8 @@ def get_recent_alerts_for_brief(limit=12, include_debug=False):
                 e.published_at,
                 e.body_text,
                 e.web_url,
+                e.source_label,
+                e.source_refs_json,
                 e.selection_reasons_json
             FROM alert_log a
             LEFT JOIN event_contexts e
@@ -2030,6 +2133,8 @@ def get_recent_alerts_for_brief(limit=12, include_debug=False):
                 e.published_at,
                 e.body_text,
                 e.web_url,
+                e.source_label,
+                e.source_refs_json,
                 e.selection_reasons_json
             FROM alert_log a
             LEFT JOIN event_contexts e
@@ -2091,6 +2196,19 @@ def get_watchlist_market_section(max_items=4):
     return build_market_section("Watchlist", watchlist[:max_items], snapshots, max_items=max_items)
 
 
+def format_brief_source_suffix(item):
+    refs = []
+    try:
+        refs = json.loads(item.get("source_refs_json") or "[]")
+    except:
+        refs = []
+    if not refs and item.get("source_label"):
+        refs = [item["source_label"]]
+    if not refs:
+        return ""
+    return f" [{', '.join(refs[:2])}]"
+
+
 def compose_daily_brief(include_debug=False):
     feedback_profile = get_feedback_profile(limit=20)
     alerts = get_recent_alerts_for_brief(limit=12, include_debug=include_debug)
@@ -2103,7 +2221,7 @@ def compose_daily_brief(include_debug=False):
     if filtered_alerts:
         lines.append("Daily brief:")
         for item in filtered_alerts:
-            lines.append(f"{item['display_code']}: {item['headline']}")
+            lines.append(f"{item['display_code']}: {item['headline']}{format_brief_source_suffix(item)}")
         store_brief_event_map(filtered_alerts)
 
     if is_trading_day_now():
@@ -2173,6 +2291,11 @@ def expand_brief_event(reference_code):
         reasons = json.loads(context.get("selection_reasons_json") or "[]")
     except:
         reasons = []
+    source_refs = []
+    try:
+        source_refs = json.loads(context.get("source_refs_json") or "[]")
+    except:
+        source_refs = []
 
     prompt = f"""
 You are Jeeves. Expand briefly on this alert item for Manu.
@@ -2182,6 +2305,7 @@ Headline: {context.get("headline", "")}
 Snippet: {context.get("snippet", "")}
 Section: {context.get("section", "")}
 Source: {context.get("source", "")}
+Source references: {", ".join(source_refs) if source_refs else context.get("source_label", "")}
 Published at: {context.get("published_at", "")}
 Selection reasons: {", ".join(reasons)}
 Stored article/body text:
@@ -2210,6 +2334,8 @@ Keep it concise and specific. Do not mention missing data unless necessary.
         ]
         if context.get("snippet"):
             lines.append(context["snippet"])
+        if source_refs:
+            lines.append("Sources: " + ", ".join(source_refs[:3]))
         if reasons:
             lines.append("Why selected: " + ", ".join(reasons[:3]))
         if context.get("web_url"):
@@ -2291,6 +2417,10 @@ def score_candidate(candidate, watchlist):
         score += 1
         reasons.append("source:nyt")
 
+    if candidate["source"] == "CURRENTS":
+        score += 1
+        reasons.append("source:currents")
+
     if candidate["category"] == "P" and has_trusted_portfolio_match:
         score += 2
         reasons.append("category:portfolio")
@@ -2354,6 +2484,10 @@ def dedupe_candidates(candidates):
     seen_fingerprints = set()
 
     for candidate in candidates:
+        candidate = {
+            **candidate,
+            "source_refs": get_candidate_source_refs(candidate),
+        }
         fingerprint = build_event_fingerprint(candidate)
         if fingerprint in seen_fingerprints:
             continue
@@ -2365,6 +2499,14 @@ def dedupe_candidates(candidates):
             if candidate.get("source") == "FRED" and existing.get("source") == "FRED":
                 continue
             if story_overlap(candidate, existing) >= 0.6:
+                merged_refs = list(dict.fromkeys((existing.get("source_refs") or []) + (candidate.get("source_refs") or [])))
+                existing["source_refs"] = merged_refs
+                if len(candidate.get("body_text", "")) > len(existing.get("body_text", "")):
+                    existing["body_text"] = candidate.get("body_text", "")
+                if len(candidate.get("snippet", "")) > len(existing.get("snippet", "")):
+                    existing["snippet"] = candidate.get("snippet", "")
+                if not existing.get("web_url") and candidate.get("web_url"):
+                    existing["web_url"] = candidate.get("web_url")
                 duplicate = True
                 break
 
@@ -2393,6 +2535,63 @@ def classify_news_category(query, headline, snippet, section, watchlist=None):
     if any(term in text for term in ["iran", "russia", "sanction", "war", "shipping", "strait", "conflict"]):
         return "G"
     return "G"
+
+
+def get_currents_candidates(query, category_hint=None, watchlist=None):
+    if not CURRENTS_API_KEY:
+        return []
+
+    try:
+        response = requests.get(
+            "https://api.currentsapi.services/v1/search",
+            params={
+                "keywords": query,
+                "language": "en",
+                "page_size": 3,
+                "apiKey": CURRENTS_API_KEY,
+            },
+            timeout=10,
+        )
+        if response.status_code != 200:
+            return []
+
+        data = response.json()
+        articles = data.get("news", [])[:3]
+        candidates = []
+
+        for article in articles:
+            headline = article.get("title") or ""
+            snippet = article.get("description") or ""
+            body_text = article.get("description") or ""
+            section = ", ".join(article.get("category") or []) if isinstance(article.get("category"), list) else (article.get("category") or "")
+            web_url = article.get("url") or ""
+            published_at = (article.get("published") or "")[:19]
+            if not headline:
+                continue
+
+            category = category_hint or classify_news_category(query, headline, snippet, section, watchlist=watchlist)
+            source_label = get_candidate_source_label({
+                "source": "CURRENTS",
+                "web_url": web_url,
+            })
+            candidates.append({
+                "category": category,
+                "tier": 2,
+                "headline": headline,
+                "snippet": snippet,
+                "body_text": body_text,
+                "section": section,
+                "source": "CURRENTS",
+                "source_label": source_label,
+                "source_refs": [source_label],
+                "published_at": published_at,
+                "web_url": web_url,
+                "raw_payload": article,
+            })
+
+        return candidates
+    except:
+        return []
 
 
 def get_nyt_headline_candidates(query, category_hint=None, watchlist=None):
@@ -2427,6 +2626,8 @@ def get_nyt_headline_candidates(query, category_hint=None, watchlist=None):
                     }),
                     "section": section,
                     "source": "NYT",
+                    "source_label": "NYT",
+                    "source_refs": ["NYT"],
                     "published_at": pub_date,
                     "web_url": web_url,
                     "raw_payload": doc,
@@ -2470,6 +2671,12 @@ def build_poll_candidates():
     for query, category_hint in NEWS_QUERIES:
         candidates.extend(get_nyt_headline_candidates(query, category_hint=category_hint, watchlist=watchlist))
 
+    if source_poll_due("CURRENTS", CURRENTS_MIN_INTERVAL_MINUTES):
+        query_index = int(datetime.now(LOCAL_TZ).timestamp() // (CURRENTS_MIN_INTERVAL_MINUTES * 60)) % len(NEWS_QUERIES)
+        query, category_hint = NEWS_QUERIES[query_index]
+        candidates.extend(get_currents_candidates(query, category_hint=category_hint, watchlist=watchlist))
+        mark_source_polled("CURRENTS", note=query)
+
     return dedupe_candidates(candidates)
 
 
@@ -2493,6 +2700,7 @@ def run_poll_cycle(log_to_alerts=True):
             "snippet": candidate.get("snippet", ""),
             "section": candidate.get("section", ""),
             "source": candidate["source"],
+            "source_refs": candidate.get("source_refs", [get_candidate_source_label(candidate)]),
             "published_at": candidate["published_at"],
             "score": scoring["score"],
             "score_reasons": scoring["reasons"],
