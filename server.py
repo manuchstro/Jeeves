@@ -5032,7 +5032,6 @@ def compose_daily_brief(include_debug=False):
             section_selected = [item for item in selected_alerts if item.get("category") == code]
             if not section_selected:
                 continue
-            lines.append(f"{code}:")
             for item in section_selected:
                 lines.append(f"{item['display_code']}: {item['headline']}{format_brief_source_suffix(item)}")
         store_brief_event_map(selected_alerts)
@@ -6010,13 +6009,17 @@ def interpret_event_reference(text):
         return direct_match.group(1).upper()
 
     followup_patterns = [
-        r"^\s*(?:expand(?:\s+on)?|follow up on|follow-up on|tell me more about|more on|what about|talk about)\s+([A-Za-z]\d(?:\.\d+|-\d+)?)\s*$",
-        r"^\s*([A-Za-z]\d(?:\.\d+|-\d+)?)\s+(?:please|details|context|more)\s*$",
+        r"^\s*(?:please\s+)?(?:expand(?:\s+on)?|follow up on|follow-up on|tell me more about|more on|what about|talk about)\s+([A-Za-z]\d(?:\.\d+|-\d+)?)\s*(?:please)?\s*[.!?]*\s*$",
+        r"^\s*([A-Za-z]\d(?:\.\d+|-\d+)?)\s+(?:please|details|context|more)\s*[.!?]*\s*$",
     ]
     for pattern in followup_patterns:
         match = re.match(pattern, t, re.IGNORECASE)
         if match:
             return match.group(1).upper()
+
+    loose_match = re.search(r"\b([A-Za-z]\d(?:\.\d+|-\d+)?)\b", t, re.IGNORECASE)
+    if loose_match:
+        return loose_match.group(1).upper()
 
     return None
 
