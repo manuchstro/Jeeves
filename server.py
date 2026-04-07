@@ -887,6 +887,129 @@ def get_recent_email_messages(query=None, max_results=12):
         return None
 
 
+EMAIL_SENDER_ALIASES = {
+    "ibkr": "from:interactivebrokers OR from:interactivebrokers.com",
+    "interactive brokers": "from:interactivebrokers OR from:interactivebrokers.com",
+    "interactivebrokers": "from:interactivebrokers OR from:interactivebrokers.com",
+}
+
+
+def extract_email_days_window(text):
+    t = (text or "").lower()
+    if "today" in t:
+        return 1
+    if "yesterday" in t:
+        return 2
+    if "this week" in t or "past week" in t or "last week" in t:
+        return 7
+    if "this month" in t or "past month" in t or "last month" in t:
+        return 30
+
+    match = re.search(r"\b(?:past|last|recent)\s+(\d{1,2})\s+days?\b", t)
+    if match:
+        return max(1, min(30, int(match.group(1))))
+
+    match = re.search(r"\b(\d{1,2})\s+days?\s+ago\b", t)
+    if match:
+        return max(1, min(30, int(match.group(1)) + 1))
+
+    return 7
+
+
+def extract_email_sender_hint(text):
+    t = (text or "").strip().lower()
+    for alias, query in EMAIL_SENDER_ALIASES.items():
+        if re.search(rf"\b{re.escape(alias)}\b", t):
+            return query
+
+    match = re.search(r"\bfrom\s+([a-z0-9._%+\-@ ]+?)(?:\s+(?:today|yesterday|this week|past week|last week|this month|past month|last month|please|again|lately|recently)|[?.!,]|$)", t, re.IGNORECASE)
+    if match:
+        sender = match.group(1).strip()
+        sender = re.sub(r"\s+", " ", sender)
+        if sender in {"the", "past week", "last week", "this week", "past month", "last month", "this month"}:
+            return ""
+        if sender.startswith(("the past ", "the last ", "the this ")):
+            return ""
+        if "@" in sender:
+            return f"from:{sender}"
+        if sender:
+            return sender
+
+    return ""
+
+
+def fallback_email_request(text):
+    t = (text or "").strip().lower()
+    sender_hint = extract_email_sender_hint(text)
+    days_window = extract_email_days_window(text)
+
+    email_signals = [
+        "email", "emails", "inbox", "mail", "message", "messages",
+        "sent today", "send today", "emailed", "latest", "new email",
+        "new emails", "recent email", "recent emails",
+    ]
+    has_email_context = any(signal in t for signal in email_signals) or bool(sender_hint)
+    if not has_email_context:
+        return {"intent": "none", "query_hint": "", "days_window": 7}
+
+    if re.search(r"\b(?:what|which|any).+\b(?:important|most important|matters most|urgent|action needed)\b", t) or \
+       re.search(r"\bcheck\b.+\b(?:emails|inbox|mail)\b", t) or \
+       re.search(r"\b(?:important|urgent|action needed)\b.+\b(?:emails|inbox|mail)\b", t):
+        return {
+            "intent": "important_recent_email",
+            "query_hint": sender_hint,
+            "days_window": days_window,
+        }
+
+    if re.search(r"\bdid\b.+\bsend\b.+\b(?:today|yet|recently)\b", t):
+        query_hint = sender_hint
+        if days_window <= 2:
+            query_hint = ((query_hint + " ") if query_hint else "") + "newer_than:2d"
+        return {
+            "intent": "latest_ibkr_email" if "interactive brokers" in t or "ibkr" in t or "interactivebrokers" in t else "latest_email",
+            "query_hint": query_hint.strip(),
+            "days_window": days_window,
+        }
+
+    if re.search(r"\b(?:summarize|summary|sum up|brief me on)\b", t):
+        return {
+            "intent": "email_summary",
+            "query_hint": sender_hint,
+            "days_window": days_window,
+        }
+
+    if re.search(r"\b(?:latest|newest|most recent|any new|new)\b", t) or \
+       re.search(r"\bwhat(?:'s| is)\s+(?:my\s+)?latest\b", t):
+        return {
+            "intent": "latest_ibkr_email" if "interactive brokers" in t or "ibkr" in t or "interactivebrokers" in t else "latest_email",
+            "query_hint": sender_hint,
+            "days_window": days_window,
+        }
+
+    if re.search(r"\b(?:what came in|what came through|what did i get)\b", t):
+        return {
+            "intent": "important_recent_email",
+            "query_hint": sender_hint,
+            "days_window": days_window,
+        }
+
+    if sender_hint:
+        return {
+            "intent": "email_summary" if any(term in t for term in ["summarize", "summary", "brief"]) else "latest_email",
+            "query_hint": sender_hint,
+            "days_window": days_window,
+        }
+
+    if "email" in t or "inbox" in t or "mail" in t:
+        return {
+            "intent": "important_recent_email" if any(term in t for term in ["important", "urgent", "action"]) else "latest_email",
+            "query_hint": "",
+            "days_window": days_window,
+        }
+
+    return {"intent": "none", "query_hint": "", "days_window": 7}
+
+
 def interpret_email_request(text):
     prompt = f"""
 Interpret this user message for inbox/email intent.
@@ -919,13 +1042,18 @@ Return:
         intent = (payload.get("inbox_intent") or "none").strip().lower()
         if intent not in {"none", "latest_email", "latest_ibkr_email", "email_summary", "important_recent_email"}:
             intent = "none"
-        return {
+        result = {
             "intent": intent,
             "query_hint": (payload.get("query_hint") or "").strip(),
             "days_window": int(payload.get("days_window") or 7),
         }
+        if result["intent"] == "none":
+            fallback = fallback_email_request(text)
+            if fallback["intent"] != "none":
+                return fallback
+        return result
     except:
-        return {"intent": "none", "query_hint": "", "days_window": 7}
+        return fallback_email_request(text)
 
 
 def format_latest_email_reply(email_data, summary_mode=False):
