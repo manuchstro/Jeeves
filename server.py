@@ -5567,10 +5567,28 @@ def is_news_query_signal(query_text, watchlist=None, trusted_portfolio=None):
     t = (query_text or "").lower()
     if not t:
         return False
+    watchlist_l = [(item or "").lower() for item in (watchlist or []) if item]
+    trusted_l = [(item or "").lower() for item in (trusted_portfolio or []) if item]
+
+    # Reject meta-behavior phrases that are not actual news queries.
+    meta_noise_markers = [
+        "checks ",
+        "uses jeeves",
+        "open ended",
+        "broader",
+        "conversation",
+        "recurring focus",
+        "active concerns",
+    ]
+    if any(marker in t for marker in meta_noise_markers):
+        return False
+    if "watchlist" in t and not any(sym in t for sym in watchlist_l + trusted_l):
+        return False
+
     signal_terms = [
         "fed", "inflation", "cpi", "rate", "rates", "jobs", "employment", "treasury",
         "uranium", "nuclear", "energy", "oil", "gas", "iran", "russia", "sanction",
-        "shipping", "strait", "conflict", "war", "ceasefire", "market", "stock",
+        "shipping", "strait", "conflict", "war", "ceasefire", "stock",
         "earnings", "guidance", "company", "earthquake", "bay area", "california",
     ]
     if any(term in t for term in signal_terms):
