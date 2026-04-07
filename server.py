@@ -57,6 +57,8 @@ DAILY_BRIEF_HOUR = 20
 DAILY_BRIEF_MINUTE = 0
 GRATITUDE_HOUR = 22
 GRATITUDE_MINUTE = 15
+OPEN_METEO_LAT = os.environ.get("OPEN_METEO_LAT", "").strip()
+OPEN_METEO_LON = os.environ.get("OPEN_METEO_LON", "").strip()
 
 # ---------------- DB ----------------
 
@@ -337,6 +339,56 @@ def init_db():
         payload_json TEXT,
         depth_label TEXT NOT NULL DEFAULT 'light',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS weather_daily_context (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        local_date TEXT NOT NULL UNIQUE,
+        temperature_c REAL,
+        precipitation_mm REAL,
+        cloud_cover_pct REAL,
+        humidity_pct REAL,
+        weather_code INTEGER,
+        weather_label TEXT,
+        source TEXT NOT NULL DEFAULT 'open-meteo',
+        confidence REAL NOT NULL DEFAULT 0.7,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS calendar_daily_context (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        local_date TEXT NOT NULL UNIQUE,
+        busy_score REAL NOT NULL DEFAULT 0.0,
+        event_count INTEGER NOT NULL DEFAULT 0,
+        deep_work_blocks INTEGER NOT NULL DEFAULT 0,
+        stress_windows INTEGER NOT NULL DEFAULT 0,
+        summary_text TEXT,
+        source TEXT NOT NULL DEFAULT 'calendar',
+        confidence REAL NOT NULL DEFAULT 0.6,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS sleep_daily_context (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        local_date TEXT NOT NULL UNIQUE,
+        sleep_hours REAL,
+        sleep_quality REAL,
+        steps INTEGER,
+        resting_hr REAL,
+        fatigue_score REAL,
+        summary_text TEXT,
+        source TEXT NOT NULL DEFAULT 'health',
+        confidence REAL NOT NULL DEFAULT 0.6,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
     """)
 
@@ -1699,6 +1751,237 @@ def get_local_date_string(dt=None):
     return (dt or get_local_now()).strftime("%Y-%m-%d")
 
 
+def weather_code_to_label(code):
+    mapping = {
+        0: "clear",
+        1: "mostly_clear",
+        2: "partly_cloudy",
+        3: "overcast",
+        45: "fog",
+        48: "rime_fog",
+        51: "light_drizzle",
+        53: "drizzle",
+        55: "dense_drizzle",
+        61: "light_rain",
+        63: "rain",
+        65: "heavy_rain",
+        71: "light_snow",
+        73: "snow",
+        75: "heavy_snow",
+        80: "light_showers",
+        81: "showers",
+        82: "heavy_showers",
+        95: "thunderstorm",
+    }
+    return mapping.get(int(code), "unknown")
+
+
+def upsert_weather_daily_context(local_date, payload):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO weather_daily_context (
+            local_date, temperature_c, precipitation_mm, cloud_cover_pct,
+            humidity_pct, weather_code, weather_label, source, confidence, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(local_date) DO UPDATE SET
+            temperature_c = excluded.temperature_c,
+            precipitation_mm = excluded.precipitation_mm,
+            cloud_cover_pct = excluded.cloud_cover_pct,
+            humidity_pct = excluded.humidity_pct,
+            weather_code = excluded.weather_code,
+            weather_label = excluded.weather_label,
+            source = excluded.source,
+            confidence = excluded.confidence,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            local_date,
+            payload.get("temperature_c"),
+            payload.get("precipitation_mm"),
+            payload.get("cloud_cover_pct"),
+            payload.get("humidity_pct"),
+            payload.get("weather_code"),
+            payload.get("weather_label"),
+            payload.get("source", "open-meteo"),
+            float(payload.get("confidence") or 0.7),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_weather_daily_context(local_date=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT *
+        FROM weather_daily_context
+        WHERE local_date = ?
+        LIMIT 1
+        """,
+        (local_date or get_local_date_string(),),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def fetch_open_meteo_daily_context(local_date=None):
+    if not OPEN_METEO_LAT or not OPEN_METEO_LON:
+        return None
+    try:
+        params = {
+            "latitude": OPEN_METEO_LAT,
+            "longitude": OPEN_METEO_LON,
+            "hourly": "temperature_2m,precipitation,cloud_cover,relative_humidity_2m,weather_code",
+            "timezone": "America/Los_Angeles",
+            "forecast_days": 1,
+        }
+        response = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=8)
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        hourly = data.get("hourly") or {}
+        temperatures = hourly.get("temperature_2m") or []
+        precip = hourly.get("precipitation") or []
+        clouds = hourly.get("cloud_cover") or []
+        humidity = hourly.get("relative_humidity_2m") or []
+        codes = hourly.get("weather_code") or []
+        if not temperatures:
+            return None
+
+        avg_temp = sum(temperatures) / len(temperatures)
+        total_precip = sum(precip) if precip else 0.0
+        avg_cloud = (sum(clouds) / len(clouds)) if clouds else None
+        avg_humidity = (sum(humidity) / len(humidity)) if humidity else None
+        dominant_code = max(set(codes), key=codes.count) if codes else 0
+
+        payload = {
+            "temperature_c": round(avg_temp, 2),
+            "precipitation_mm": round(total_precip, 2),
+            "cloud_cover_pct": round(avg_cloud, 2) if avg_cloud is not None else None,
+            "humidity_pct": round(avg_humidity, 2) if avg_humidity is not None else None,
+            "weather_code": int(dominant_code),
+            "weather_label": weather_code_to_label(dominant_code),
+            "source": "open-meteo",
+            "confidence": 0.78,
+        }
+        upsert_weather_daily_context(local_date or get_local_date_string(), payload)
+        return payload
+    except:
+        return None
+
+
+def upsert_calendar_daily_context(local_date, payload):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO calendar_daily_context (
+            local_date, busy_score, event_count, deep_work_blocks,
+            stress_windows, summary_text, source, confidence, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(local_date) DO UPDATE SET
+            busy_score = excluded.busy_score,
+            event_count = excluded.event_count,
+            deep_work_blocks = excluded.deep_work_blocks,
+            stress_windows = excluded.stress_windows,
+            summary_text = excluded.summary_text,
+            source = excluded.source,
+            confidence = excluded.confidence,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            local_date,
+            float(payload.get("busy_score") or 0.0),
+            int(payload.get("event_count") or 0),
+            int(payload.get("deep_work_blocks") or 0),
+            int(payload.get("stress_windows") or 0),
+            (payload.get("summary_text") or "").strip(),
+            payload.get("source", "calendar"),
+            float(payload.get("confidence") or 0.6),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_calendar_daily_context(local_date=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT *
+        FROM calendar_daily_context
+        WHERE local_date = ?
+        LIMIT 1
+        """,
+        (local_date or get_local_date_string(),),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def upsert_sleep_daily_context(local_date, payload):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO sleep_daily_context (
+            local_date, sleep_hours, sleep_quality, steps, resting_hr,
+            fatigue_score, summary_text, source, confidence, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(local_date) DO UPDATE SET
+            sleep_hours = excluded.sleep_hours,
+            sleep_quality = excluded.sleep_quality,
+            steps = excluded.steps,
+            resting_hr = excluded.resting_hr,
+            fatigue_score = excluded.fatigue_score,
+            summary_text = excluded.summary_text,
+            source = excluded.source,
+            confidence = excluded.confidence,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            local_date,
+            payload.get("sleep_hours"),
+            payload.get("sleep_quality"),
+            payload.get("steps"),
+            payload.get("resting_hr"),
+            payload.get("fatigue_score"),
+            (payload.get("summary_text") or "").strip(),
+            payload.get("source", "health"),
+            float(payload.get("confidence") or 0.6),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_sleep_daily_context(local_date=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT *
+        FROM sleep_daily_context
+        WHERE local_date = ?
+        LIMIT 1
+        """,
+        (local_date or get_local_date_string(),),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def mark_scheduled_task_run(task_key, local_date=None):
     conn = get_conn()
     cur = conn.cursor()
@@ -2937,26 +3220,76 @@ def store_journal_analysis(text):
 
 
 def get_weather_context_snapshot():
+    local_date = get_local_date_string()
+    stored = get_weather_daily_context(local_date=local_date)
+    if not stored:
+        fetched = fetch_open_meteo_daily_context(local_date=local_date)
+        if fetched:
+            stored = get_weather_daily_context(local_date=local_date)
+    if not stored:
+        return {
+            "available": False,
+            "status": "not_connected",
+            "summary": "",
+        }
+    label = (stored.get("weather_label") or "unknown").replace("_", " ")
     return {
-        "available": False,
-        "status": "not_connected",
-        "summary": "",
+        "available": True,
+        "status": "connected",
+        "summary": f"{label}, {stored.get('temperature_c')}C, precip {stored.get('precipitation_mm')}mm",
+        "features": {
+            "temperature_c": stored.get("temperature_c"),
+            "precipitation_mm": stored.get("precipitation_mm"),
+            "cloud_cover_pct": stored.get("cloud_cover_pct"),
+            "humidity_pct": stored.get("humidity_pct"),
+            "weather_label": stored.get("weather_label"),
+            "confidence": stored.get("confidence"),
+        },
     }
 
 
 def get_sleep_context_snapshot():
+    stored = get_sleep_daily_context(local_date=get_local_date_string())
+    if not stored:
+        return {
+            "available": False,
+            "status": "not_connected",
+            "summary": "",
+        }
     return {
-        "available": False,
-        "status": "not_connected",
-        "summary": "",
+        "available": True,
+        "status": "connected",
+        "summary": (stored.get("summary_text") or f"sleep {stored.get('sleep_hours')}h, fatigue {stored.get('fatigue_score')}"),
+        "features": {
+            "sleep_hours": stored.get("sleep_hours"),
+            "sleep_quality": stored.get("sleep_quality"),
+            "steps": stored.get("steps"),
+            "resting_hr": stored.get("resting_hr"),
+            "fatigue_score": stored.get("fatigue_score"),
+            "confidence": stored.get("confidence"),
+        },
     }
 
 
 def get_calendar_context_snapshot():
+    stored = get_calendar_daily_context(local_date=get_local_date_string())
+    if not stored:
+        return {
+            "available": False,
+            "status": "not_connected",
+            "summary": "",
+        }
     return {
-        "available": False,
-        "status": "not_connected",
-        "summary": "",
+        "available": True,
+        "status": "connected",
+        "summary": (stored.get("summary_text") or f"{stored.get('event_count')} events, busy score {stored.get('busy_score')}"),
+        "features": {
+            "busy_score": stored.get("busy_score"),
+            "event_count": stored.get("event_count"),
+            "deep_work_blocks": stored.get("deep_work_blocks"),
+            "stress_windows": stored.get("stress_windows"),
+            "confidence": stored.get("confidence"),
+        },
     }
 
 
@@ -2965,6 +3298,108 @@ def build_journal_context_snapshot():
         "weather": get_weather_context_snapshot(),
         "sleep": get_sleep_context_snapshot(),
         "calendar": get_calendar_context_snapshot(),
+    }
+
+
+def clamp01(value):
+    return max(0.0, min(1.0, float(value)))
+
+
+def compute_market_stress_signal():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM alert_outcomes
+        WHERE outcome = 'allowed'
+          AND datetime(created_at) >= datetime('now', '-24 hours')
+        """
+    )
+    row = cur.fetchone()
+    allowed = row["count"] if row else 0
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM alert_outcomes
+        WHERE outcome = 'blocked'
+          AND datetime(created_at) >= datetime('now', '-24 hours')
+        """
+    )
+    row = cur.fetchone()
+    blocked = row["count"] if row else 0
+    conn.close()
+    volume = allowed + blocked
+    if volume <= 2:
+        return 0.2
+    if volume <= 6:
+        return 0.45
+    if volume <= 12:
+        return 0.7
+    return 0.85
+
+
+def build_tone_vector(journal_analysis, context_snapshot):
+    weather = (context_snapshot or {}).get("weather", {})
+    sleep = (context_snapshot or {}).get("sleep", {})
+    calendar = (context_snapshot or {}).get("calendar", {})
+
+    weather_features = weather.get("features") or {}
+    sleep_features = sleep.get("features") or {}
+    calendar_features = calendar.get("features") or {}
+
+    stress_level = (journal_analysis or {}).get("stress", "normal").lower()
+    friction = (journal_analysis or {}).get("friction", "low").lower()
+    energy = (journal_analysis or {}).get("energy", "medium").lower()
+    outlook = (journal_analysis or {}).get("outlook", "steady").lower()
+
+    stress_map = {"low": 0.2, "normal": 0.45, "elevated": 0.78}
+    energy_map = {"low": 0.25, "medium": 0.5, "high": 0.8}
+    outlook_map = {"guarded": 0.75, "steady": 0.45, "upbeat": 0.2}
+
+    stress_signal = stress_map.get(stress_level, 0.45)
+    friction_signal = 0.75 if friction == "present" else 0.25
+    energy_signal = energy_map.get(energy, 0.5)
+    outlook_signal = outlook_map.get(outlook, 0.45)
+
+    busy_score = clamp01((calendar_features.get("busy_score") or 0.0))
+    fatigue_score = clamp01((sleep_features.get("fatigue_score") or 0.5))
+    market_stress = compute_market_stress_signal()
+
+    weather_label = (weather_features.get("weather_label") or "").lower()
+    weather_drag = 0.0
+    if any(word in weather_label for word in ["rain", "storm", "overcast", "fog"]):
+        weather_drag = 0.2
+    if weather_label in {"clear", "mostly_clear"}:
+        weather_drag = -0.1
+
+    brevity = clamp01(0.22 + (0.35 * busy_score) + (0.22 * fatigue_score) + (0.18 * stress_signal))
+    directness = clamp01(0.3 + (0.28 * busy_score) + (0.2 * stress_signal) + (0.12 * friction_signal))
+    seriousness = clamp01(0.22 + (0.2 * market_stress) + (0.2 * stress_signal) + (0.2 * outlook_signal) + max(0.0, weather_drag))
+    warmth = clamp01(0.58 + (0.12 * energy_signal) - (0.18 * stress_signal) - (0.16 * fatigue_score) - (0.14 * busy_score) - weather_drag)
+
+    style = "balanced"
+    if brevity >= 0.65 and directness >= 0.6:
+        style = "concise_direct"
+    elif warmth >= 0.62 and seriousness <= 0.45:
+        style = "cheery_light"
+    elif seriousness >= 0.62:
+        style = "restrained_serious"
+
+    return {
+        "brevity": round(brevity, 3),
+        "directness": round(directness, 3),
+        "warmth": round(warmth, 3),
+        "seriousness": round(seriousness, 3),
+        "style": style,
+        "signals": {
+            "busy_score": round(busy_score, 3),
+            "fatigue_score": round(fatigue_score, 3),
+            "market_stress": round(market_stress, 3),
+            "stress_signal": round(stress_signal, 3),
+            "friction_signal": round(friction_signal, 3),
+            "weather_drag": round(weather_drag, 3),
+        },
     }
 
 
@@ -2977,6 +3412,7 @@ def fallback_journal_response_decision(journal_analysis):
 
 
 def decide_journal_response(text, journal_analysis, context_snapshot):
+    tone_vector = build_tone_vector(journal_analysis, context_snapshot)
     prompt = f"""
 Decide whether Jeeves should reply to this journal/gratitude response.
 
@@ -2988,6 +3424,10 @@ Rules:
 - Never flatter for the sake of it.
 - Be human, restrained, perceptive.
 - Weather, sleep, and calendar context matter when available.
+- Use the tone vector as a control matrix.
+- If tone style is concise_direct, prefer shorter responses.
+- If tone style is restrained_serious, avoid cheerfulness.
+- If tone style is cheery_light, warmth can increase slightly but do not be fluffy.
 - Return JSON only.
 
 Journal text:
@@ -2998,6 +3438,9 @@ Journal analysis:
 
 Context:
 {json.dumps(context_snapshot, ensure_ascii=True)}
+
+Tone vector:
+{json.dumps(tone_vector, ensure_ascii=True)}
 
 Return:
 {{
@@ -3026,9 +3469,12 @@ Return:
             "mode": mode,
             "reply": reply,
             "why": (payload.get("why") or "").strip(),
+            "tone_vector": tone_vector,
         }
     except:
-        return fallback_journal_response_decision(journal_analysis)
+        out = fallback_journal_response_decision(journal_analysis)
+        out["tone_vector"] = tone_vector
+        return out
 
 
 def process_memory_updates(text):
@@ -3169,6 +3615,8 @@ def run_nightly_memory_consolidation():
 
 
 def get_memory_debug_summary():
+    context_snapshot = build_journal_context_snapshot()
+    tone_vector = build_tone_vector({}, context_snapshot)
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -3216,6 +3664,8 @@ def get_memory_debug_summary():
         "recent_alert_outcomes": recent_alert_outcomes,
         "recent_event_lineage": recent_event_lineage,
         "recent_nightly_logs": get_recent_nightly_consolidation_logs(limit=6),
+        "context_snapshot": context_snapshot,
+        "tone_vector": tone_vector,
         "semantic_memory_count": len(get_memory_embedding_rows(limit=500)),
     }
 
@@ -5454,10 +5904,19 @@ Return:
 
 def run_generic_reply(user_text):
     try:
+        context_snapshot = build_journal_context_snapshot()
+        tone_vector = build_tone_vector({}, context_snapshot)
+        tone_instruction = (
+            f"Tone vector: {json.dumps(tone_vector, ensure_ascii=True)}. "
+            "Follow this style matrix with restraint. "
+            "Be concise when brevity/directness is high, more warm when warmth is high, "
+            "and serious when seriousness is high. Never be sycophantic."
+        )
         add_message("user", user_text)
         messages = [
             {"role":"system","content":SYSTEM_PROMPT},
             {"role":"system","content":format_memory_context(user_text)},
+            {"role":"system","content":tone_instruction},
         ] + get_recent_messages()
         completion = client.chat.completions.create(model="gpt-4o-mini",messages=messages)
         reply = completion.choices[0].message.content
@@ -5676,6 +6135,60 @@ def debug_memory_consolidate():
     run_nightly_memory_consolidation()
     return app.response_class(
         response=json.dumps(get_memory_debug_summary(), indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/debug/context", methods=["GET"])
+def debug_context():
+    snapshot = build_journal_context_snapshot()
+    tone_vector = build_tone_vector({}, snapshot)
+    return app.response_class(
+        response=json.dumps(
+            {
+                "local_date": get_local_date_string(),
+                "context": snapshot,
+                "tone_vector": tone_vector,
+            },
+            indent=2,
+        ),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/debug/context/calendar", methods=["POST"])
+def debug_context_calendar_upsert():
+    payload = request.get_json(silent=True) or {}
+    local_date = (payload.get("local_date") or get_local_date_string()).strip()
+    upsert_calendar_daily_context(local_date, payload)
+    return app.response_class(
+        response=json.dumps({"ok": True, "local_date": local_date, "row": get_calendar_daily_context(local_date)}, indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/debug/context/sleep", methods=["POST"])
+def debug_context_sleep_upsert():
+    payload = request.get_json(silent=True) or {}
+    local_date = (payload.get("local_date") or get_local_date_string()).strip()
+    upsert_sleep_daily_context(local_date, payload)
+    return app.response_class(
+        response=json.dumps({"ok": True, "local_date": local_date, "row": get_sleep_daily_context(local_date)}, indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/debug/context/weather/refresh", methods=["POST"])
+def debug_context_weather_refresh():
+    local_date = get_local_date_string()
+    payload = fetch_open_meteo_daily_context(local_date=local_date)
+    row = get_weather_daily_context(local_date=local_date)
+    return app.response_class(
+        response=json.dumps({"ok": bool(payload or row), "local_date": local_date, "row": row}, indent=2),
         status=200,
         mimetype="application/json",
     )
