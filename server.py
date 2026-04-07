@@ -164,6 +164,15 @@ SOURCE_GUIDANCE = {
     "FRED": "Authoritative macro/economic data. Strong for releases, weak for narrative interpretation.",
 }
 
+INTEREST_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "from", "into", "about", "your",
+    "have", "will", "would", "should", "could", "very", "more", "less", "much",
+    "than", "then", "they", "them", "their", "what", "when", "where", "which",
+    "because", "while", "across", "using", "used", "often", "asks", "uses",
+    "prefers", "cares", "strongly", "highly", "direct", "alerts", "alert",
+    "conversation", "performance", "market", "markets", "portfolio", "watchlist",
+}
+
 PROTECTED_MEMORY_CATEGORIES = {
     "core_traits",
     "defining_moments",
@@ -1122,6 +1131,42 @@ def build_alert_memory_context(candidates):
         "watchlist": watchlist,
         "trusted_portfolio": trusted_portfolio,
     }
+
+
+def extract_interest_terms_from_text(text, max_terms=8):
+    tokens = re.findall(r"[a-z0-9]+", (text or "").lower())
+    terms = []
+    for token in tokens:
+        if len(token) < 3 or token in INTEREST_STOPWORDS:
+            continue
+        if token not in terms:
+            terms.append(token)
+        if len(terms) >= max_terms:
+            break
+    return terms
+
+
+def get_dynamic_interest_profile():
+    profile = {}
+
+    for symbol in get_watchlist():
+        profile[symbol.lower()] = max(profile.get(symbol.lower(), 0), 5)
+
+    for symbol in get_trusted_portfolio_symbols(limit=20):
+        profile[symbol.lower()] = max(profile.get(symbol.lower(), 0), 6)
+
+    relevant = get_relevant_memories("current interests and recurring focus", limit=12)
+    for item in relevant.get("working", []) + relevant.get("long_term", []):
+        category = item.get("category", "")
+        base_weight = 3 if category in {"behavior_trends", "priorities", "portfolio_profile", "deep_preferences"} else 2
+        for term in extract_interest_terms_from_text(item.get("value", ""), max_terms=10):
+            profile[term] = max(profile.get(term, 0), base_weight)
+
+    for event in get_recent_interaction_events(limit=30):
+        for term in extract_interest_terms_from_text(event.get("message_text", ""), max_terms=6):
+            profile[term] = max(profile.get(term, 0), 1)
+
+    return profile
 
 
 def build_usage_pattern_summary(events):
@@ -2500,11 +2545,12 @@ def score_candidate(candidate, watchlist):
     feedback_profile = get_feedback_profile(limit=20)
     trusted_portfolio_symbols = get_trusted_portfolio_symbols(limit=10)
     has_trusted_portfolio_match = False
+    dynamic_interest_profile = get_dynamic_interest_profile()
 
-    for keyword, points in THEME_KEYWORDS.items():
-        if keyword in combined_text:
+    for term, points in dynamic_interest_profile.items():
+        if term in combined_text:
             score += points
-            reasons.append(f"theme:{keyword}")
+            reasons.append(f"interest:{term}")
 
     for item in watchlist:
         if item.lower() in combined_text:
