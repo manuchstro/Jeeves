@@ -116,25 +116,6 @@ POLL_SERIES = [
     ("E", 2, "UNRATE"),
 ]
 
-THEME_KEYWORDS = {
-    "uranium": 4,
-    "nuclear": 3,
-    "kazatomprom": 4,
-    "ccj": 4,
-    "cameco": 4,
-    "enrichment": 2,
-    "sanction": 2,
-    "sanctions": 2,
-    "strait": 2,
-    "shipping": 2,
-    "energy": 2,
-    "oil": 1,
-    "gas": 1,
-    "iran": 2,
-    "russia": 2,
-    "kazakhstan": 3,
-}
-
 FEEDBACK_RESPONSES = {
     "too much noise": "Certainly, noted.",
     "good alert": "Noted!",
@@ -3191,13 +3172,6 @@ def is_daily_brief_question(text):
         "what's today's brief",
         "today's brief",
     }
-
-
-def interpret_expand_request(text):
-    match = re.match(r"^\s*expand(?:\s+on)?\s+([A-Za-z]\d(?:\.\d+|-\d+)?)\s*$", text.strip(), re.IGNORECASE)
-    if not match:
-        return None
-    return match.group(1).upper()
 
 
 def interpret_event_reference(text):
