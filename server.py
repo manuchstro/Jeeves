@@ -3059,30 +3059,22 @@ def format_fred_reply(series, observation, user_text):
 def is_watchlist_stats_question(text):
     t = text.lower()
 
-    keywords = [
-        "doing",
-        "performance",
-        "performing",
-        "stats",
-        "today",
-        "moves",
-        "movers",
-        "up",
-        "down",
-        "what happened",
-        "how is",
-        "how's",
-    ]
-
     watchlist_terms = [
         "watchlist",
         "my names",
-        "my stocks",
-        "my holdings",
-        "my portfolio",
+        "names on my list",
+        "stocks on my list",
     ]
 
-    has_stats_phrase = any(keyword in t for keyword in keywords)
+    performance_patterns = [
+        r"\bhow (?:is|did|was)\b.+\bwatchlist\b.+\b(?:doing|performing|do|perform|move|moved)\b",
+        r"\bhow (?:is|did|was)\b.+\b(?:my names|names on my list|stocks on my list)\b.+\b(?:doing|performing|do|perform|move|moved)\b",
+        r"\bwatchlist\b.+\b(?:performance|stats|moves|movers|today|up|down)\b",
+        r"\b(?:performance|stats|moves|movers|today|up|down)\b.+\bwatchlist\b",
+        r"\bwhat happened\b.+\bwatchlist\b",
+    ]
+
+    has_stats_phrase = any(re.search(pattern, t, re.IGNORECASE) for pattern in performance_patterns)
     has_watchlist_reference = any(term in t for term in watchlist_terms)
 
     return has_stats_phrase and has_watchlist_reference
