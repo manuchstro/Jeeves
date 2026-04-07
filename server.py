@@ -913,6 +913,53 @@ def article_request_context_allowed():
     return recent_intent in {"daily_brief", "event_expand", "alert_delivery"}
 
 
+def recent_outbound_message_type_within(message_type, hours=6):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id
+        FROM outbound_messages
+        WHERE message_type = ?
+          AND datetime(created_at) >= datetime('now', ?)
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (message_type, f"-{hours} hours"),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row is not None
+
+
+def should_send_no_reply(text):
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+
+    lower_text = stripped.lower()
+
+    if recent_outbound_message_type_within("gratitude", hours=8):
+        return True
+
+    if len(stripped) > 160 and "?" not in stripped:
+        return True
+
+    closed_patterns = [
+        r"\bthat'?s all\b",
+        r"\bno need to respond\b",
+        r"\bno response needed\b",
+        r"\bjust wanted to say\b",
+        r"\bi just wanted to share\b",
+        r"\bgoodnight\b",
+        r"\btalk tomorrow\b",
+    ]
+    if any(re.search(pattern, lower_text, re.IGNORECASE) for pattern in closed_patterns):
+        return True
+
+    return False
+
+
 def get_memory_items(scope, limit=20):
     conn = get_conn()
     cur = conn.cursor()
@@ -3961,6 +4008,12 @@ def sms():
         out = get_news(value)
         resp.message(out if out else "N/A")
         return str(resp)
+
+    if should_send_no_reply(msg):
+        add_message("user", msg)
+        if recent_outbound_message_type_within("gratitude", hours=8):
+            add_gratitude_entry(msg)
+        return ""
 
     try:
         add_message("user", msg)
