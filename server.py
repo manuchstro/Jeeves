@@ -5137,9 +5137,9 @@ Stored article/body text:
 Write a short response with exactly these parts:
 1. What happened
 2. Why it matters
-3. Why Jeeves selected it
+3. Why I selected it
 
-Keep it concise and specific. Do not mention missing data unless necessary.
+Keep it concise and specific. Use first person ("I"), not third person ("Jeeves"). Do not mention missing data unless necessary.
 """
 
     try:
