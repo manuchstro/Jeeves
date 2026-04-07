@@ -5524,13 +5524,75 @@ def infer_category_hint_from_text(text):
     return "G"
 
 
+def normalize_candidate_query_text(text, max_terms=7):
+    raw = (text or "").strip().lower()
+    if not raw:
+        return None
+
+    compact = re.sub(r"\s+", " ", raw)
+    compact = compact.replace("\n", " ").replace("\r", " ")
+    compact = re.sub(r"[\"'`]", "", compact)
+
+    # If text already looks like a concise query phrase, keep it.
+    if len(compact) <= 80 and all(ch not in compact for ch in [";", "{", "}", "[", "]"]):
+        word_count = len(re.findall(r"[a-z0-9]{2,}", compact))
+        if 2 <= word_count <= 10:
+            return compact
+
+    # Otherwise distill freeform text into a short query phrase.
+    blocked = {
+        "manu", "jeeves", "appears", "seems", "using", "uses", "used", "often",
+        "through", "conversation", "communications", "indicated", "entries",
+        "normal", "levels", "context", "current", "interests", "recurring",
+        "focus", "active", "concerns", "today", "yesterday",
+    }
+    tokens = re.findall(r"[a-z0-9]{3,}", compact)
+    cleaned = []
+    for token in tokens:
+        if token in STORY_STOPWORDS or token in blocked:
+            continue
+        if token.isdigit():
+            continue
+        if token not in cleaned:
+            cleaned.append(token)
+        if len(cleaned) >= max_terms:
+            break
+
+    if len(cleaned) < 2:
+        return None
+    return " ".join(cleaned)
+
+
+def is_news_query_signal(query_text, watchlist=None, trusted_portfolio=None):
+    t = (query_text or "").lower()
+    if not t:
+        return False
+    signal_terms = [
+        "fed", "inflation", "cpi", "rate", "rates", "jobs", "employment", "treasury",
+        "uranium", "nuclear", "energy", "oil", "gas", "iran", "russia", "sanction",
+        "shipping", "strait", "conflict", "war", "ceasefire", "market", "stock",
+        "earnings", "guidance", "company", "earthquake", "bay area", "california",
+    ]
+    if any(term in t for term in signal_terms):
+        return True
+
+    for symbol in (watchlist or []) + (trusted_portfolio or []):
+        if symbol and symbol.lower() in t:
+            return True
+    return False
+
+
 def build_dynamic_news_queries(limit=10):
     query_items = []
     seen = set()
+    watchlist = get_watchlist()
+    trusted_portfolio = get_trusted_portfolio_symbols(limit=8)
 
     def add_query(query, category_hint=None):
-        query = re.sub(r"\s+", " ", (query or "").strip().lower())
+        query = normalize_candidate_query_text(query)
         if not query or len(query) < 8:
+            return
+        if not is_news_query_signal(query, watchlist=watchlist, trusted_portfolio=trusted_portfolio):
             return
         if query in seen:
             return
@@ -5540,12 +5602,10 @@ def build_dynamic_news_queries(limit=10):
     for query, category_hint in BASELINE_NEWS_QUERIES:
         add_query(query, category_hint)
 
-    watchlist = get_watchlist()
     if watchlist:
         add_query(" ".join(watchlist[:4]) + " stock market performance", "P")
         add_query(" ".join(watchlist[:4]) + " company news", "P")
 
-    trusted_portfolio = get_trusted_portfolio_symbols(limit=8)
     if trusted_portfolio:
         add_query(" ".join(trusted_portfolio[:4]) + " earnings guidance risk", "P")
         add_query(" ".join(trusted_portfolio[:4]) + " sector news supply demand", "P")
