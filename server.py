@@ -291,6 +291,17 @@ def init_db():
     )
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS gmail_accounts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL UNIQUE,
+        token_json TEXT NOT NULL,
+        scopes_json TEXT NOT NULL,
+        connected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
     conn.commit()
 
     for statement in [
@@ -508,6 +519,49 @@ def get_portfolio_holdings(limit=8, trusted_only=False):
 
 def get_trusted_portfolio_symbols(limit=10):
     return [item["symbol"] for item in get_portfolio_holdings(limit=limit, trusted_only=True)]
+
+
+def upsert_gmail_account(email, token_payload, scopes):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO gmail_accounts (email, token_json, scopes_json)
+        VALUES (?, ?, ?)
+        ON CONFLICT(email) DO UPDATE SET
+            token_json = excluded.token_json,
+            scopes_json = excluded.scopes_json,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            email.strip().lower(),
+            json.dumps(token_payload),
+            json.dumps(scopes or []),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_gmail_accounts():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT email, scopes_json, connected_at, updated_at
+        FROM gmail_accounts
+        ORDER BY updated_at DESC
+        """
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    for row in rows:
+        try:
+            row["scopes"] = json.loads(row.get("scopes_json") or "[]")
+        except:
+            row["scopes"] = []
+        row.pop("scopes_json", None)
+    return rows
 
 
 def get_latest_trusted_portfolio_snapshot():
@@ -3530,6 +3584,20 @@ def debug_poll_run():
 def debug_memory():
     return app.response_class(
         response=json.dumps(get_memory_debug_summary(), indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/debug/gmail", methods=["GET"])
+def debug_gmail():
+    accounts = get_gmail_accounts()
+    return app.response_class(
+        response=json.dumps({
+            "connected": bool(accounts),
+            "account_count": len(accounts),
+            "accounts": accounts,
+        }, indent=2),
         status=200,
         mimetype="application/json",
     )
