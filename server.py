@@ -4829,7 +4829,7 @@ def get_recent_alerts_for_brief(limit=12, include_debug=False):
             FROM alert_log a
             LEFT JOIN event_contexts e
               ON e.event_hash = a.event_hash
-            WHERE DATE(a.created_at) = DATE('now')
+            WHERE datetime(a.created_at) >= datetime('now', '-24 hours')
             ORDER BY a.tier ASC, a.id DESC
             LIMIT ?
             """,
@@ -4858,7 +4858,7 @@ def get_recent_alerts_for_brief(limit=12, include_debug=False):
             FROM alert_log a
             LEFT JOIN event_contexts e
               ON e.event_hash = a.event_hash
-            WHERE DATE(a.created_at) = DATE('now')
+            WHERE datetime(a.created_at) >= datetime('now', '-24 hours')
               AND a.sent_to_user = 1
             ORDER BY a.tier ASC, a.id DESC
             LIMIT ?
