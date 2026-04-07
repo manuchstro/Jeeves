@@ -88,16 +88,10 @@ FEEDBACK_RESPONSES = {
     "late": "Apologies",
 }
 
-NEWS_QUERIES = [
-    ("uranium", "G"),
-    ("nuclear energy", "E"),
-    ("kazakhstan uranium", "G"),
-    ("iran energy", "G"),
-    ("energy sanctions", "G"),
-    ("fed inflation", "E"),
-    ("jobs report", "E"),
-    ("bay area earthquake", "L"),
-    ("baja california sur", "L"),
+BASELINE_NEWS_QUERIES = [
+    ("federal reserve inflation jobs", "E"),
+    ("bay area earthquake california", "L"),
+    ("global energy supply sanctions shipping", "G"),
 ]
 
 CURRENTS_MIN_INTERVAL_MINUTES = 5

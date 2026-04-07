@@ -15,13 +15,13 @@ from zoneinfo import ZoneInfo
 from urllib.parse import quote_plus, urlparse
 from jeeves_config import (
     AI_ALERT_SHORTLIST_MAX,
+    BASELINE_NEWS_QUERIES,
     CURRENTS_MIN_INTERVAL_MINUTES,
     FEEDBACK_RESPONSES,
     FRED_SERIES,
     KNOWN_MARKET_NAME_MAP,
     MEMORY_VECTOR_CATEGORY_WEIGHTS,
     MEMORY_INSTRUCTIONS,
-    NEWS_QUERIES,
     POLL_SERIES,
     PROTECTED_MEMORY_CATEGORIES,
     SOURCE_GUIDANCE,
@@ -2864,11 +2864,69 @@ def get_fred_candidate(category, tier, series):
     }
 
 
+def infer_category_hint_from_text(text):
+    t = (text or "").lower()
+    if any(term in t for term in ["berkeley", "bay area", "san francisco", "california", "earthquake"]):
+        return "L"
+    if any(term in t for term in ["fed", "inflation", "cpi", "rate", "rates", "jobs", "employment", "treasury"]):
+        return "E"
+    if any(term in t for term in ["uranium", "nuclear", "energy", "oil", "gas", "iran", "russia", "sanction", "shipping", "strait", "conflict"]):
+        return "G"
+    return "G"
+
+
+def build_dynamic_news_queries(limit=10):
+    query_items = []
+    seen = set()
+
+    def add_query(query, category_hint=None):
+        query = re.sub(r"\s+", " ", (query or "").strip().lower())
+        if not query or len(query) < 8:
+            return
+        if query in seen:
+            return
+        seen.add(query)
+        query_items.append((query, category_hint or infer_category_hint_from_text(query)))
+
+    for query, category_hint in BASELINE_NEWS_QUERIES:
+        add_query(query, category_hint)
+
+    watchlist = get_watchlist()
+    if watchlist:
+        add_query(" ".join(watchlist[:4]) + " stock market performance", "P")
+        add_query(" ".join(watchlist[:4]) + " company news", "P")
+
+    trusted_portfolio = get_trusted_portfolio_symbols(limit=8)
+    if trusted_portfolio:
+        add_query(" ".join(trusted_portfolio[:4]) + " earnings guidance risk", "P")
+        add_query(" ".join(trusted_portfolio[:4]) + " sector news supply demand", "P")
+
+    relevant = get_relevant_memories("current interests recurring focus active concerns", limit=12)
+    for item in relevant.get("working", []) + relevant.get("long_term", []):
+        value = (item.get("value") or "").strip()
+        if not value:
+            continue
+        category = item.get("category") or ""
+        if category in {"behavior_trends", "priorities", "portfolio_profile", "deep_preferences", "preferences", "goals"}:
+            add_query(value, infer_category_hint_from_text(value))
+
+    for event in get_recent_interaction_events(limit=20):
+        message_text = (event.get("message_text") or "").strip()
+        if len(message_text) < 8:
+            continue
+        if event.get("intent") in {"news", "watchlist_stats", "ticker_quote", "fred", "daily_brief"}:
+            add_query(message_text, infer_category_hint_from_text(message_text))
+
+    return query_items[:limit]
+
+
 def build_poll_candidates():
     candidates = []
     watchlist = get_watchlist()
+    news_queries = build_dynamic_news_queries(limit=10)
     source_debug = {
-        "nyt_queries": len(NEWS_QUERIES),
+        "nyt_queries": len(news_queries),
+        "generated_queries": news_queries,
         "currents_due": source_poll_due("CURRENTS", CURRENTS_MIN_INTERVAL_MINUTES),
         "currents_query": None,
         "currents_added": 0,
@@ -2879,12 +2937,12 @@ def build_poll_candidates():
         if candidate:
             candidates.append(candidate)
 
-    for query, category_hint in NEWS_QUERIES:
+    for query, category_hint in news_queries:
         candidates.extend(get_nyt_headline_candidates(query, category_hint=category_hint, watchlist=watchlist))
 
-    if source_debug["currents_due"]:
-        query_index = int(datetime.now(LOCAL_TZ).timestamp() // (CURRENTS_MIN_INTERVAL_MINUTES * 60)) % len(NEWS_QUERIES)
-        query, category_hint = NEWS_QUERIES[query_index]
+    if source_debug["currents_due"] and news_queries:
+        query_index = int(datetime.now(LOCAL_TZ).timestamp() // (CURRENTS_MIN_INTERVAL_MINUTES * 60)) % len(news_queries)
+        query, category_hint = news_queries[query_index]
         source_debug["currents_query"] = query
         current_candidates = get_currents_candidates(query, category_hint=category_hint, watchlist=watchlist)
         source_debug["currents_added"] = len(current_candidates)
