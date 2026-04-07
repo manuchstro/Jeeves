@@ -11,6 +11,7 @@ import hashlib
 import math
 import base64
 import random
+import time
 from datetime import datetime
 from datetime import timedelta
 from zoneinfo import ZoneInfo
@@ -68,9 +69,42 @@ OPEN_METEO_LON = os.environ.get("OPEN_METEO_LON", "").strip()
 # ---------------- DB ----------------
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+    except:
+        pass
     return conn
+
+
+def execute_write_with_retry(sql, params=(), attempts=6, base_sleep=0.08):
+    last_exc = None
+    for attempt in range(attempts):
+        conn = get_conn()
+        cur = conn.cursor()
+        try:
+            cur.execute(sql, params)
+            conn.commit()
+            rowcount = cur.rowcount
+            conn.close()
+            return {"ok": True, "rowcount": rowcount}
+        except sqlite3.OperationalError as exc:
+            conn.rollback()
+            conn.close()
+            if "locked" not in str(exc).lower():
+                raise
+            last_exc = exc
+            time.sleep(base_sleep * (attempt + 1))
+        except Exception:
+            conn.rollback()
+            conn.close()
+            raise
+    if last_exc:
+        raise last_exc
+    return {"ok": False, "rowcount": 0}
 
 
 def extract_url_domain(url):
@@ -1806,17 +1840,13 @@ def get_recent_daily_logs(limit=14):
 
 
 def log_outbound_message(message_type, body):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
+    execute_write_with_retry(
         """
         INSERT INTO outbound_messages (message_type, body)
         VALUES (?, ?)
         """,
         (message_type, body),
     )
-    conn.commit()
-    conn.close()
 
 
 def add_nightly_consolidation_log(summary_text, payload=None, depth_label="light", local_date=None):
@@ -4506,9 +4536,7 @@ def source_poll_due(source_name, min_interval_minutes):
 
 
 def mark_source_polled(source_name, note=None):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
+    execute_write_with_retry(
         """
         INSERT INTO source_poll_state (source_name, last_polled_at, note)
         VALUES (?, CURRENT_TIMESTAMP, ?)
@@ -4518,8 +4546,6 @@ def mark_source_polled(source_name, note=None):
         """,
         (source_name, note or ""),
     )
-    conn.commit()
-    conn.close()
 
 
 def get_embedding(text):
@@ -4662,19 +4688,37 @@ def log_alert(category, tier, headline, sent_to_user=1, candidate=None):
             "semantic_similarity": semantic_result["similarity"] if semantic_result else None,
         }
 
-    alert_id = build_alert_id(category, tier)
+    alert_id = None
+    inserted = False
+    for attempt in range(8):
+        candidate_alert_id = build_alert_id(category, tier)
+        try:
+            result = execute_write_with_retry(
+                """
+                INSERT OR IGNORE INTO alert_log (alert_id, category, tier, headline, event_hash, sent_to_user)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (candidate_alert_id, category.upper(), tier, headline, event_hash, sent_to_user),
+            )
+            if result.get("rowcount", 0) > 0:
+                alert_id = candidate_alert_id
+                inserted = True
+                break
+        except sqlite3.IntegrityError:
+            pass
+        time.sleep(0.03 * (attempt + 1))
 
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO alert_log (alert_id, category, tier, headline, event_hash, sent_to_user)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (alert_id, category.upper(), tier, headline, event_hash, sent_to_user),
-    )
-    conn.commit()
-    conn.close()
+    if not inserted or not alert_id:
+        alert_id = f"{category.upper()}{tier}-{int(time.time())}-{random.randint(100, 999)}"
+        fallback_result = execute_write_with_retry(
+            """
+            INSERT OR IGNORE INTO alert_log (alert_id, category, tier, headline, event_hash, sent_to_user)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (alert_id, category.upper(), tier, headline, event_hash, sent_to_user),
+        )
+        if fallback_result.get("rowcount", 0) <= 0:
+            raise RuntimeError("failed_to_insert_alert_log")
 
     record_event_hash(event_hash, category.upper(), headline)
     if candidate is not None:
