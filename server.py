@@ -50,6 +50,10 @@ LOCAL_TZ = ZoneInfo("America/Los_Angeles")
 ALERT_DECISION_MODEL = os.environ.get("ALERT_DECISION_MODEL", "gpt-4o")
 GMAIL_ACCOUNT_EMAIL = os.environ.get("GMAIL_ACCOUNT_EMAIL", "").strip().lower()
 GMAIL_TOKEN_JSON = os.environ.get("GMAIL_TOKEN_JSON")
+DAILY_BRIEF_HOUR = 20
+DAILY_BRIEF_MINUTE = 0
+GRATITUDE_HOUR = 22
+GRATITUDE_MINUTE = 15
 
 # ---------------- DB ----------------
 
@@ -301,6 +305,16 @@ def init_db():
         scopes_json TEXT NOT NULL,
         connected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS scheduled_task_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_key TEXT NOT NULL,
+        local_date TEXT NOT NULL,
+        executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(task_key, local_date)
     )
     """)
 
@@ -703,6 +717,59 @@ def log_outbound_message(message_type, body):
     )
     conn.commit()
     conn.close()
+
+
+def get_local_now():
+    return datetime.now(LOCAL_TZ)
+
+
+def get_local_date_string(dt=None):
+    return (dt or get_local_now()).strftime("%Y-%m-%d")
+
+
+def mark_scheduled_task_run(task_key, local_date=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO scheduled_task_runs (task_key, local_date)
+        VALUES (?, ?)
+        ON CONFLICT(task_key, local_date) DO NOTHING
+        """,
+        (task_key, local_date or get_local_date_string()),
+    )
+    conn.commit()
+    inserted = cur.rowcount > 0
+    conn.close()
+    return inserted
+
+
+def has_scheduled_task_run(task_key, local_date=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id
+        FROM scheduled_task_runs
+        WHERE task_key = ?
+          AND local_date = ?
+        LIMIT 1
+        """,
+        (task_key, local_date or get_local_date_string()),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row is not None
+
+
+def scheduled_task_due(task_key, target_hour, target_minute, now_local=None):
+    now_local = now_local or get_local_now()
+    local_date = get_local_date_string(now_local)
+    if has_scheduled_task_run(task_key, local_date=local_date):
+        return False
+    current_minutes = now_local.hour * 60 + now_local.minute
+    target_minutes = target_hour * 60 + target_minute
+    return current_minutes >= target_minutes
 
 
 def get_current_deploy_key():
@@ -3680,6 +3747,42 @@ def task_memory_consolidation():
     run_nightly_memory_consolidation()
     return app.response_class(
         response=json.dumps({"ok": True, "memory": get_memory_debug_summary()}, indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/tasks/scheduled-check", methods=["GET", "POST"])
+def task_scheduled_check():
+    now_local = get_local_now()
+    local_date = get_local_date_string(now_local)
+    results = {
+        "now_local": now_local.isoformat(),
+        "daily_brief": {"due": False, "sent": False},
+        "gratitude": {"due": False, "sent": False},
+    }
+
+    if scheduled_task_due("daily_brief", DAILY_BRIEF_HOUR, DAILY_BRIEF_MINUTE, now_local=now_local):
+        results["daily_brief"]["due"] = True
+        brief = compose_daily_brief(include_debug=True)
+        send_result = send_whatsapp_message(brief)
+        results["daily_brief"]["send_result"] = send_result
+        if send_result.get("ok") and mark_scheduled_task_run("daily_brief", local_date=local_date):
+            log_outbound_message("daily_brief", brief)
+            results["daily_brief"]["sent"] = True
+
+    if scheduled_task_due("gratitude", GRATITUDE_HOUR, GRATITUDE_MINUTE, now_local=now_local):
+        results["gratitude"]["due"] = True
+        run_nightly_memory_consolidation()
+        prompt = "What is one thing you were grateful for today?"
+        send_result = send_whatsapp_message(prompt)
+        results["gratitude"]["send_result"] = send_result
+        if send_result.get("ok") and mark_scheduled_task_run("gratitude", local_date=local_date):
+            log_outbound_message("gratitude", prompt)
+            results["gratitude"]["sent"] = True
+
+    return app.response_class(
+        response=json.dumps(results, indent=2),
         status=200,
         mimetype="application/json",
     )
