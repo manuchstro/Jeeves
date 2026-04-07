@@ -57,6 +57,8 @@ RAILWAY_GIT_COMMIT_SHA = os.environ.get("RAILWAY_GIT_COMMIT_SHA") or os.environ.
 RAILWAY_DEPLOYMENT_ID = os.environ.get("RAILWAY_DEPLOYMENT_ID")
 LOCAL_TZ = ZoneInfo("America/Los_Angeles")
 ALERT_DECISION_MODEL = os.environ.get("ALERT_DECISION_MODEL", "gpt-4o")
+ALERT_PUSH_TIER_MAX = max(1, min(3, int(os.environ.get("ALERT_PUSH_TIER_MAX", "1"))))
+ALERT_PUSH_MAX_PER_CYCLE = max(1, int(os.environ.get("ALERT_PUSH_MAX_PER_CYCLE", "2")))
 GMAIL_ACCOUNT_EMAIL = os.environ.get("GMAIL_ACCOUNT_EMAIL", "").strip().lower()
 GMAIL_TOKEN_JSON = os.environ.get("GMAIL_TOKEN_JSON")
 DAILY_BRIEF_HOUR = 20
@@ -5626,6 +5628,7 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False):
             "ai_decision": ai_decisions.get(f"C{idx}", {}),
         }
 
+    pushed_count = 0
     for candidate in scored_candidates:
         event_hash = build_event_hash(candidate["category"], candidate["headline"])
         shortlist_item = shortlist_lookup.get(event_hash)
@@ -5692,15 +5695,21 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False):
                     "ai_why": ai_decision.get("why") if shortlist_item else None,
                 },
             }
+            should_push = (
+                bool(send_messages)
+                and int(effective_tier or 3) <= ALERT_PUSH_TIER_MAX
+                and pushed_count < ALERT_PUSH_MAX_PER_CYCLE
+            )
+
             alert_result = log_alert(
                 effective_category,
                 effective_tier,
                 candidate["headline"],
-                sent_to_user=1 if send_messages else 0,
+                sent_to_user=1 if should_push else 0,
                 candidate=effective_candidate,
             )
             result["alert_result"] = alert_result
-            if send_messages and alert_result.get("ok"):
+            if should_push and alert_result.get("ok"):
                 alert_message = format_alert_message(effective_candidate, alert_result)
                 send_result = send_whatsapp_message(alert_message)
                 result["send_result"] = send_result
@@ -5713,6 +5722,22 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False):
                 )
                 if send_result.get("ok"):
                     log_outbound_message("alert", alert_message)
+                    pushed_count += 1
+            elif send_messages and alert_result.get("ok"):
+                log_alert_outcome(
+                    stage="delivery",
+                    outcome="skipped",
+                    reason="below_push_threshold_or_cycle_cap",
+                    event_hash=alert_result.get("event_hash"),
+                    details={
+                        "alert_id": alert_result.get("alert_id"),
+                        "headline": candidate["headline"],
+                        "effective_tier": effective_tier,
+                        "push_tier_max": ALERT_PUSH_TIER_MAX,
+                        "pushed_count": pushed_count,
+                        "push_cap": ALERT_PUSH_MAX_PER_CYCLE,
+                    },
+                )
         else:
             if shortlist_item and not ai_decision.get("send"):
                 result["alert_result"] = {
@@ -6694,9 +6719,18 @@ def task_daily_brief():
     denied = require_internal_api_key()
     if denied:
         return denied
+    local_date = get_local_date_string()
+    force = (request.args.get("force") or request.form.get("force") or "").strip() == "1"
+    if not force and has_scheduled_task_run("daily_brief", local_date=local_date):
+        return app.response_class(
+            response=json.dumps({"ok": True, "skipped": "already_sent_today", "local_date": local_date}, indent=2),
+            status=200,
+            mimetype="application/json",
+        )
     brief = compose_daily_brief(include_debug=True)
     result = send_whatsapp_message(brief)
     if result.get("ok"):
+        mark_scheduled_task_run("daily_brief", local_date=local_date)
         log_outbound_message("daily_brief", brief)
     return app.response_class(
         response=json.dumps({"message": brief, "send_result": result}, indent=2),
@@ -6710,10 +6744,19 @@ def task_gratitude():
     denied = require_internal_api_key()
     if denied:
         return denied
+    local_date = get_local_date_string()
+    force = (request.args.get("force") or request.form.get("force") or "").strip() == "1"
+    if not force and has_scheduled_task_run("gratitude", local_date=local_date):
+        return app.response_class(
+            response=json.dumps({"ok": True, "skipped": "already_sent_today", "local_date": local_date}, indent=2),
+            status=200,
+            mimetype="application/json",
+        )
     run_nightly_memory_consolidation()
     prompt = "What is one thing you were grateful for today?"
     result = send_whatsapp_message(prompt)
     if result.get("ok"):
+        mark_scheduled_task_run("gratitude", local_date=local_date)
         log_outbound_message("gratitude", prompt)
     return app.response_class(
         response=json.dumps({"message": prompt, "send_result": result}, indent=2),
@@ -6750,22 +6793,24 @@ def task_scheduled_check():
 
     if scheduled_task_due("daily_brief", DAILY_BRIEF_HOUR, DAILY_BRIEF_MINUTE, now_local=now_local):
         results["daily_brief"]["due"] = True
-        brief = compose_daily_brief(include_debug=True)
-        send_result = send_whatsapp_message(brief)
-        results["daily_brief"]["send_result"] = send_result
-        if send_result.get("ok") and mark_scheduled_task_run("daily_brief", local_date=local_date):
-            log_outbound_message("daily_brief", brief)
-            results["daily_brief"]["sent"] = True
+        if mark_scheduled_task_run("daily_brief", local_date=local_date):
+            brief = compose_daily_brief(include_debug=True)
+            send_result = send_whatsapp_message(brief)
+            results["daily_brief"]["send_result"] = send_result
+            if send_result.get("ok"):
+                log_outbound_message("daily_brief", brief)
+                results["daily_brief"]["sent"] = True
 
     if scheduled_task_due("gratitude", GRATITUDE_HOUR, GRATITUDE_MINUTE, now_local=now_local):
         results["gratitude"]["due"] = True
-        run_nightly_memory_consolidation()
-        prompt = "What is one thing you were grateful for today?"
-        send_result = send_whatsapp_message(prompt)
-        results["gratitude"]["send_result"] = send_result
-        if send_result.get("ok") and mark_scheduled_task_run("gratitude", local_date=local_date):
-            log_outbound_message("gratitude", prompt)
-            results["gratitude"]["sent"] = True
+        if mark_scheduled_task_run("gratitude", local_date=local_date):
+            run_nightly_memory_consolidation()
+            prompt = "What is one thing you were grateful for today?"
+            send_result = send_whatsapp_message(prompt)
+            results["gratitude"]["send_result"] = send_result
+            if send_result.get("ok"):
+                log_outbound_message("gratitude", prompt)
+                results["gratitude"]["sent"] = True
 
     return app.response_class(
         response=json.dumps(results, indent=2),
