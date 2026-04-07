@@ -125,7 +125,11 @@ def init_db():
         body_text TEXT,
         web_url TEXT,
         score INTEGER,
+        source_label TEXT,
+        source_refs_json TEXT,
         selection_reasons_json TEXT,
+        source_evaluation_json TEXT,
+        dedupe_lineage_json TEXT,
         raw_payload_json TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -171,10 +175,12 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         scope TEXT NOT NULL,
         category TEXT NOT NULL,
+        subtype TEXT,
         memory_key TEXT NOT NULL,
         value TEXT NOT NULL,
         source_text TEXT,
         confidence REAL NOT NULL DEFAULT 0.5,
+        stability TEXT NOT NULL DEFAULT 'situational',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(scope, category, memory_key)
@@ -206,9 +212,11 @@ def init_db():
     CREATE TABLE IF NOT EXISTS memory_observations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         category TEXT NOT NULL,
+        subtype TEXT,
         memory_key TEXT NOT NULL,
         value TEXT NOT NULL,
         confidence REAL NOT NULL DEFAULT 0.5,
+        stability TEXT NOT NULL DEFAULT 'situational',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
     """)
@@ -332,16 +340,81 @@ def init_db():
     )
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS journal_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entry_text TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS daily_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        local_date TEXT NOT NULL UNIQUE,
+        meaningful_count INTEGER NOT NULL DEFAULT 0,
+        intents_json TEXT NOT NULL DEFAULT '{}',
+        snippets_json TEXT NOT NULL DEFAULT '[]',
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS alert_outcomes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_hash TEXT,
+        stage TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        reason TEXT,
+        details_json TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS event_lineage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_hash TEXT NOT NULL,
+        related_event_hash TEXT,
+        relation_type TEXT NOT NULL,
+        details_json TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
     conn.commit()
 
     for statement in [
         "ALTER TABLE event_contexts ADD COLUMN source_label TEXT",
         "ALTER TABLE event_contexts ADD COLUMN source_refs_json TEXT",
+        "ALTER TABLE event_contexts ADD COLUMN source_evaluation_json TEXT",
+        "ALTER TABLE event_contexts ADD COLUMN dedupe_lineage_json TEXT",
+        "ALTER TABLE memory_items ADD COLUMN subtype TEXT",
+        "ALTER TABLE memory_items ADD COLUMN stability TEXT DEFAULT 'situational'",
+        "ALTER TABLE memory_observations ADD COLUMN subtype TEXT",
+        "ALTER TABLE memory_observations ADD COLUMN stability TEXT DEFAULT 'situational'",
     ]:
         try:
             cur.execute(statement)
         except sqlite3.OperationalError:
             pass
+
+    try:
+        cur.execute(
+            """
+            INSERT INTO journal_entries (entry_text, created_at)
+            SELECT entry_text, created_at
+            FROM gratitude_entries
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM journal_entries j
+                WHERE j.entry_text = gratitude_entries.entry_text
+                  AND j.created_at = gratitude_entries.created_at
+            )
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
 
     conn.commit()
     conn.close()
@@ -1298,45 +1371,95 @@ def get_recent_messages(limit=10):
 
 # ---------------- MEMORY ----------------
 
-def upsert_memory(scope, category, memory_key, value, source_text=None, confidence=0.6):
+def classify_memory_metadata(scope, category, memory_key):
+    category_l = (category or "").lower()
+    key_l = (memory_key or "").lower()
+
+    subtype = "general"
+    stability = "situational"
+
+    if category_l in {"core_identity", "core_traits", "defining_moments", "major_successes", "major_failures", "deep_preferences", "long_term_frictions"}:
+        subtype = "deep_self"
+        stability = "durable"
+    elif category_l in {"relationship_preferences"}:
+        subtype = "relationship"
+        stability = "adaptive"
+    elif category_l in {"memory_threads"}:
+        subtype = "thread"
+        stability = "evolving"
+    elif category_l in {"behavior_trends"}:
+        subtype = "trend"
+        stability = "adaptive"
+    elif category_l in {"journal"}:
+        subtype = "journal"
+        stability = "situational"
+    elif category_l in {"gratitude"}:
+        subtype = "journal"
+        stability = "situational"
+    elif category_l in {"risk_profile", "portfolio_profile"}:
+        subtype = "portfolio"
+        stability = "adaptive"
+    elif category_l in {"state", "emotional_state", "nightly_summary"}:
+        subtype = "state"
+        stability = "situational"
+    elif scope == "long_term":
+        subtype = "long_term"
+        stability = "adaptive"
+
+    if "contradiction_" in key_l:
+        subtype = "contradiction"
+        stability = "evolving"
+
+    return subtype, stability
+
+
+def upsert_memory(scope, category, memory_key, value, source_text=None, confidence=0.6, subtype=None, stability=None):
+    inferred_subtype, inferred_stability = classify_memory_metadata(scope, category, memory_key)
+    subtype = subtype or inferred_subtype
+    stability = stability or inferred_stability
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO memory_items (scope, category, memory_key, value, source_text, confidence)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO memory_items (scope, category, subtype, memory_key, value, source_text, confidence, stability)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(scope, category, memory_key) DO UPDATE SET
+            subtype = excluded.subtype,
             value = excluded.value,
             source_text = excluded.source_text,
             confidence = excluded.confidence,
+            stability = excluded.stability,
             updated_at = CURRENT_TIMESTAMP
         """,
-        (scope, category, memory_key, value, source_text, confidence),
+        (scope, category, subtype, memory_key, value, source_text, confidence, stability),
     )
     conn.commit()
     conn.close()
 
 
-def add_gratitude_entry(entry_text):
+def add_journal_entry(entry_text):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO gratitude_entries (entry_text) VALUES (?)",
+        "INSERT INTO journal_entries (entry_text) VALUES (?)",
         (entry_text.strip(),),
     )
     conn.commit()
     conn.close()
 
 
-def add_memory_observation(category, memory_key, value, confidence=0.6):
+def add_memory_observation(category, memory_key, value, confidence=0.6, subtype=None, stability=None):
+    inferred_subtype, inferred_stability = classify_memory_metadata("working", category, memory_key)
+    subtype = subtype or inferred_subtype
+    stability = stability or inferred_stability
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO memory_observations (category, memory_key, value, confidence)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO memory_observations (category, subtype, memory_key, value, confidence, stability)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (category, memory_key, value, confidence),
+        (category, subtype, memory_key, value, confidence, stability),
     )
     conn.commit()
     conn.close()
@@ -1368,6 +1491,147 @@ def log_alert_feedback(feedback_type, source_text):
     )
     conn.commit()
     conn.close()
+
+
+def log_alert_outcome(stage, outcome, reason=None, event_hash=None, details=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO alert_outcomes (event_hash, stage, outcome, reason, details_json)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (event_hash, stage, outcome, reason or "", serialize_json(details, fallback={})),
+    )
+    conn.commit()
+    conn.close()
+
+
+def log_event_lineage(event_hash, related_event_hash, relation_type, details=None):
+    if not event_hash:
+        return
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO event_lineage (event_hash, related_event_hash, relation_type, details_json)
+        VALUES (?, ?, ?, ?)
+        """,
+        (event_hash, related_event_hash, relation_type, serialize_json(details, fallback={})),
+    )
+    conn.commit()
+    conn.close()
+
+
+def is_meaningful_daily_interaction(intent, message_text, memory_result=None):
+    if memory_result and memory_result.get("journal_entry"):
+        return True
+    if intent in {
+        "add",
+        "remove",
+        "watchlist_stats",
+        "ticker_quote",
+        "daily_brief",
+        "alert_feedback",
+        "event_expand",
+        "fred",
+        "news",
+        "email_request",
+        "portfolio_update",
+        "portfolio_show",
+        "full_article_request",
+    }:
+        return True
+    stripped = (message_text or "").strip()
+    if intent == "none" and len(stripped) >= 80 and "?" not in stripped:
+        return True
+    return False
+
+
+def upsert_daily_log(intent, message_text, memory_result=None, local_date=None):
+    if not is_meaningful_daily_interaction(intent, message_text, memory_result=memory_result):
+        return
+
+    date_key = local_date or get_local_date_string()
+    snippet = re.sub(r"\s+", " ", (message_text or "").strip())[:220]
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT meaningful_count, intents_json, snippets_json
+        FROM daily_logs
+        WHERE local_date = ?
+        LIMIT 1
+        """,
+        (date_key,),
+    )
+    row = cur.fetchone()
+
+    if row:
+        try:
+            intents = json.loads(row["intents_json"] or "{}")
+        except:
+            intents = {}
+        try:
+            snippets = json.loads(row["snippets_json"] or "[]")
+        except:
+            snippets = []
+        intents[intent] = intents.get(intent, 0) + 1
+        if snippet and snippet not in snippets and len(snippets) < 8:
+            snippets.append(snippet)
+        cur.execute(
+            """
+            UPDATE daily_logs
+            SET meaningful_count = ?,
+                intents_json = ?,
+                snippets_json = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE local_date = ?
+            """,
+            (int(row["meaningful_count"]) + 1, json.dumps(intents), json.dumps(snippets), date_key),
+        )
+    else:
+        intents = {intent: 1}
+        snippets = [snippet] if snippet else []
+        cur.execute(
+            """
+            INSERT INTO daily_logs (local_date, meaningful_count, intents_json, snippets_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (date_key, 1, json.dumps(intents), json.dumps(snippets)),
+        )
+
+    conn.commit()
+    conn.close()
+
+
+def get_recent_daily_logs(limit=14):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT local_date, meaningful_count, intents_json, snippets_json, updated_at
+        FROM daily_logs
+        ORDER BY local_date DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    for row in rows:
+        try:
+            row["intents"] = json.loads(row.get("intents_json") or "{}")
+        except:
+            row["intents"] = {}
+        try:
+            row["snippets"] = json.loads(row.get("snippets_json") or "[]")
+        except:
+            row["snippets"] = []
+        row.pop("intents_json", None)
+        row.pop("snippets_json", None)
+    return rows
 
 
 def log_outbound_message(message_type, body):
@@ -1730,7 +1994,16 @@ def get_memory_items(scope, limit=20):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT scope, category, memory_key, value, confidence, updated_at
+        SELECT
+            scope,
+            category,
+            subtype,
+            memory_key,
+            value,
+            confidence,
+            stability,
+            updated_at,
+            julianday('now') - julianday(updated_at) AS recency_days
         FROM memory_items
         WHERE scope = ?
         ORDER BY updated_at DESC
@@ -1743,21 +2016,43 @@ def get_memory_items(scope, limit=20):
     return rows
 
 
-def get_recent_gratitude(limit=30):
+def get_recent_journal(limit=30):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT entry_text, created_at
-        FROM gratitude_entries
-        ORDER BY id DESC
-        LIMIT ?
-        """,
-        (limit,),
-    )
-    rows = [dict(row) for row in cur.fetchall()]
+    rows = []
+    try:
+        cur.execute(
+            """
+            SELECT entry_text, created_at
+            FROM (
+                SELECT entry_text, created_at FROM journal_entries
+                UNION ALL
+                SELECT entry_text, created_at FROM gratitude_entries
+            )
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = [dict(row) for row in cur.fetchall()]
+    except sqlite3.OperationalError:
+        cur.execute(
+            """
+            SELECT entry_text, created_at
+            FROM journal_entries
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = [dict(row) for row in cur.fetchall()]
     conn.close()
     return rows
+
+
+def get_recent_gratitude(limit=30):
+    # Backward-compatible alias during migration from gratitude -> journal naming.
+    return get_recent_journal(limit=limit)
 
 
 def get_recent_observations(limit=200):
@@ -1765,7 +2060,14 @@ def get_recent_observations(limit=200):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT category, memory_key, value, confidence, created_at
+        SELECT
+            category,
+            subtype,
+            memory_key,
+            value,
+            confidence,
+            stability,
+            created_at
         FROM memory_observations
         ORDER BY id DESC
         LIMIT ?
@@ -2042,36 +2344,36 @@ def build_usage_pattern_summary(events):
     return "; ".join(patterns)
 
 
-def build_recent_memory_material(interaction_limit=50, observation_limit=60, gratitude_limit=8):
+def build_recent_memory_material(interaction_limit=50, observation_limit=60, journal_limit=8):
     interactions = get_recent_interaction_events(limit=interaction_limit)
     observations = get_recent_observations(limit=observation_limit)
-    gratitude = get_recent_gratitude(limit=gratitude_limit)
+    journal_entries = get_recent_journal(limit=journal_limit)
     return {
         "interactions": interactions,
         "observations": observations,
-        "gratitude": gratitude,
+        "journal": journal_entries,
     }
 
 
 def should_run_deep_memory_consolidation(material):
     interactions = material.get("interactions", [])
     observations = material.get("observations", [])
-    gratitude = material.get("gratitude", [])
+    journal_entries = material.get("journal", [])
     if len(interactions) >= 8:
         return True
     if len(observations) >= 10:
         return True
-    if gratitude:
+    if journal_entries:
         return True
     return False
 
 
 def fallback_deep_memory_consolidation(material):
     interactions = material.get("interactions", [])
-    gratitude = material.get("gratitude", [])
+    journal_entries = material.get("journal", [])
     summary = "Light consolidation only; limited recent material."
-    if gratitude:
-        summary = "Recent gratitude present; reflective signal recorded."
+    if journal_entries:
+        summary = "Recent journal signal present; reflective signal recorded."
     elif interactions:
         summary = "Recent interactions reviewed; no strong durable shift identified."
     return {
@@ -2079,11 +2381,15 @@ def fallback_deep_memory_consolidation(material):
         "more_true": [],
         "less_true": [],
         "emerging": [],
+        "reinforce_decisions": [],
+        "decay_decisions": [],
+        "uncertainty_flags": [],
         "relationship_memory": [],
         "thread_memory": [],
         "deep_self_memory": [],
         "contradictions": [],
         "protect": [],
+        "protected_updates": [],
         "depth_label": "light",
     }
 
@@ -2091,7 +2397,7 @@ def fallback_deep_memory_consolidation(material):
 def run_ai_deep_memory_consolidation(material):
     interactions = material.get("interactions", [])[:40]
     observations = material.get("observations", [])[:50]
-    gratitude = material.get("gratitude", [])[:8]
+    journal_entries = material.get("journal", [])[:8]
 
     prompt = f"""
 You are consolidating long-term memory for Manu.
@@ -2111,8 +2417,8 @@ Recent interactions:
 Recent observations:
 {json.dumps(observations, ensure_ascii=True)}
 
-Recent gratitude/journal:
-{json.dumps(gratitude, ensure_ascii=True)}
+Recent journal entries:
+{json.dumps(journal_entries, ensure_ascii=True)}
 
 Return:
 {{
@@ -2120,6 +2426,9 @@ Return:
   "more_true": ["what seems more true now"],
   "less_true": ["what seems less true now"],
   "emerging": ["possible emerging patterns"],
+  "reinforce_decisions": ["what should be reinforced and why"],
+  "decay_decisions": ["what should decay and why"],
+  "uncertainty_flags": ["what remains uncertain and should not be overfit"],
   "relationship_memory": [
     {{"memory_key": "response_preference", "value": "short specific description", "confidence": 0.0}}
   ],
@@ -2133,6 +2442,7 @@ Return:
     {{"memory_key": "short_key", "usually_true": "old pattern", "recently_true": "recent shift", "confidence": 0.0}}
   ],
   "protect": ["memory key or category that should be treated as protected"],
+  "protected_updates": ["what protected memory was reaffirmed or adjusted"],
   "depth_label": "light|deep"
 }}
 """
@@ -2168,6 +2478,18 @@ def store_deep_memory_consolidation(payload):
     for idx, value in enumerate(payload.get("emerging", [])[:5], start=1):
         upsert_memory("long_term", "behavior_trends", f"emerging_{idx}", value, source_text="nightly_deep_consolidation", confidence=0.68)
         record_memory_embedding("long_term", "behavior_trends", f"emerging_{idx}", value)
+
+    for idx, value in enumerate(payload.get("reinforce_decisions", [])[:5], start=1):
+        upsert_memory("working", "nightly_summary", f"reinforce_{idx}", value, source_text="nightly_deep_consolidation", confidence=0.7)
+        record_memory_embedding("working", "nightly_summary", f"reinforce_{idx}", value)
+
+    for idx, value in enumerate(payload.get("decay_decisions", [])[:5], start=1):
+        upsert_memory("working", "nightly_summary", f"decay_{idx}", value, source_text="nightly_deep_consolidation", confidence=0.68)
+        record_memory_embedding("working", "nightly_summary", f"decay_{idx}", value)
+
+    for idx, value in enumerate(payload.get("uncertainty_flags", [])[:5], start=1):
+        upsert_memory("working", "nightly_summary", f"uncertain_{idx}", value, source_text="nightly_deep_consolidation", confidence=0.62)
+        record_memory_embedding("working", "nightly_summary", f"uncertain_{idx}", value)
 
     for item in payload.get("relationship_memory", [])[:6]:
         key = (item.get("memory_key") or "relationship_preference").strip()[:64]
@@ -2210,6 +2532,13 @@ def store_deep_memory_consolidation(payload):
         })
         upsert_memory("long_term", "behavior_trends", f"contradiction_{key}", contradiction_value, source_text="nightly_deep_consolidation", confidence=confidence)
         record_memory_embedding("long_term", "behavior_trends", f"contradiction_{key}", f"usually: {usually_true}; recently: {recently_true}")
+
+    for idx, value in enumerate(payload.get("protected_updates", [])[:6], start=1):
+        upsert_memory("long_term", "core_identity", f"protected_update_{idx}", value, source_text="nightly_deep_consolidation", confidence=0.82)
+        record_memory_embedding("long_term", "core_identity", f"protected_update_{idx}", value)
+
+    for idx, value in enumerate(payload.get("protect", [])[:8], start=1):
+        upsert_memory("working", "nightly_summary", f"protect_{idx}", value, source_text="nightly_deep_consolidation", confidence=0.72)
 
     add_nightly_consolidation_log(summary, payload=payload, depth_label=depth_label)
     return {
@@ -2734,39 +3063,39 @@ def process_memory_updates(text):
     journal_entry = gratitude_entry or (text.strip() if journal_context and text.strip() else None)
 
     if journal_entry:
-        add_gratitude_entry(journal_entry)
+        add_journal_entry(journal_entry)
         add_memory_observation(
-            "gratitude",
-            "latest_gratitude",
+            "journal",
+            "latest_journal",
             journal_entry,
             confidence=0.9,
         )
         upsert_memory(
             "working",
-            "gratitude",
-            "latest_gratitude",
+            "journal",
+            "latest_journal",
             journal_entry,
             source_text=text,
             confidence=0.9,
         )
         upsert_memory(
             "long_term",
-            "gratitude",
-            "gratitude_reflection",
+            "journal",
+            "journal_reflection",
             journal_entry,
             source_text=text,
             confidence=0.8,
         )
         record_memory_embedding(
             "working",
-            "gratitude",
-            "latest_gratitude",
+            "journal",
+            "latest_journal",
             journal_entry,
         )
         record_memory_embedding(
             "long_term",
-            "gratitude",
-            "gratitude_reflection",
+            "journal",
+            "journal_reflection",
             journal_entry,
         )
         journal_analysis = store_journal_analysis(journal_entry)
@@ -2839,15 +3168,52 @@ def run_nightly_memory_consolidation():
 
 
 def get_memory_debug_summary():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT stage, outcome, reason, event_hash, details_json, created_at
+        FROM alert_outcomes
+        ORDER BY id DESC
+        LIMIT 20
+        """
+    )
+    recent_alert_outcomes = [dict(row) for row in cur.fetchall()]
+    cur.execute(
+        """
+        SELECT event_hash, related_event_hash, relation_type, details_json, created_at
+        FROM event_lineage
+        ORDER BY id DESC
+        LIMIT 20
+        """
+    )
+    recent_event_lineage = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    for row in recent_alert_outcomes:
+        try:
+            row["details"] = json.loads(row.get("details_json") or "{}")
+        except:
+            row["details"] = {}
+        row.pop("details_json", None)
+    for row in recent_event_lineage:
+        try:
+            row["details"] = json.loads(row.get("details_json") or "{}")
+        except:
+            row["details"] = {}
+        row.pop("details_json", None)
+
     return {
         "working_memory": get_memory_items("working", limit=20),
         "long_term_memory": get_memory_items("long_term", limit=20),
         "portfolio_holdings": get_portfolio_holdings(limit=12),
         "trusted_portfolio_snapshot": get_latest_trusted_portfolio_snapshot(),
-        "recent_gratitude": get_recent_gratitude(limit=30),
+        "recent_journal": get_recent_journal(limit=30),
         "recent_observations": get_recent_observations(limit=12),
         "recent_interactions": get_recent_interaction_events(limit=30),
         "recent_alert_feedback": get_recent_alert_feedback(limit=12),
+        "recent_daily_logs": get_recent_daily_logs(limit=14),
+        "recent_alert_outcomes": recent_alert_outcomes,
+        "recent_event_lineage": recent_event_lineage,
         "recent_nightly_logs": get_recent_nightly_consolidation_logs(limit=6),
         "semantic_memory_count": len(get_memory_embedding_rows(limit=500)),
     }
@@ -3054,6 +3420,14 @@ def upsert_event_context(alert_id, event_hash, category, tier, candidate):
     raw_payload = candidate.get("raw_payload", candidate)
     source_label = get_candidate_source_label(candidate)
     source_refs = get_candidate_source_refs(candidate)
+    source_evaluation = candidate.get("source_evaluation") or {
+        "source": candidate.get("source"),
+        "source_refs": source_refs,
+        "selection_reasons": selection_reasons,
+        "score": candidate.get("score"),
+        "ai_why": candidate.get("ai_why"),
+    }
+    dedupe_lineage = candidate.get("dedupe_lineage") or {}
 
     conn = get_conn()
     cur = conn.cursor()
@@ -3062,9 +3436,9 @@ def upsert_event_context(alert_id, event_hash, category, tier, candidate):
         INSERT INTO event_contexts (
             event_hash, alert_id, category, tier, source, headline, snippet, section,
             published_at, fingerprint, semantic_text, body_text, web_url, score,
-            source_label, source_refs_json, selection_reasons_json, raw_payload_json, updated_at
+            source_label, source_refs_json, selection_reasons_json, source_evaluation_json, dedupe_lineage_json, raw_payload_json, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(event_hash) DO UPDATE SET
             alert_id = excluded.alert_id,
             category = excluded.category,
@@ -3082,6 +3456,8 @@ def upsert_event_context(alert_id, event_hash, category, tier, candidate):
             source_label = excluded.source_label,
             source_refs_json = excluded.source_refs_json,
             selection_reasons_json = excluded.selection_reasons_json,
+            source_evaluation_json = excluded.source_evaluation_json,
+            dedupe_lineage_json = excluded.dedupe_lineage_json,
             raw_payload_json = excluded.raw_payload_json,
             updated_at = CURRENT_TIMESTAMP
         """,
@@ -3103,6 +3479,8 @@ def upsert_event_context(alert_id, event_hash, category, tier, candidate):
             source_label,
             serialize_json(source_refs, fallback=[]),
             serialize_json(selection_reasons, fallback=[]),
+            serialize_json(source_evaluation, fallback={}),
+            serialize_json(dedupe_lineage, fallback={}),
             serialize_json(raw_payload, fallback={}),
         ),
     )
@@ -3390,7 +3768,39 @@ def log_alert(category, tier, headline, sent_to_user=1, candidate=None):
 
     if not allowed:
         if candidate is not None:
+            lineage = None
+            if reason == "semantic_duplicate" and semantic_result and semantic_result.get("match"):
+                related_hash = semantic_result["match"].get("event_hash")
+                lineage = {
+                    "relation_type": "semantic_duplicate",
+                    "related_event_hash": related_hash,
+                    "similarity": semantic_result.get("similarity"),
+                }
+                if related_hash:
+                    log_event_lineage(event_hash, related_hash, "semantic_duplicate", details=lineage)
+            candidate = {
+                **candidate,
+                "dedupe_lineage": lineage,
+                "source_evaluation": {
+                    "selection_reasons": candidate.get("selection_reasons", []),
+                    "source": candidate.get("source"),
+                    "source_refs": candidate.get("source_refs", []),
+                    "semantic_similarity": semantic_result.get("similarity") if semantic_result else None,
+                },
+            }
             upsert_event_context(None, event_hash, category, tier, candidate)
+        log_alert_outcome(
+            stage="decision",
+            outcome="blocked",
+            reason=reason,
+            event_hash=event_hash,
+            details={
+                "category": category,
+                "tier": tier,
+                "headline": headline,
+                "semantic_similarity": semantic_result.get("similarity") if semantic_result else None,
+            },
+        )
         return {
             "ok": False,
             "reason": reason,
@@ -3423,6 +3833,20 @@ def log_alert(category, tier, headline, sent_to_user=1, candidate=None):
             semantic_result.get("semantic_text", ""),
             semantic_result.get("embedding"),
         )
+
+    log_alert_outcome(
+        stage="decision",
+        outcome="allowed",
+        reason=reason,
+        event_hash=event_hash,
+        details={
+            "alert_id": alert_id,
+            "category": category,
+            "tier": tier,
+            "headline": headline,
+            "sent_to_user": sent_to_user,
+        },
+    )
 
     return {
         "ok": True,
@@ -4333,6 +4757,19 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False):
 
         if log_to_alerts:
             if shortlist_item and not ai_decision.get("send"):
+                blocked_event_hash = build_event_hash(effective_category, candidate["headline"])
+                log_alert_outcome(
+                    stage="ai_gate",
+                    outcome="blocked",
+                    reason="ai_filtered_out",
+                    event_hash=blocked_event_hash,
+                    details={
+                        "candidate_id": shortlist_item.get("candidate_id"),
+                        "headline": candidate["headline"],
+                        "score_reasons": candidate["selection_reasons"],
+                        "ai_why": ai_decision.get("why"),
+                    },
+                )
                 result["alert_result"] = {
                     "ok": False,
                     "reason": "ai_filtered_out",
@@ -4344,7 +4781,18 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False):
                 **candidate,
                 "category": effective_category,
                 "assigned_tier": effective_tier,
+                "ai_why": ai_decision.get("why"),
                 "selection_reasons": candidate["selection_reasons"] + ([f"ai:{ai_decision.get('why')}"] if ai_decision.get("why") else []),
+                "source_evaluation": {
+                    "source": candidate.get("source"),
+                    "source_refs": candidate.get("source_refs", [get_candidate_source_label(candidate)]),
+                    "selection_reasons": candidate.get("selection_reasons", []),
+                    "score": candidate.get("score"),
+                    "shortlisted": shortlist_item is not None,
+                    "ai_candidate_id": shortlist_item.get("candidate_id") if shortlist_item else None,
+                    "ai_send": ai_decision.get("send") if shortlist_item else None,
+                    "ai_why": ai_decision.get("why") if shortlist_item else None,
+                },
             }
             alert_result = log_alert(
                 effective_category,
@@ -4358,6 +4806,13 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False):
                 alert_message = format_alert_message(effective_candidate, alert_result)
                 send_result = send_whatsapp_message(alert_message)
                 result["send_result"] = send_result
+                log_alert_outcome(
+                    stage="delivery",
+                    outcome="sent" if send_result.get("ok") else "failed",
+                    reason=send_result.get("error"),
+                    event_hash=alert_result.get("event_hash"),
+                    details={"alert_id": alert_result.get("alert_id"), "headline": candidate["headline"]},
+                )
                 if send_result.get("ok"):
                     log_outbound_message("alert", alert_message)
         else:
@@ -5090,6 +5545,7 @@ def sms():
     memory_result = process_memory_updates(msg)
     intent, value = route(msg)
     log_interaction_event(intent, msg)
+    upsert_daily_log(intent, msg, memory_result=memory_result)
 
     if intent == "alert_feedback":
         if not feedback_context_allowed():
