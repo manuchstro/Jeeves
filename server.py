@@ -4942,21 +4942,103 @@ def format_alert_message(candidate, alert_result):
     return f"{code}: {candidate['headline']}{suffix}"
 
 
+def build_daily_brief_insight_lines(selected_alerts, portfolio_section=None, watchlist_section=None):
+    if not selected_alerts:
+        return []
+
+    alerts_text = []
+    for item in selected_alerts[:10]:
+        alerts_text.append(
+            f"{item.get('display_code', '')}: {item.get('headline', '')} [{item.get('source_label') or item.get('source') or ''}]"
+        )
+
+    prompt = f"""
+You are Jeeves. Create a concise daily brief meta-summary.
+
+Rules:
+- Return JSON only with keys: day_analysis, portfolio_effect, insight.
+- day_analysis: exactly one sentence.
+- portfolio_effect: exactly one sentence, predictive where possible.
+- insight: exactly one short sentence, nuanced and non-obvious.
+- No fluff, no disclaimers, no numbered lists.
+
+Headlines:
+{chr(10).join(alerts_text)}
+
+Portfolio line:
+{portfolio_section or "none"}
+
+Watchlist line:
+{watchlist_section or "none"}
+"""
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Return valid JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+        )
+        payload = json.loads(completion.choices[0].message.content)
+        day_analysis = " ".join(str(payload.get("day_analysis", "")).split()).strip()
+        portfolio_effect = " ".join(str(payload.get("portfolio_effect", "")).split()).strip()
+        insight = " ".join(str(payload.get("insight", "")).split()).strip()
+        lines = []
+        if day_analysis:
+            lines.append(f"- Day analysis: {day_analysis}")
+        if portfolio_effect:
+            lines.append(f"- Portfolio effect: {portfolio_effect}")
+        if insight:
+            lines.append(f"- Insight: {insight}")
+        return lines
+    except:
+        top = selected_alerts[0]
+        fallback = [
+            f"- Day analysis: The day was led by {top.get('category', '')}-coded developments, with the strongest signal in \"{top.get('headline', '')}\".",
+            "- Portfolio effect: Near-term portfolio sensitivity is highest to macro-rate and energy headline volatility, so position-level dispersion may stay elevated.",
+            "- Insight: Cross-source clustering around the same theme is currently a stronger signal than any single headline.",
+        ]
+        return fallback
+
+
 def compose_daily_brief(include_debug=False):
-    feedback_profile = get_feedback_profile(limit=20)
-    alerts = get_recent_alerts_for_brief(limit=12, include_debug=include_debug)
-    brief_tier_limit = feedback_profile["brief_tier_limit"]
-    filtered_alerts = [item for item in alerts if item["tier"] <= brief_tier_limit]
-    filtered_alerts = filtered_alerts[:5]
-    filtered_alerts = build_brief_display_codes(filtered_alerts)
+    alerts = get_recent_alerts_for_brief(limit=80, include_debug=True)
+    section_order = ["P", "E", "G", "L"]
+    by_section = {code: [] for code in section_order}
+    for item in alerts:
+        code = (item.get("category") or "").upper()
+        if code in by_section:
+            by_section[code].append(item)
+
+    selected_alerts = []
+    for code in section_order:
+        section_items = by_section[code]
+        tier_1 = [item for item in section_items if int(item.get("tier") or 3) == 1]
+        tier_2 = [item for item in section_items if int(item.get("tier") or 3) == 2]
+        if tier_1 or tier_2:
+            selected_alerts.extend(tier_1 + tier_2)
+        else:
+            tier_3 = [item for item in section_items if int(item.get("tier") or 3) == 3]
+            if tier_3:
+                selected_alerts.append(tier_3[0])
+
+    selected_alerts = build_brief_display_codes(selected_alerts)
 
     lines = []
-    if filtered_alerts:
+    if selected_alerts:
         lines.append("Daily brief:")
-        for item in filtered_alerts:
-            lines.append(f"{item['display_code']}: {item['headline']}{format_brief_source_suffix(item)}")
-        store_brief_event_map(filtered_alerts)
+        for code in section_order:
+            section_selected = [item for item in selected_alerts if item.get("category") == code]
+            if not section_selected:
+                continue
+            lines.append(f"{code}:")
+            for item in section_selected:
+                lines.append(f"{item['display_code']}: {item['headline']}{format_brief_source_suffix(item)}")
+        store_brief_event_map(selected_alerts)
 
+    portfolio_section = None
+    watchlist_section = None
     if is_trading_day_now():
         portfolio_section = get_portfolio_market_section(max_items=4)
         if portfolio_section:
@@ -4965,6 +5047,15 @@ def compose_daily_brief(include_debug=False):
         watchlist_section = get_watchlist_market_section(max_items=4)
         if watchlist_section:
             lines.append(watchlist_section)
+
+    insight_lines = build_daily_brief_insight_lines(
+        selected_alerts,
+        portfolio_section=portfolio_section,
+        watchlist_section=watchlist_section,
+    )
+    if insight_lines:
+        lines.append("")
+        lines.extend(insight_lines)
 
     if not lines:
         return "Nothing to report."
