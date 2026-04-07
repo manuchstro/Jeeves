@@ -5387,6 +5387,210 @@ def route(text):
 
     return ("none", None)
 
+
+def should_attempt_multi_task(text):
+    t = (text or "").strip().lower()
+    if len(t) < 45:
+        return False
+    separators = [
+        ";",
+        "\n",
+        " and then ",
+        " then ",
+        " also ",
+        " plus ",
+    ]
+    return any(separator in t for separator in separators)
+
+
+def fallback_split_tasks(text):
+    raw = text or ""
+    parts = re.split(r"\s*(?:;|\n+|\band then\b|\bthen\b|\balso\b|\bplus\b)\s*", raw, flags=re.IGNORECASE)
+    tasks = [part.strip(" .") for part in parts if part and part.strip(" .")]
+    return tasks[:6]
+
+
+def split_multi_tasks(text):
+    prompt = f"""
+Split this message into separate actionable tasks in order.
+
+Rules:
+- Return JSON only.
+- Preserve order.
+- Keep each task concise and self-contained.
+- If there is only one real task, return a single-item list.
+- Maximum 6 tasks.
+
+Message:
+\"\"\"{text}\"\"\"
+
+Return:
+{{
+  "tasks": ["task 1", "task 2"]
+}}
+"""
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Return JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+        )
+        payload = json.loads(completion.choices[0].message.content)
+        tasks = payload.get("tasks") or []
+        if not isinstance(tasks, list):
+            return fallback_split_tasks(text)
+        cleaned = []
+        for task in tasks[:6]:
+            task_text = re.sub(r"\s+", " ", str(task or "")).strip(" .")
+            if task_text:
+                cleaned.append(task_text)
+        return cleaned or fallback_split_tasks(text)
+    except:
+        return fallback_split_tasks(text)
+
+
+def run_generic_reply(user_text):
+    try:
+        add_message("user", user_text)
+        messages = [
+            {"role":"system","content":SYSTEM_PROMPT},
+            {"role":"system","content":format_memory_context(user_text)},
+        ] + get_recent_messages()
+        completion = client.chat.completions.create(model="gpt-4o-mini",messages=messages)
+        reply = completion.choices[0].message.content
+        add_message("assistant", reply)
+        return reply
+    except:
+        return "Temporary error."
+
+
+def build_reply_for_intent(intent, value, msg, memory_result=None):
+    if intent == "alert_feedback":
+        if not feedback_context_allowed():
+            return "Feedback only applies to alerts or daily briefs."
+        log_alert_feedback(value, msg)
+        upsert_memory(
+            "working",
+            "alert_feedback",
+            "latest_feedback",
+            value,
+            source_text=msg,
+            confidence=0.9,
+        )
+        return FEEDBACK_RESPONSES[value]
+
+    if intent == "add":
+        if not value:
+            return "I don't know what to add."
+        added = []
+        for item in value:
+            add_to_watchlist(item)
+            added.append(item)
+        return f"Added {', '.join(added)}."
+
+    if intent == "portfolio_update":
+        upsert_portfolio_symbols(value, source_text=msg)
+        record_portfolio_snapshot(value, source_type="manual", trusted=False, summary={"source_text": msg})
+        return f"Portfolio noted: {', '.join(value)}."
+
+    if intent == "portfolio_show":
+        holdings = [item["symbol"] for item in get_portfolio_holdings(limit=12)]
+        return f"Portfolio: {', '.join(holdings)}" if holdings else "Portfolio is empty."
+
+    if intent == "remove":
+        if not value:
+            return "I don't know what to remove."
+        removed_items = []
+        missing_items = []
+        for item in value:
+            if remove_from_watchlist(item):
+                removed_items.append(item)
+            else:
+                missing_items.append(item)
+        if removed_items and missing_items:
+            return f"Removed {', '.join(removed_items)}. Not on your watchlist: {', '.join(missing_items)}."
+        if removed_items:
+            return f"Removed {', '.join(removed_items)}."
+        return f"Not on your watchlist: {', '.join(missing_items)}."
+
+    if intent == "show":
+        wl = get_watchlist()
+        return f"Watchlist: {', '.join(wl)}" if wl else "Watchlist is empty."
+
+    if intent == "watchlist_stats":
+        wl = get_watchlist()
+        snapshots = get_massive_watchlist_snapshot(wl)
+        if snapshots is None:
+            snapshots = get_twelvedata_watchlist_snapshot(wl)
+        return format_watchlist_stats_reply(wl, snapshots)
+
+    if intent == "ticker_quote":
+        snapshots = get_twelvedata_watchlist_snapshot(value)
+        return format_ticker_quote_reply(value, snapshots)
+
+    if intent == "daily_brief":
+        return compose_daily_brief(include_debug=True)
+
+    if intent == "command_key":
+        return COMMAND_KEY_REPLY
+
+    if intent == "full_article_request":
+        if article_request_context_allowed():
+            return format_full_article_unavailable_reply()
+        return "I don't know which article you mean."
+
+    if intent == "event_expand":
+        return expand_brief_event(value)
+
+    if intent == "fred":
+        out = get_fred(value)
+        return format_fred_reply(value, out, msg)
+
+    if intent == "news":
+        out = get_news(value)
+        return out if out else "N/A"
+
+    if intent == "email_request":
+        query_hint = value.get("query_hint") or ""
+        if value.get("intent") == "latest_ibkr_email":
+            query = query_hint or "from:interactivebrokers OR from:interactivebrokers.com OR subject:(Activity Statement)"
+            email_data = get_latest_email_message(query=query)
+            return format_latest_email_reply(email_data, summary_mode=True)
+        if value.get("intent") == "important_recent_email":
+            days_window = max(1, min(30, int(value.get("days_window") or 7)))
+            query = (query_hint + " " if query_hint else "") + f"newer_than:{days_window}d"
+            email_messages = get_recent_email_messages(query=query, max_results=12)
+            ranked = rank_important_emails(email_messages or [], msg)
+            return format_important_recent_email_reply(email_messages, ranked)
+        if value.get("intent") == "email_summary":
+            email_data = get_latest_email_message(query=query_hint or "")
+            return format_latest_email_reply(email_data, summary_mode=True)
+        email_data = get_latest_email_message(query=query_hint or "")
+        return format_latest_email_reply(email_data, summary_mode=False)
+
+    if memory_result and memory_result.get("journal_context") and intent == "none":
+        context_snapshot = build_journal_context_snapshot()
+        decision = decide_journal_response(
+            memory_result.get("journal_entry") or msg,
+            memory_result.get("journal_analysis") or {},
+            context_snapshot,
+        )
+        add_message("user", msg)
+        if decision.get("mode") == "silent":
+            return None
+        reply = decision.get("reply", "").strip()
+        if reply:
+            add_message("assistant", reply)
+        return reply or None
+
+    if should_send_no_reply(msg):
+        return None
+
+    return run_generic_reply(msg)
+
 init_db()
 announce_current_deploy_once()
 
@@ -5574,171 +5778,30 @@ def sms():
         return ""
 
     memory_result = process_memory_updates(msg)
+    if should_attempt_multi_task(msg):
+        tasks = split_multi_tasks(msg)
+        if len(tasks) >= 2:
+            task_replies = []
+            for idx, task_text in enumerate(tasks, start=1):
+                task_intent, task_value = route(task_text)
+                log_interaction_event(task_intent, task_text)
+                upsert_daily_log(task_intent, task_text, memory_result=memory_result)
+                task_reply = build_reply_for_intent(task_intent, task_value, task_text, memory_result=memory_result)
+                if task_reply is None:
+                    continue
+                task_replies.append(f"{idx}. {task_reply}")
+
+            if task_replies:
+                combined_reply = "\n".join(task_replies)
+                resp.message(combined_reply)
+                return str(resp)
+
     intent, value = route(msg)
     log_interaction_event(intent, msg)
     upsert_daily_log(intent, msg, memory_result=memory_result)
-
-    if intent == "alert_feedback":
-        if not feedback_context_allowed():
-            resp.message("Feedback only applies to alerts or daily briefs.")
-            return str(resp)
-        log_alert_feedback(value, msg)
-        upsert_memory(
-            "working",
-            "alert_feedback",
-            "latest_feedback",
-            value,
-            source_text=msg,
-            confidence=0.9,
-        )
-        resp.message(FEEDBACK_RESPONSES[value])
-        return str(resp)
-
-    if intent == "add":
-        if not value:
-            resp.message("I don't know what to add.")
-            return str(resp)
-        added = []
-        for item in value:
-            add_to_watchlist(item)
-            added.append(item)
-        resp.message(f"Added {', '.join(added)}.")
-        return str(resp)
-
-    if intent == "portfolio_update":
-        upsert_portfolio_symbols(value, source_text=msg)
-        record_portfolio_snapshot(value, source_type="manual", trusted=False, summary={"source_text": msg})
-        resp.message(f"Portfolio noted: {', '.join(value)}.")
-        return str(resp)
-
-    if intent == "portfolio_show":
-        holdings = [item["symbol"] for item in get_portfolio_holdings(limit=12)]
-        resp.message(f"Portfolio: {', '.join(holdings)}" if holdings else "Portfolio is empty.")
-        return str(resp)
-
-    if intent == "remove":
-        if not value:
-            resp.message("I don't know what to remove.")
-            return str(resp)
-        removed_items = []
-        missing_items = []
-        for item in value:
-            if remove_from_watchlist(item):
-                removed_items.append(item)
-            else:
-                missing_items.append(item)
-        if removed_items and missing_items:
-            resp.message(
-                f"Removed {', '.join(removed_items)}. Not on your watchlist: {', '.join(missing_items)}."
-            )
-        elif removed_items:
-            resp.message(f"Removed {', '.join(removed_items)}.")
-        else:
-            resp.message(f"Not on your watchlist: {', '.join(missing_items)}.")
-        return str(resp)
-
-    if intent == "show":
-        wl = get_watchlist()
-        resp.message(f"Watchlist: {', '.join(wl)}" if wl else "Watchlist is empty.")
-        return str(resp)
-
-    if intent == "watchlist_stats":
-        wl = get_watchlist()
-        snapshots = get_massive_watchlist_snapshot(wl)
-        if snapshots is None:
-            snapshots = get_twelvedata_watchlist_snapshot(wl)
-        resp.message(format_watchlist_stats_reply(wl, snapshots))
-        return str(resp)
-
-    if intent == "ticker_quote":
-        snapshots = get_twelvedata_watchlist_snapshot(value)
-        resp.message(format_ticker_quote_reply(value, snapshots))
-        return str(resp)
-
-    if intent == "daily_brief":
-        resp.message(compose_daily_brief(include_debug=True))
-        return str(resp)
-
-    if intent == "command_key":
-        resp.message(COMMAND_KEY_REPLY)
-        return str(resp)
-
-    if intent == "full_article_request":
-        if article_request_context_allowed():
-            resp.message(format_full_article_unavailable_reply())
-        else:
-            resp.message("I don't know which article you mean.")
-        return str(resp)
-
-    if intent == "event_expand":
-        resp.message(expand_brief_event(value))
-        return str(resp)
-
-    if intent == "fred":
-        out = get_fred(value)
-        resp.message(format_fred_reply(value, out, msg))
-        return str(resp)
-
-    if intent == "news":
-        out = get_news(value)
-        resp.message(out if out else "N/A")
-        return str(resp)
-
-    if intent == "email_request":
-        query_hint = value.get("query_hint") or ""
-        if value.get("intent") == "latest_ibkr_email":
-            query = query_hint or "from:interactivebrokers OR from:interactivebrokers.com OR subject:(Activity Statement)"
-            email_data = get_latest_email_message(query=query)
-            resp.message(format_latest_email_reply(email_data, summary_mode=True))
-            return str(resp)
-        if value.get("intent") == "important_recent_email":
-            days_window = max(1, min(30, int(value.get("days_window") or 7)))
-            query = (query_hint + " " if query_hint else "") + f"newer_than:{days_window}d"
-            email_messages = get_recent_email_messages(query=query, max_results=12)
-            ranked = rank_important_emails(email_messages or [], msg)
-            resp.message(format_important_recent_email_reply(email_messages, ranked))
-            return str(resp)
-        if value.get("intent") == "email_summary":
-            email_data = get_latest_email_message(query=query_hint or "")
-            resp.message(format_latest_email_reply(email_data, summary_mode=True))
-            return str(resp)
-        email_data = get_latest_email_message(query=query_hint or "")
-        resp.message(format_latest_email_reply(email_data, summary_mode=False))
-        return str(resp)
-
-    if memory_result.get("journal_context") and intent == "none":
-        context_snapshot = build_journal_context_snapshot()
-        decision = decide_journal_response(
-            memory_result.get("journal_entry") or msg,
-            memory_result.get("journal_analysis") or {},
-            context_snapshot,
-        )
-        add_message("user", msg)
-        if decision.get("mode") == "silent":
-            return ""
-        reply = decision.get("reply", "").strip()
-        if reply:
-            add_message("assistant", reply)
-            resp.message(reply)
-            return str(resp)
+    reply = build_reply_for_intent(intent, value, msg, memory_result=memory_result)
+    if reply is None:
         return ""
-
-    if should_send_no_reply(msg):
-        add_message("user", msg)
-        return ""
-
-    try:
-        add_message("user", msg)
-        messages = [
-            {"role":"system","content":SYSTEM_PROMPT},
-            {"role":"system","content":format_memory_context(msg)},
-        ] + get_recent_messages()
-        completion = client.chat.completions.create(model="gpt-4o-mini",messages=messages)
-        reply = completion.choices[0].message.content
-        add_message("assistant", reply)
-    except:
-        reply = "Temporary error."
-
     resp.message(reply)
     return str(resp)
 
