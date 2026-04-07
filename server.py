@@ -352,7 +352,9 @@ def init_db():
 def normalize_watchlist_item(text):
     cleaned = text.strip().upper()
     cleaned = re.sub(r"^(ADD|REMOVE)\s+", "", cleaned)
+    cleaned = re.sub(r"^(PLEASE|CAN YOU|COULD YOU|WOULD YOU)\s+", "", cleaned)
     cleaned = re.sub(r"\s+(TO|FROM)\s+MY\s+WATCHLIST$", "", cleaned)
+    cleaned = re.sub(r"\s+(TO|FROM)\s+WATCHLIST$", "", cleaned)
     cleaned = re.sub(r"\s+MY\s+WATCHLIST$", "", cleaned)
     cleaned = re.sub(r"\s+WATCHLIST$", "", cleaned)
     cleaned = re.sub(r"[^A-Z0-9.\- ]", "", cleaned)
@@ -360,30 +362,63 @@ def normalize_watchlist_item(text):
     return cleaned
 
 
-def extract_watchlist_item(text, action):
+def split_watchlist_candidates(raw_text):
+    text = raw_text or ""
+    text = re.sub(r"\b(?:and|&)\b", ",", text, flags=re.IGNORECASE)
+    text = text.replace("/", ",")
+    parts = [part.strip() for part in text.split(",")]
+    items = []
+    for part in parts:
+        item = normalize_watchlist_item(part)
+        if not item:
+            continue
+        symbol = re.sub(r"[^A-Z0-9.\-]", "", item)
+        if 1 <= len(symbol) <= 8:
+            items.append(symbol)
+    # Preserve order while deduplicating.
+    return list(dict.fromkeys(items))
+
+
+def extract_watchlist_items(text, action):
     cleaned = text.strip()
 
     patterns = {
         "add": [
+            r"^\s*(?:can|could|would)\s+you\s+add\s+(.+?)\s+to\s+my\s+watchlist\s*$",
+            r"^\s*(?:can|could|would)\s+you\s+add\s+(.+?)\s+to\s+watchlist\s*$",
+            r"^\s*(?:can|could|would)\s+you\s+add\s+(.+?)\s*$",
+            r"^\s*(?:please\s+)?add\s+(.+?)\s+to\s+my\s+watchlist\s*$",
+            r"^\s*(?:please\s+)?add\s+(.+?)\s+to\s+watchlist\s*$",
             r"^\s*add\s+(.+?)\s+to\s+my\s+watchlist\s*$",
             r"^\s*add\s+(.+?)\s+to\s+watchlist\s*$",
-            r"^\s*add\s+(.+?)\s*$",
+            r"^\s*(?:please\s+)?add\s+(.+?)\s*$",
         ],
         "remove": [
+            r"^\s*(?:can|could|would)\s+you\s+remove\s+(.+?)\s+from\s+my\s+watchlist\s*$",
+            r"^\s*(?:can|could|would)\s+you\s+remove\s+(.+?)\s+from\s+watchlist\s*$",
+            r"^\s*(?:can|could|would)\s+you\s+remove\s+(.+?)\s*$",
+            r"^\s*(?:please\s+)?remove\s+(.+?)\s+from\s+my\s+watchlist\s*$",
+            r"^\s*(?:please\s+)?remove\s+(.+?)\s+from\s+watchlist\s*$",
             r"^\s*remove\s+(.+?)\s+from\s+my\s+watchlist\s*$",
             r"^\s*remove\s+(.+?)\s+from\s+watchlist\s*$",
-            r"^\s*remove\s+(.+?)\s*$",
+            r"^\s*(?:please\s+)?remove\s+(.+?)\s*$",
         ],
     }
 
     for pattern in patterns.get(action, []):
         match = re.match(pattern, cleaned, re.IGNORECASE)
         if match:
-            item = normalize_watchlist_item(match.group(1))
-            if item:
-                return item
+            items = split_watchlist_candidates(match.group(1))
+            if items:
+                return items
 
-    return None
+    return []
+
+
+def extract_watchlist_item(text, action):
+    items = extract_watchlist_items(text, action)
+    return items[0] if items else None
+
 
 def add_to_watchlist(item):
     conn = get_conn()
@@ -410,6 +445,21 @@ def get_watchlist():
     rows = cur.fetchall()
     conn.close()
     return [r["key"] for r in rows]
+
+
+def is_watchlist_action_message(text, action):
+    patterns = {
+        "add": [
+            r"^\s*(?:please\s+)?add\b",
+            r"^\s*(?:can|could|would)\s+you\s+add\b",
+        ],
+        "remove": [
+            r"^\s*(?:please\s+)?remove\b",
+            r"^\s*(?:can|could|would)\s+you\s+remove\b",
+        ],
+    }
+    t = text.strip().lower()
+    return any(re.match(pattern, t, re.IGNORECASE) for pattern in patterns.get(action, []))
 
 
 def normalize_symbol(token):
@@ -4517,11 +4567,11 @@ def route(text):
     if is_portfolio_show_question(text):
         return ("portfolio_show", None)
 
-    if t.startswith("add "):
-        return ("add", extract_watchlist_item(text, "add"))
+    if is_watchlist_action_message(text, "add"):
+        return ("add", extract_watchlist_items(text, "add"))
 
-    if t.startswith("remove "):
-        return ("remove", extract_watchlist_item(text, "remove"))
+    if is_watchlist_action_message(text, "remove"):
+        return ("remove", extract_watchlist_items(text, "remove"))
 
     if is_watchlist_stats_question(text):
         return ("watchlist_stats", None)
@@ -4762,8 +4812,11 @@ def sms():
         if not value:
             resp.message("I don't know what to add.")
             return str(resp)
-        add_to_watchlist(value)
-        resp.message(f"Added {value}.")
+        added = []
+        for item in value:
+            add_to_watchlist(item)
+            added.append(item)
+        resp.message(f"Added {', '.join(added)}.")
         return str(resp)
 
     if intent == "portfolio_update":
@@ -4781,8 +4834,21 @@ def sms():
         if not value:
             resp.message("I don't know what to remove.")
             return str(resp)
-        removed = remove_from_watchlist(value)
-        resp.message(f"Removed {value}." if removed else f"{value} is not on your watchlist.")
+        removed_items = []
+        missing_items = []
+        for item in value:
+            if remove_from_watchlist(item):
+                removed_items.append(item)
+            else:
+                missing_items.append(item)
+        if removed_items and missing_items:
+            resp.message(
+                f"Removed {', '.join(removed_items)}. Not on your watchlist: {', '.join(missing_items)}."
+            )
+        elif removed_items:
+            resp.message(f"Removed {', '.join(removed_items)}.")
+        else:
+            resp.message(f"Not on your watchlist: {', '.join(missing_items)}.")
         return str(resp)
 
     if intent == "show":
