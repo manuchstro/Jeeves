@@ -58,6 +58,7 @@ RAILWAY_DEPLOYMENT_ID = os.environ.get("RAILWAY_DEPLOYMENT_ID")
 LOCAL_TZ = ZoneInfo("America/Los_Angeles")
 ALERT_DECISION_MODEL = os.environ.get("ALERT_DECISION_MODEL", "gpt-4o")
 ALERT_PUSH_TIER_MAX = max(1, min(3, int(os.environ.get("ALERT_PUSH_TIER_MAX", "2"))))
+CURR_BURST_QUERIES_PER_CYCLE = max(1, min(4, int(os.environ.get("CURR_BURST_QUERIES_PER_CYCLE", "3"))))
 GMAIL_ACCOUNT_EMAIL = os.environ.get("GMAIL_ACCOUNT_EMAIL", "").strip().lower()
 GMAIL_TOKEN_JSON = os.environ.get("GMAIL_TOKEN_JSON")
 DAILY_BRIEF_HOUR = 20
@@ -5656,6 +5657,9 @@ def build_poll_candidates():
         "generated_queries": news_queries,
         "currents_due": source_poll_due("CURRENTS", CURRENTS_MIN_INTERVAL_MINUTES),
         "currents_query": None,
+        "currents_queries": [],
+        "currents_burst_size": CURR_BURST_QUERIES_PER_CYCLE,
+        "currents_added_by_query": [],
         "currents_added": 0,
     }
 
@@ -5668,13 +5672,25 @@ def build_poll_candidates():
         candidates.extend(get_nyt_headline_candidates(query, category_hint=category_hint, watchlist=watchlist))
 
     if source_debug["currents_due"] and news_queries:
-        query_index = int(datetime.now(LOCAL_TZ).timestamp() // (CURRENTS_MIN_INTERVAL_MINUTES * 60)) % len(news_queries)
-        query, category_hint = news_queries[query_index]
-        source_debug["currents_query"] = query
-        current_candidates = get_currents_candidates(query, category_hint=category_hint, watchlist=watchlist)
-        source_debug["currents_added"] = len(current_candidates)
-        candidates.extend(current_candidates)
-        mark_source_polled("CURRENTS", note=query)
+        step_bucket = int(datetime.now(LOCAL_TZ).timestamp() // (CURRENTS_MIN_INTERVAL_MINUTES * 60))
+        start_index = step_bucket % len(news_queries)
+        burst_size = min(CURR_BURST_QUERIES_PER_CYCLE, len(news_queries))
+        selected = []
+        for offset in range(burst_size):
+            selected.append(news_queries[(start_index + offset) % len(news_queries)])
+
+        total_added = 0
+        for query, category_hint in selected:
+            current_candidates = get_currents_candidates(query, category_hint=category_hint, watchlist=watchlist)
+            added_count = len(current_candidates)
+            source_debug["currents_queries"].append(query)
+            source_debug["currents_added_by_query"].append({"query": query, "added": added_count})
+            total_added += added_count
+            candidates.extend(current_candidates)
+
+        source_debug["currents_query"] = selected[0][0] if selected else None
+        source_debug["currents_added"] = total_added
+        mark_source_polled("CURRENTS", note=" | ".join(source_debug["currents_queries"]))
 
     return dedupe_candidates(candidates), source_debug
 
