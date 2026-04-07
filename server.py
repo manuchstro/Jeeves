@@ -379,6 +379,34 @@ def split_watchlist_candidates(raw_text):
     return list(dict.fromkeys(items))
 
 
+def cleanup_watchlist_clause(text):
+    cleaned = (text or "").strip()
+    cleaned = re.sub(r"^\s*(?:please\s+)?", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^\s*(?:can|could|would)\s+you\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^\s*(?:add|remove|put|take|drop|include|track|untrack)\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^\s*(?:start|stop)\s+tracking\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:on|onto|to|off|from)\s+(?:my\s+)?watchlist\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:on|off)\s+the\s+list\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:for\s+)?my\s+watchlist\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\btracking\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .?!,;:")
+    return cleaned
+
+
+def infer_symbols_from_watchlist_message(text):
+    cleaned = cleanup_watchlist_clause(text)
+    return split_watchlist_candidates(cleaned)
+
+
+def merge_symbol_lists(*symbol_lists):
+    merged = []
+    for symbol_list in symbol_lists:
+        for symbol in symbol_list or []:
+            if symbol and symbol not in merged:
+                merged.append(symbol)
+    return merged
+
+
 def extract_watchlist_items(text, action):
     cleaned = text.strip()
 
@@ -460,6 +488,67 @@ def is_watchlist_action_message(text, action):
     }
     t = text.strip().lower()
     return any(re.match(pattern, t, re.IGNORECASE) for pattern in patterns.get(action, []))
+
+
+def infer_watchlist_action_fallback(text):
+    t = (text or "").strip().lower()
+
+    add_patterns = [
+        r"\bput\s+(.+?)\s+(?:on|onto)\s+(?:my\s+)?watchlist\b",
+        r"\badd\s+(.+?)\s+(?:to\s+)?(?:my\s+)?watchlist\b",
+        r"\bstart\s+tracking\s+(.+)$",
+        r"\btrack\s+(.+?)(?:\s+(?:for\s+me|too))?$",
+        r"\binclude\s+(.+?)\s+(?:on|in)\s+(?:my\s+)?watchlist\b",
+    ]
+    remove_patterns = [
+        r"\btake\s+(.+?)\s+off\s+(?:my\s+)?watchlist\b",
+        r"\bremove\s+(.+?)\s+(?:from\s+)?(?:my\s+)?watchlist\b",
+        r"\bstop\s+tracking\s+(.+)$",
+        r"\bdrop\s+(.+?)\s+(?:from\s+)?(?:my\s+)?watchlist\b",
+        r"\buntrack\s+(.+)$",
+    ]
+
+    for pattern in add_patterns:
+        match = re.search(pattern, t, re.IGNORECASE)
+        if match:
+            items = merge_symbol_lists(
+                split_watchlist_candidates(cleanup_watchlist_clause(match.group(1))),
+                infer_symbols_from_watchlist_message(text),
+            )
+            if items:
+                return {"intent": "add", "symbols": items}
+
+    for pattern in remove_patterns:
+        match = re.search(pattern, t, re.IGNORECASE)
+        if match:
+            items = merge_symbol_lists(
+                split_watchlist_candidates(cleanup_watchlist_clause(match.group(1))),
+                infer_symbols_from_watchlist_message(text),
+            )
+            if items:
+                return {"intent": "remove", "symbols": items}
+
+    show_patterns = [
+        r"\bwhat(?:'s| is)\s+on\s+(?:my\s+)?watchlist\b",
+        r"\bshow\s+me\s+(?:my\s+)?watchlist\b",
+        r"\bwhich\s+(?:stocks|names|tickers)\s+am\s+i\s+tracking\b",
+        r"\bwhat\s+am\s+i\s+tracking\b",
+        r"\blist\s+(?:my\s+)?watchlist\b",
+    ]
+    if any(re.search(pattern, t, re.IGNORECASE) for pattern in show_patterns):
+        return {"intent": "show", "symbols": []}
+
+    stats_patterns = [
+        r"\bhow(?:'s| is| did)\s+(?:my\s+)?watchlist\b.+\b(?:doing|performing|do|perform|move|moved)\b",
+        r"\bhow(?:'s| is| did)\s+(?:the\s+)?list\b.+\b(?:doing|performing|do|perform|move|moved)\b",
+        r"\bhow\s+are\s+the\s+(?:names|stocks|tickers)\s+i(?:'m| am)\s+tracking\b",
+        r"\bwhat\s+happened\s+to\s+(?:my\s+)?watchlist\b",
+        r"\bwatchlist\b.+\b(?:today|performance|moves|movers|up|down)\b",
+    ]
+    if any(re.search(pattern, t, re.IGNORECASE) for pattern in stats_patterns):
+        return {"intent": "watchlist_stats", "symbols": []}
+
+    return {"intent": "none", "symbols": []}
 
 
 def normalize_symbol(token):
@@ -946,6 +1035,87 @@ def format_important_recent_email_reply(email_messages, ranked):
         for reason in reasons[:3]:
             lines.append(f"- {reason}")
     return "\n".join(lines) if lines else "I couldn't find anything clearly important."
+
+
+def fallback_watchlist_request(text):
+    t = (text or "").strip().lower()
+
+    richer_fallback = infer_watchlist_action_fallback(text)
+    if richer_fallback["intent"] != "none":
+        return richer_fallback
+
+    if is_watchlist_action_message(text, "add"):
+        items = merge_symbol_lists(
+            extract_watchlist_items(text, "add"),
+            infer_symbols_from_watchlist_message(text),
+        )
+        return {"intent": "add", "symbols": items}
+
+    if is_watchlist_action_message(text, "remove"):
+        items = merge_symbol_lists(
+            extract_watchlist_items(text, "remove"),
+            infer_symbols_from_watchlist_message(text),
+        )
+        return {"intent": "remove", "symbols": items}
+
+    if is_watchlist_stats_question(text):
+        return {"intent": "watchlist_stats", "symbols": []}
+
+    if "watchlist" in t:
+        return {"intent": "show", "symbols": []}
+
+    return {"intent": "none", "symbols": []}
+
+
+def interpret_watchlist_request(text):
+    prompt = f"""
+Interpret this user message for watchlist intent.
+
+Rules:
+- Use meaning, not brittle keyword matching.
+- The action must be one of: none, add, remove, show, watchlist_stats.
+- Only return add/remove when the user is clearly talking about a watchlist or tracking list.
+- For add/remove, extract ticker-like symbols when possible.
+- Return JSON only.
+
+Message:
+\"\"\"{text}\"\"\"
+
+Return:
+{{
+  "watchlist_intent": "none|add|remove|show|watchlist_stats",
+  "symbols": ["AAPL", "MSFT"]
+}}
+"""
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Return JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+        )
+        payload = json.loads(completion.choices[0].message.content)
+        intent = (payload.get("watchlist_intent") or "none").strip().lower()
+        if intent not in {"none", "add", "remove", "show", "watchlist_stats"}:
+            intent = "none"
+
+        raw_symbols = payload.get("symbols") or []
+        symbols = []
+        if isinstance(raw_symbols, list):
+            for symbol in raw_symbols:
+                normalized = normalize_watchlist_item(str(symbol))
+                normalized = re.sub(r"[^A-Z0-9.\-]", "", normalized)
+                if normalized and normalized not in symbols:
+                    symbols.append(normalized)
+
+        if intent in {"add", "remove"} and not symbols:
+            return fallback_watchlist_request(text)
+
+        return {"intent": intent, "symbols": symbols}
+    except:
+        return fallback_watchlist_request(text)
 
 
 def bootstrap_gmail_account_from_env():
@@ -4544,6 +4714,7 @@ def route(text):
     market_question = interpret_market_data_question(text)
     expand_reference = interpret_event_reference(text)
     email_request = interpret_email_request(text)
+    watchlist_request = interpret_watchlist_request(text)
 
     if is_command_key_request(text):
         return ("command_key", None)
@@ -4567,13 +4738,13 @@ def route(text):
     if is_portfolio_show_question(text):
         return ("portfolio_show", None)
 
-    if is_watchlist_action_message(text, "add"):
-        return ("add", extract_watchlist_items(text, "add"))
+    if watchlist_request["intent"] == "add":
+        return ("add", watchlist_request["symbols"])
 
-    if is_watchlist_action_message(text, "remove"):
-        return ("remove", extract_watchlist_items(text, "remove"))
+    if watchlist_request["intent"] == "remove":
+        return ("remove", watchlist_request["symbols"])
 
-    if is_watchlist_stats_question(text):
+    if watchlist_request["intent"] == "watchlist_stats":
         return ("watchlist_stats", None)
 
     if email_request["intent"] != "none":
@@ -4582,7 +4753,7 @@ def route(text):
     if market_question:
         return (market_question["intent"], market_question["tickers"])
 
-    if "watchlist" in t:
+    if watchlist_request["intent"] == "show":
         return ("show", None)
 
     if "10 year" in t or "treasury" in t:
