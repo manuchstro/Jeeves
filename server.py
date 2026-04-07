@@ -913,8 +913,63 @@ def article_request_context_allowed():
     return recent_intent in {"daily_brief", "event_expand", "alert_delivery"}
 
 
+def get_latest_outbound_message(message_type=None, hours=24):
+    conn = get_conn()
+    cur = conn.cursor()
+    if message_type:
+        cur.execute(
+            """
+            SELECT id, message_type, body, created_at
+            FROM outbound_messages
+            WHERE message_type = ?
+              AND datetime(created_at) >= datetime('now', ?)
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (message_type, f"-{hours} hours"),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT id, message_type, body, created_at
+            FROM outbound_messages
+            WHERE datetime(created_at) >= datetime('now', ?)
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (f"-{hours} hours",),
+        )
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def count_interactions_since(timestamp):
+    if not timestamp:
+        return 0
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM interaction_events
+        WHERE datetime(created_at) > datetime(?)
+        """,
+        (timestamp,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return int(row["count"] or 0) if row else 0
+
+
 def in_gratitude_journal_context():
-    return recent_outbound_message_type_within("gratitude", hours=8)
+    latest = get_latest_outbound_message("gratitude", hours=8)
+    if not latest:
+        return False
+    latest_any = get_latest_outbound_message(hours=8)
+    if not latest_any or latest_any.get("message_type") != "gratitude":
+        return False
+    return count_interactions_since(latest.get("created_at")) == 0
 
 
 def recent_outbound_message_type_within(message_type, hours=6):
