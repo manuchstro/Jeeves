@@ -319,6 +319,17 @@ def init_db():
     )
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS nightly_consolidation_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        local_date TEXT NOT NULL,
+        summary_text TEXT NOT NULL,
+        payload_json TEXT,
+        depth_label TEXT NOT NULL DEFAULT 'light',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
     conn.commit()
 
     for statement in [
@@ -718,6 +729,48 @@ def log_outbound_message(message_type, body):
     )
     conn.commit()
     conn.close()
+
+
+def add_nightly_consolidation_log(summary_text, payload=None, depth_label="light", local_date=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO nightly_consolidation_logs (local_date, summary_text, payload_json, depth_label)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            local_date or get_local_date_string(),
+            summary_text.strip(),
+            json.dumps(payload or {}),
+            depth_label,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_recent_nightly_consolidation_logs(limit=10):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT local_date, summary_text, payload_json, depth_label, created_at
+        FROM nightly_consolidation_logs
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    for row in rows:
+        try:
+            row["payload"] = json.loads(row.get("payload_json") or "{}")
+        except:
+            row["payload"] = {}
+        row.pop("payload_json", None)
+    return rows
 
 
 def get_local_now():
@@ -1336,6 +1389,182 @@ def build_usage_pattern_summary(events):
     return "; ".join(patterns)
 
 
+def build_recent_memory_material(interaction_limit=50, observation_limit=60, gratitude_limit=8):
+    interactions = get_recent_interaction_events(limit=interaction_limit)
+    observations = get_recent_observations(limit=observation_limit)
+    gratitude = get_recent_gratitude(limit=gratitude_limit)
+    return {
+        "interactions": interactions,
+        "observations": observations,
+        "gratitude": gratitude,
+    }
+
+
+def should_run_deep_memory_consolidation(material):
+    interactions = material.get("interactions", [])
+    observations = material.get("observations", [])
+    gratitude = material.get("gratitude", [])
+    if len(interactions) >= 8:
+        return True
+    if len(observations) >= 10:
+        return True
+    if gratitude:
+        return True
+    return False
+
+
+def fallback_deep_memory_consolidation(material):
+    interactions = material.get("interactions", [])
+    gratitude = material.get("gratitude", [])
+    summary = "Light consolidation only; limited recent material."
+    if gratitude:
+        summary = "Recent gratitude present; reflective signal recorded."
+    elif interactions:
+        summary = "Recent interactions reviewed; no strong durable shift identified."
+    return {
+        "summary": summary,
+        "more_true": [],
+        "less_true": [],
+        "emerging": [],
+        "relationship_memory": [],
+        "thread_memory": [],
+        "deep_self_memory": [],
+        "contradictions": [],
+        "protect": [],
+        "depth_label": "light",
+    }
+
+
+def run_ai_deep_memory_consolidation(material):
+    interactions = material.get("interactions", [])[:40]
+    observations = material.get("observations", [])[:50]
+    gratitude = material.get("gratitude", [])[:8]
+
+    prompt = f"""
+You are consolidating long-term memory for Manu.
+
+Rules:
+- Be deep, but do not hallucinate.
+- Only claim something if the material supports it.
+- Prefer nuance over flattening him into one trait.
+- Track contradictions instead of overwriting too fast.
+- Identify relationship preferences, ongoing threads, and deep-self signals.
+- Be specific and human, not generic.
+- Return JSON only.
+
+Recent interactions:
+{json.dumps(interactions, ensure_ascii=True)}
+
+Recent observations:
+{json.dumps(observations, ensure_ascii=True)}
+
+Recent gratitude/journal:
+{json.dumps(gratitude, ensure_ascii=True)}
+
+Return:
+{{
+  "summary": "1-3 sentence nightly summary",
+  "more_true": ["what seems more true now"],
+  "less_true": ["what seems less true now"],
+  "emerging": ["possible emerging patterns"],
+  "relationship_memory": [
+    {{"memory_key": "response_preference", "value": "short specific description", "confidence": 0.0}}
+  ],
+  "thread_memory": [
+    {{"memory_key": "open_loop", "value": "short unresolved topic or ongoing arc", "confidence": 0.0}}
+  ],
+  "deep_self_memory": [
+    {{"category": "core_identity|core_traits|defining_moments|major_successes|major_failures|deep_preferences|long_term_frictions", "memory_key": "short_key", "value": "durable self insight", "confidence": 0.0}}
+  ],
+  "contradictions": [
+    {{"memory_key": "short_key", "usually_true": "old pattern", "recently_true": "recent shift", "confidence": 0.0}}
+  ],
+  "protect": ["memory key or category that should be treated as protected"],
+  "depth_label": "light|deep"
+}}
+"""
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Return JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+        )
+        payload = json.loads(completion.choices[0].message.content)
+        if not isinstance(payload, dict):
+            return fallback_deep_memory_consolidation(material)
+        return payload
+    except:
+        return fallback_deep_memory_consolidation(material)
+
+
+def store_deep_memory_consolidation(payload):
+    summary = (payload.get("summary") or "Nightly consolidation completed.").strip()
+    depth_label = (payload.get("depth_label") or "light").strip().lower()
+
+    for idx, value in enumerate(payload.get("more_true", [])[:5], start=1):
+        upsert_memory("working", "nightly_summary", f"more_true_{idx}", value, source_text="nightly_deep_consolidation", confidence=0.7)
+        record_memory_embedding("working", "nightly_summary", f"more_true_{idx}", value)
+
+    for idx, value in enumerate(payload.get("less_true", [])[:3], start=1):
+        upsert_memory("working", "nightly_summary", f"less_true_{idx}", value, source_text="nightly_deep_consolidation", confidence=0.65)
+        record_memory_embedding("working", "nightly_summary", f"less_true_{idx}", value)
+
+    for idx, value in enumerate(payload.get("emerging", [])[:5], start=1):
+        upsert_memory("long_term", "behavior_trends", f"emerging_{idx}", value, source_text="nightly_deep_consolidation", confidence=0.68)
+        record_memory_embedding("long_term", "behavior_trends", f"emerging_{idx}", value)
+
+    for item in payload.get("relationship_memory", [])[:6]:
+        key = (item.get("memory_key") or "relationship_preference").strip()[:64]
+        value = (item.get("value") or "").strip()
+        if not value:
+            continue
+        confidence = max(0.45, min(0.95, float(item.get("confidence") or 0.68)))
+        upsert_memory("long_term", "relationship_preferences", key, value, source_text="nightly_deep_consolidation", confidence=confidence)
+        record_memory_embedding("long_term", "relationship_preferences", key, value)
+
+    for item in payload.get("thread_memory", [])[:8]:
+        key = (item.get("memory_key") or "open_loop").strip()[:64]
+        value = (item.get("value") or "").strip()
+        if not value:
+            continue
+        confidence = max(0.45, min(0.95, float(item.get("confidence") or 0.66)))
+        upsert_memory("working", "memory_threads", key, value, source_text="nightly_deep_consolidation", confidence=confidence)
+        record_memory_embedding("working", "memory_threads", key, value)
+
+    for item in payload.get("deep_self_memory", [])[:8]:
+        category = (item.get("category") or "core_identity").strip()
+        key = (item.get("memory_key") or "deep_self").strip()[:64]
+        value = (item.get("value") or "").strip()
+        if not value:
+            continue
+        confidence = max(0.5, min(0.98, float(item.get("confidence") or 0.72)))
+        upsert_memory("long_term", category, key, value, source_text="nightly_deep_consolidation", confidence=confidence)
+        record_memory_embedding("long_term", category, key, value)
+
+    for item in payload.get("contradictions", [])[:6]:
+        key = (item.get("memory_key") or "identity_shift").strip()[:64]
+        usually_true = (item.get("usually_true") or "").strip()
+        recently_true = (item.get("recently_true") or "").strip()
+        if not usually_true and not recently_true:
+            continue
+        confidence = max(0.45, min(0.95, float(item.get("confidence") or 0.65)))
+        contradiction_value = json.dumps({
+            "usually_true": usually_true,
+            "recently_true": recently_true,
+        })
+        upsert_memory("long_term", "behavior_trends", f"contradiction_{key}", contradiction_value, source_text="nightly_deep_consolidation", confidence=confidence)
+        record_memory_embedding("long_term", "behavior_trends", f"contradiction_{key}", f"usually: {usually_true}; recently: {recently_true}")
+
+    add_nightly_consolidation_log(summary, payload=payload, depth_label=depth_label)
+    return {
+        "summary": summary,
+        "depth_label": depth_label,
+    }
+
+
 def is_protected_memory_item(item):
     return item.get("category") in PROTECTED_MEMORY_CATEGORIES
 
@@ -1945,6 +2174,14 @@ def run_nightly_memory_consolidation():
                 summary,
             )
 
+    material = build_recent_memory_material(interaction_limit=60, observation_limit=80, gratitude_limit=10)
+    if should_run_deep_memory_consolidation(material):
+        payload = run_ai_deep_memory_consolidation(material)
+        store_deep_memory_consolidation(payload)
+    else:
+        payload = fallback_deep_memory_consolidation(material)
+        store_deep_memory_consolidation(payload)
+
     apply_memory_decay()
 
 
@@ -1958,6 +2195,7 @@ def get_memory_debug_summary():
         "recent_observations": get_recent_observations(limit=12),
         "recent_interactions": get_recent_interaction_events(limit=30),
         "recent_alert_feedback": get_recent_alert_feedback(limit=12),
+        "recent_nightly_logs": get_recent_nightly_consolidation_logs(limit=6),
         "semantic_memory_count": len(get_memory_embedding_rows(limit=500)),
     }
 

@@ -132,6 +132,7 @@ PROTECTED_MEMORY_CATEGORIES = {
     "deep_preferences",
     "long_term_frictions",
     "behavior_trends",
+    "core_identity",
 }
 
 STORY_STOPWORDS = {
@@ -151,6 +152,9 @@ MEMORY_VECTOR_CATEGORY_WEIGHTS = {
     "risk_profile": 1.0,
     "usage_patterns": 0.8,
     "goals": 0.9,
+    "relationship_preferences": 1.0,
+    "memory_threads": 1.0,
+    "core_identity": 1.3,
 }
 
 KNOWN_MARKET_NAME_MAP = {
