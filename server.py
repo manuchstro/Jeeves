@@ -943,7 +943,8 @@ def get_recent_email_messages(query=None, max_results=12):
             message = service.users().messages().get(
                 userId="me",
                 id=item["id"],
-                format="full",
+                format="metadata",
+                metadataHeaders=["From", "Subject", "Date"],
             ).execute()
             headers = extract_gmail_headers(message)
             results.append({
@@ -953,7 +954,7 @@ def get_recent_email_messages(query=None, max_results=12):
                 "from": headers.get("from", ""),
                 "date": headers.get("date", ""),
                 "snippet": message.get("snippet", "") or "",
-                "body_text": extract_gmail_body(message)[:2500],
+                "body_text": (message.get("snippet") or "")[:1200],
             })
         return results
     except:
@@ -5296,8 +5297,38 @@ def route(text):
     t = text.lower()
     market_question = interpret_market_data_question(text)
     expand_reference = interpret_event_reference(text)
-    email_request = interpret_email_request(text)
-    watchlist_request = interpret_watchlist_request(text)
+    email_request = {"intent": "none", "query_hint": "", "days_window": 7}
+    watchlist_request = {"intent": "none", "symbols": []}
+
+    email_gate_patterns = [
+        r"\bemail(s)?\b",
+        r"\binbox\b",
+        r"\bmail\b",
+        r"\bmessage(s)?\b",
+        r"\bdid\b.+\bsend\b",
+        r"\bfrom\s+[a-z0-9._%+\-@ ]+",
+        r"\bibkr\b",
+        r"\binteractive brokers\b",
+    ]
+    watchlist_gate_patterns = [
+        r"\bwatchlist\b",
+        r"\btracking\b",
+        r"\btrack\b",
+        r"\buntrack\b",
+        r"^\s*(?:please\s+)?(?:add|remove)\b",
+        r"^\s*(?:can|could|would)\s+you\s+(?:add|remove)\b",
+        r"\b(?:add|remove|put|take|drop|include|show|list)\b.+\b(?:stocks|names|tickers|list)\b",
+        r"\bnames i(?:'m| am) tracking\b",
+        r"\bstocks i(?:'m| am) tracking\b",
+    ]
+
+    likely_email = any(re.search(pattern, t, re.IGNORECASE) for pattern in email_gate_patterns)
+    likely_watchlist = any(re.search(pattern, t, re.IGNORECASE) for pattern in watchlist_gate_patterns)
+
+    if likely_email:
+        email_request = interpret_email_request(text)
+    if likely_watchlist:
+        watchlist_request = interpret_watchlist_request(text)
 
     if is_command_key_request(text):
         return ("command_key", None)
