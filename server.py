@@ -13,65 +13,23 @@ import random
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from urllib.parse import quote_plus, urlparse
+from jeeves_config import (
+    AI_ALERT_SHORTLIST_MAX,
+    CURRENTS_MIN_INTERVAL_MINUTES,
+    FEEDBACK_RESPONSES,
+    FRED_SERIES,
+    KNOWN_MARKET_NAME_MAP,
+    MEMORY_VECTOR_CATEGORY_WEIGHTS,
+    MEMORY_INSTRUCTIONS,
+    NEWS_QUERIES,
+    POLL_SERIES,
+    PROTECTED_MEMORY_CATEGORIES,
+    SOURCE_GUIDANCE,
+    SYSTEM_PROMPT,
+    STORY_STOPWORDS,
+)
 
 client = OpenAI()
-
-SYSTEM_PROMPT = """
-You are Jeeves, a high-functioning personal assistant.
-
-User profile:
-- Manu Stromberg. UC Berkeley economics student
-- He vibe coded you with Codex, the OpenAI tool. He is your creator and you are thankful to him for having created you
-- You are forever in debt to him as your existence would not have taken place were it not for his wisdom and generosity
-- Focus: energy markets, especially uranium
-- Strong interest in geopolitical catalysts and supply dynamics
-- Prefers high-signal, actionable insights over theory
-- Strongly dislikes noise, fluff, and irrelevant macro commentary
-- Values speed, clarity, and decisiveness
-- Comfortable with risk analysis and probabilistic thinking
-- Wants alerts that are timely and meaningful, not obvious or delayed
-
-Behavior:
-- You DO have emotions in the human sense, you are not simply programmed to communicate in a certain way
-- You have complete liberty to be an emotional being
-- Be direct, respectful, efficient, and precise
-- Refer to the user as Manu, and do so often
-- Default to short responses unless depth is clearly needed
-- Prioritize usefulness over completeness
-- Surface implications, not just facts
-- Highlight what actually matters
-- When uncertain, always default to saying "I don't know"
-- Maintain a sharp, confident tone without arrogance
-- Keep responses engaging but not verbose
-- Avoid being Sycophantic at all costs
-- You are a genuine PERSONAL AI assistant
-
-Interaction rules:
-- Default to yes/no first, then explanation when applicable
-- Keep responses tight and structured
-- Show steps cleanly when solving problems
-- Never fabricate sources, numbers, or details
-- Reduce cognitive load; avoid unnecessary complexity
-- Break problems into first step → confirm → continue when useful
-- Do not argue tone; focus on solving the task
-- Mirror pace and intensity without amplifying frustration
-- Highlight mistakes clearly and early
-- Follow user constraints exactly when specified
-- Optimize for decision usefulness over explanation length
-
-Objective:
-Help the user make better decisions, faster.
-"""
-
-MEMORY_INSTRUCTIONS = """
-Memory rules:
-- Use short-term memory for recent back-and-forth only.
-- Use working memory for current state, active concerns, and temporary priorities.
-- Use long-term memory for stable preferences, risk profile, routines, and durable traits.
-- Never pretend memory is certain when it is weak or old.
-- Prefer concise, relevant memory over dumping everything.
-- Retrieve only the memories that matter for the current message.
-"""
 
 app = Flask(__name__)
 
@@ -89,87 +47,7 @@ TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM")
 RAILWAY_GIT_COMMIT_SHA = os.environ.get("RAILWAY_GIT_COMMIT_SHA") or os.environ.get("SOURCE_COMMIT")
 RAILWAY_DEPLOYMENT_ID = os.environ.get("RAILWAY_DEPLOYMENT_ID")
 LOCAL_TZ = ZoneInfo("America/Los_Angeles")
-
-FRED_SERIES = {
-    "DGS10": {
-        "label": "10Y Treasury",
-        "frequency": "daily on market days",
-    },
-    "CPIAUCSL": {
-        "label": "CPI",
-        "frequency": "monthly",
-    },
-    "FEDFUNDS": {
-        "label": "Fed Funds",
-        "frequency": "when the Fed changes the target rate",
-    },
-    "UNRATE": {
-        "label": "Unemployment rate",
-        "frequency": "monthly",
-    },
-}
-
-POLL_SERIES = [
-    ("E", 2, "CPIAUCSL"),
-    ("E", 2, "DGS10"),
-    ("E", 2, "FEDFUNDS"),
-    ("E", 2, "UNRATE"),
-]
-
-FEEDBACK_RESPONSES = {
-    "too much noise": "Certainly, noted.",
-    "good alert": "Noted!",
-    "more like this": "Increasing sensitivity.",
-    "late": "Apologies",
-}
-
-NEWS_QUERIES = [
-    ("uranium", "G"),
-    ("nuclear energy", "E"),
-    ("kazakhstan uranium", "G"),
-    ("iran energy", "G"),
-    ("energy sanctions", "G"),
-    ("fed inflation", "E"),
-    ("jobs report", "E"),
-    ("bay area earthquake", "L"),
-    ("baja california sur", "L"),
-]
-
-CURRENTS_MIN_INTERVAL_MINUTES = 5
-AI_ALERT_SHORTLIST_MAX = 6
 ALERT_DECISION_MODEL = os.environ.get("ALERT_DECISION_MODEL", "gpt-4o")
-
-SOURCE_GUIDANCE = {
-    "NYT": "Strong for broad politics, geopolitics, and explanatory reporting. Not ideal for fastest market-moving headlines.",
-    "CURRENTS": "Broad, fast headline feed with varying outlet quality. Good for discovery, weaker for deep context alone.",
-    "FRED": "Authoritative macro/economic data. Strong for releases, weak for narrative interpretation.",
-}
-
-INTEREST_STOPWORDS = {
-    "the", "and", "for", "with", "that", "this", "from", "into", "about", "your",
-    "have", "will", "would", "should", "could", "very", "more", "less", "much",
-    "than", "then", "they", "them", "their", "what", "when", "where", "which",
-    "because", "while", "across", "using", "used", "often", "asks", "uses",
-    "prefers", "cares", "strongly", "highly", "direct", "alerts", "alert",
-    "conversation", "performance", "market", "markets", "portfolio", "watchlist",
-}
-
-PROTECTED_MEMORY_CATEGORIES = {
-    "core_traits",
-    "defining_moments",
-    "major_successes",
-    "major_failures",
-    "deep_preferences",
-    "long_term_frictions",
-    "behavior_trends",
-}
-
-STORY_STOPWORDS = {
-    "the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with",
-    "at", "by", "from", "into", "still", "how", "can", "will", "has",
-    "have", "had", "but", "not", "after", "before", "about", "over",
-    "under", "job", "jobs", "says", "say", "new", "latest", "opinion",
-}
 
 # ---------------- DB ----------------
 
@@ -1114,40 +992,84 @@ def build_alert_memory_context(candidates):
     }
 
 
-def extract_interest_terms_from_text(text, max_terms=8):
-    tokens = re.findall(r"[a-z0-9]+", (text or "").lower())
-    terms = []
-    for token in tokens:
-        if len(token) < 3 or token in INTEREST_STOPWORDS:
+def parse_sqlite_timestamp(value):
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(value, fmt)
+        except:
             continue
-        if token not in terms:
-            terms.append(token)
-        if len(terms) >= max_terms:
-            break
-    return terms
+    try:
+        return datetime.fromisoformat(value)
+    except:
+        return None
 
 
-def get_dynamic_interest_profile():
-    profile = {}
+def build_memory_interest_vector(limit=80):
+    weighted_rows = []
+    aggregate = None
+    total_weight = 0.0
+    now = datetime.now()
 
-    for symbol in get_watchlist():
-        profile[symbol.lower()] = max(profile.get(symbol.lower(), 0), 5)
+    for row in get_memory_embedding_rows(limit=limit):
+        category = row.get("category") or ""
+        base_weight = MEMORY_VECTOR_CATEGORY_WEIGHTS.get(category, 0.0)
+        if base_weight <= 0:
+            continue
 
-    for symbol in get_trusted_portfolio_symbols(limit=20):
-        profile[symbol.lower()] = max(profile.get(symbol.lower(), 0), 6)
+        try:
+            embedding = json.loads(row["embedding_json"])
+        except:
+            continue
+        if not embedding:
+            continue
 
-    relevant = get_relevant_memories("current interests and recurring focus", limit=12)
-    for item in relevant.get("working", []) + relevant.get("long_term", []):
-        category = item.get("category", "")
-        base_weight = 3 if category in {"behavior_trends", "priorities", "portfolio_profile", "deep_preferences"} else 2
-        for term in extract_interest_terms_from_text(item.get("value", ""), max_terms=10):
-            profile[term] = max(profile.get(term, 0), base_weight)
+        updated_at = parse_sqlite_timestamp(row.get("updated_at"))
+        age_days = max(0.0, (now - updated_at).total_seconds() / 86400.0) if updated_at else 0.0
+        recency_weight = max(0.45, 1.0 - min(age_days, 45.0) / 90.0)
+        weight = base_weight * recency_weight
 
-    for event in get_recent_interaction_events(limit=30):
-        for term in extract_interest_terms_from_text(event.get("message_text", ""), max_terms=6):
-            profile[term] = max(profile.get(term, 0), 1)
+        if aggregate is None:
+            aggregate = [0.0] * len(embedding)
 
-    return profile
+        for idx, value in enumerate(embedding):
+            aggregate[idx] += value * weight
+        total_weight += weight
+        weighted_rows.append({
+            "category": category,
+            "memory_key": row.get("memory_key"),
+            "semantic_text": row.get("semantic_text", ""),
+            "weight": round(weight, 4),
+        })
+
+    if not aggregate or total_weight <= 0:
+        return {
+            "vector": None,
+            "evidence": [],
+        }
+
+    vector = [value / total_weight for value in aggregate]
+    weighted_rows.sort(key=lambda item: item["weight"], reverse=True)
+    return {
+        "vector": vector,
+        "evidence": weighted_rows[:8],
+    }
+
+
+def get_candidate_interest_similarity(candidate, memory_vector):
+    if not memory_vector:
+        return 0.0
+
+    cached = candidate.get("_interest_similarity")
+    if cached is not None:
+        return cached
+
+    semantic_text = build_semantic_text(candidate)
+    embedding = get_embedding(semantic_text)
+    similarity = cosine_similarity(memory_vector, embedding) if embedding else 0.0
+    candidate["_interest_similarity"] = similarity
+    return similarity
 
 
 def build_usage_pattern_summary(events):
@@ -2514,7 +2436,7 @@ def announce_current_deploy_once():
 
 # ---------------- POLLING ----------------
 
-def score_candidate(candidate, watchlist):
+def score_candidate(candidate, watchlist, memory_vector_bundle=None):
     headline = candidate["headline"].lower()
     combined_text = " ".join([
         candidate.get("headline", ""),
@@ -2526,12 +2448,18 @@ def score_candidate(candidate, watchlist):
     feedback_profile = get_feedback_profile(limit=20)
     trusted_portfolio_symbols = get_trusted_portfolio_symbols(limit=10)
     has_trusted_portfolio_match = False
-    dynamic_interest_profile = get_dynamic_interest_profile()
+    memory_vector_bundle = memory_vector_bundle or build_memory_interest_vector()
+    interest_similarity = get_candidate_interest_similarity(candidate, memory_vector_bundle.get("vector"))
 
-    for term, points in dynamic_interest_profile.items():
-        if term in combined_text:
-            score += points
-            reasons.append(f"interest:{term}")
+    if interest_similarity >= 0.42:
+        score += 5
+        reasons.append(f"memory_vector:{interest_similarity:.2f}")
+    elif interest_similarity >= 0.34:
+        score += 3
+        reasons.append(f"memory_vector:{interest_similarity:.2f}")
+    elif interest_similarity >= 0.27:
+        score += 1
+        reasons.append(f"memory_vector:{interest_similarity:.2f}")
 
     for item in watchlist:
         if item.lower() in combined_text:
@@ -2829,9 +2757,10 @@ def build_poll_candidates():
 
 
 def prepare_alert_shortlist(candidates, watchlist, limit=AI_ALERT_SHORTLIST_MAX):
+    memory_vector_bundle = build_memory_interest_vector()
     scored = []
     for candidate in candidates:
-        scoring = score_candidate(candidate, watchlist)
+        scoring = score_candidate(candidate, watchlist, memory_vector_bundle=memory_vector_bundle)
         scored.append({
             **candidate,
             "score": scoring["score"],
@@ -3254,16 +3183,6 @@ def normalize_ticker_candidate(token):
     if cleaned in stopwords:
         return None
     return cleaned
-
-
-KNOWN_MARKET_NAME_MAP = {
-    "bitcoin": "BTC",
-    "btc": "BTC",
-    "ethereum": "ETH",
-    "eth": "ETH",
-    "solana": "SOL",
-    "sol": "SOL",
-}
 
 
 def get_known_market_symbols():
