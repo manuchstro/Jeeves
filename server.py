@@ -13,6 +13,8 @@ import random
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from urllib.parse import quote_plus, urlparse
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
 from jeeves_config import (
     AI_ALERT_SHORTLIST_MAX,
     BASELINE_NEWS_QUERIES,
@@ -591,6 +593,205 @@ def get_gmail_accounts():
             row["scopes"] = []
         row.pop("scopes_json", None)
     return rows
+
+
+def get_gmail_account_token(email=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    if email:
+        cur.execute(
+            """
+            SELECT email, token_json, scopes_json, updated_at
+            FROM gmail_accounts
+            WHERE email = ?
+            LIMIT 1
+            """,
+            (email.strip().lower(),),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT email, token_json, scopes_json, updated_at
+            FROM gmail_accounts
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """
+        )
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_gmail_service():
+    row = get_gmail_account_token()
+    if not row:
+        return None, None
+    try:
+        token_payload = json.loads(row["token_json"])
+        creds = Credentials.from_authorized_user_info(token_payload)
+        service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        return service, row["email"]
+    except:
+        return None, row.get("email")
+
+
+def extract_gmail_headers(message):
+    headers = {}
+    for item in ((message.get("payload") or {}).get("headers") or []):
+        name = (item.get("name") or "").lower()
+        value = item.get("value") or ""
+        if name:
+            headers[name] = value
+    return headers
+
+
+def decode_gmail_body_part(part):
+    if not part:
+        return ""
+    body = part.get("body") or {}
+    data = body.get("data")
+    if not data:
+        return ""
+    try:
+        padded = data + "=" * (-len(data) % 4)
+        return base64.urlsafe_b64decode(padded.encode("utf-8")).decode("utf-8", errors="ignore")
+    except:
+        return ""
+
+
+def extract_gmail_body(message):
+    payload = message.get("payload") or {}
+    direct = decode_gmail_body_part(payload)
+    if direct.strip():
+        return direct.strip()
+    for part in payload.get("parts") or []:
+        text = decode_gmail_body_part(part)
+        if text.strip():
+            return text.strip()
+        for nested in part.get("parts") or []:
+            nested_text = decode_gmail_body_part(nested)
+            if nested_text.strip():
+                return nested_text.strip()
+    snippet = message.get("snippet") or ""
+    return snippet.strip()
+
+
+def get_latest_email_message(query=None):
+    service, account_email = get_gmail_service()
+    if not service:
+        return None
+    try:
+        response = service.users().messages().list(
+            userId="me",
+            maxResults=1,
+            q=query or "",
+        ).execute()
+        messages = response.get("messages") or []
+        if not messages:
+            return {
+                "account_email": account_email,
+                "query": query or "",
+                "found": False,
+            }
+        message_id = messages[0]["id"]
+        message = service.users().messages().get(
+            userId="me",
+            id=message_id,
+            format="full",
+        ).execute()
+        headers = extract_gmail_headers(message)
+        return {
+            "account_email": account_email,
+            "query": query or "",
+            "found": True,
+            "id": message_id,
+            "subject": headers.get("subject", ""),
+            "from": headers.get("from", ""),
+            "date": headers.get("date", ""),
+            "snippet": message.get("snippet", "") or "",
+            "body_text": extract_gmail_body(message),
+        }
+    except:
+        return None
+
+
+def interpret_email_request(text):
+    prompt = f"""
+Interpret this user message for inbox/email intent.
+
+Rules:
+- Use meaning, not keyword matching.
+- Return JSON only.
+- If this is not really about email/inbox, return inbox_intent = "none".
+
+Message:
+\"\"\"{text}\"\"\"
+
+Return:
+{{
+  "inbox_intent": "none|latest_email|latest_ibkr_email|email_summary",
+  "query_hint": "optional Gmail search hint"
+}}
+"""
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Return JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+        )
+        payload = json.loads(completion.choices[0].message.content)
+        intent = (payload.get("inbox_intent") or "none").strip().lower()
+        if intent not in {"none", "latest_email", "latest_ibkr_email", "email_summary"}:
+            intent = "none"
+        return {
+            "intent": intent,
+            "query_hint": (payload.get("query_hint") or "").strip(),
+        }
+    except:
+        return {"intent": "none", "query_hint": ""}
+
+
+def format_latest_email_reply(email_data, summary_mode=False):
+    if email_data is None:
+        return "I don't know. Gmail access may not be available."
+    if not email_data.get("found"):
+        return "No matching email found."
+
+    subject = email_data.get("subject") or "(no subject)"
+    sender = email_data.get("from") or "unknown sender"
+    date = email_data.get("date") or "unknown time"
+    snippet = (email_data.get("body_text") or email_data.get("snippet") or "").strip()
+    snippet = re.sub(r"\s+", " ", snippet)
+
+    if summary_mode:
+        prompt = f"""
+Summarize this email briefly and directly.
+
+Subject: {subject}
+From: {sender}
+Date: {date}
+Body:
+\"\"\"{snippet[:4000]}\"\"\"
+"""
+        try:
+            completion = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Be concise and factual."},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            summary = (completion.choices[0].message.content or "").strip()
+            if summary:
+                return f"Latest email: {subject} from {sender}. {summary}"
+        except:
+            pass
+
+    short_body = snippet[:240] + ("..." if len(snippet) > 240 else "")
+    return f"Latest email: {subject} from {sender} at {date}. {short_body}"
 
 
 def bootstrap_gmail_account_from_env():
@@ -4188,6 +4389,7 @@ def route(text):
     t = text.lower()
     market_question = interpret_market_data_question(text)
     expand_reference = interpret_event_reference(text)
+    email_request = interpret_email_request(text)
 
     if is_command_key_request(text):
         return ("command_key", None)
@@ -4219,6 +4421,9 @@ def route(text):
 
     if is_watchlist_stats_question(text):
         return ("watchlist_stats", None)
+
+    if email_request["intent"] != "none":
+        return ("email_request", email_request)
 
     if market_question:
         return (market_question["intent"], market_question["tickers"])
@@ -4521,6 +4726,21 @@ def sms():
     if intent == "news":
         out = get_news(value)
         resp.message(out if out else "N/A")
+        return str(resp)
+
+    if intent == "email_request":
+        query_hint = value.get("query_hint") or ""
+        if value.get("intent") == "latest_ibkr_email":
+            query = query_hint or "from:interactivebrokers OR from:interactivebrokers.com OR subject:(Activity Statement)"
+            email_data = get_latest_email_message(query=query)
+            resp.message(format_latest_email_reply(email_data, summary_mode=True))
+            return str(resp)
+        if value.get("intent") == "email_summary":
+            email_data = get_latest_email_message(query=query_hint or "")
+            resp.message(format_latest_email_reply(email_data, summary_mode=True))
+            return str(resp)
+        email_data = get_latest_email_message(query=query_hint or "")
+        resp.message(format_latest_email_reply(email_data, summary_mode=False))
         return str(resp)
 
     if memory_result.get("journal_context") and intent == "none":
