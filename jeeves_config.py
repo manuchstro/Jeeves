@@ -93,6 +93,22 @@ FEEDBACK_RESPONSES = {
     "late": "Apologies",
 }
 
+COMMAND_KEY_REPLY = """Command key:
+- key
+- daily brief
+- add [ticker] to my watchlist
+- remove [ticker] from my watchlist
+- what's on my watchlist
+- how is my watchlist doing
+- [ticker] stock price
+- show my portfolio
+- expand on [alert code]
+- good alert
+- too much noise
+- more like this
+- late
+- dashboard"""
+
 BASELINE_NEWS_QUERIES = [
     ("federal reserve inflation jobs", "E"),
     ("bay area earthquake california", "L"),

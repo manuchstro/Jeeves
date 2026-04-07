@@ -16,6 +16,7 @@ from urllib.parse import quote_plus, urlparse
 from jeeves_config import (
     AI_ALERT_SHORTLIST_MAX,
     BASELINE_NEWS_QUERIES,
+    COMMAND_KEY_REPLY,
     CURRENTS_MIN_INTERVAL_MINUTES,
     FEEDBACK_RESPONSES,
     FRED_SERIES,
@@ -3291,6 +3292,10 @@ def is_daily_brief_question(text):
     }
 
 
+def is_command_key_request(text):
+    return text.strip().lower() == "key"
+
+
 def interpret_event_reference(text):
     t = text.strip()
 
@@ -3623,6 +3628,9 @@ def route(text):
     market_question = interpret_market_data_question(text)
     expand_reference = interpret_event_reference(text)
 
+    if is_command_key_request(text):
+        return ("command_key", None)
+
     if is_feedback_message(text):
         return ("alert_feedback", t.strip())
 
@@ -3927,6 +3935,10 @@ def sms():
 
     if intent == "daily_brief":
         resp.message(compose_daily_brief(include_debug=True))
+        return str(resp)
+
+    if intent == "command_key":
+        resp.message(COMMAND_KEY_REPLY)
         return str(resp)
 
     if intent == "full_article_request":
