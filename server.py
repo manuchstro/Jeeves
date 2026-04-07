@@ -4927,11 +4927,41 @@ def format_alert_message(candidate, alert_result):
 
 def compose_daily_brief(include_debug=False):
     feedback_profile = get_feedback_profile(limit=20)
-    alerts = get_recent_alerts_for_brief(limit=12, include_debug=include_debug)
-    brief_tier_limit = feedback_profile["brief_tier_limit"]
-    filtered_alerts = [item for item in alerts if item["tier"] <= brief_tier_limit]
-    filtered_alerts = filtered_alerts[:5]
-    filtered_alerts = build_brief_display_codes(filtered_alerts)
+    alerts = get_recent_alerts_for_brief(limit=40, include_debug=True)
+
+    # Strict brief policy:
+    # - Include tier 1 always.
+    # - Include tier 2 up to dynamic cap (typically around 4).
+    # - Exclude tier 3+ from user-facing brief.
+    tier2_cap = max(0, min(8, int(feedback_profile.get("tier2_cap", 4))))
+    seen_hashes = set()
+    filtered_alerts = []
+
+    for item in alerts:
+        if int(item.get("tier") or 3) != 1:
+            continue
+        event_hash = item.get("event_hash")
+        if event_hash and event_hash in seen_hashes:
+            continue
+        if event_hash:
+            seen_hashes.add(event_hash)
+        filtered_alerts.append(item)
+
+    tier2_count = 0
+    for item in alerts:
+        if int(item.get("tier") or 3) != 2:
+            continue
+        if tier2_count >= tier2_cap:
+            break
+        event_hash = item.get("event_hash")
+        if event_hash and event_hash in seen_hashes:
+            continue
+        if event_hash:
+            seen_hashes.add(event_hash)
+        filtered_alerts.append(item)
+        tier2_count += 1
+
+    filtered_alerts = build_brief_display_codes(filtered_alerts[:8])
 
     lines = []
     if filtered_alerts:
@@ -6463,7 +6493,7 @@ def build_reply_for_intent(intent, value, msg, memory_result=None):
         return format_ticker_quote_reply(value, snapshots)
 
     if intent == "daily_brief":
-        return compose_daily_brief(include_debug=True)
+        return compose_daily_brief(include_debug=False)
 
     if intent == "command_key":
         return COMMAND_KEY_REPLY
@@ -6727,7 +6757,7 @@ def task_daily_brief():
             status=200,
             mimetype="application/json",
         )
-    brief = compose_daily_brief(include_debug=True)
+    brief = compose_daily_brief(include_debug=False)
     result = send_whatsapp_message(brief)
     if result.get("ok"):
         mark_scheduled_task_run("daily_brief", local_date=local_date)
@@ -6794,7 +6824,7 @@ def task_scheduled_check():
     if scheduled_task_due("daily_brief", DAILY_BRIEF_HOUR, DAILY_BRIEF_MINUTE, now_local=now_local):
         results["daily_brief"]["due"] = True
         if mark_scheduled_task_run("daily_brief", local_date=local_date):
-            brief = compose_daily_brief(include_debug=True)
+            brief = compose_daily_brief(include_debug=False)
             send_result = send_whatsapp_message(brief)
             results["daily_brief"]["send_result"] = send_result
             if send_result.get("ok"):
