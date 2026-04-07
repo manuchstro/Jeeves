@@ -57,8 +57,7 @@ RAILWAY_GIT_COMMIT_SHA = os.environ.get("RAILWAY_GIT_COMMIT_SHA") or os.environ.
 RAILWAY_DEPLOYMENT_ID = os.environ.get("RAILWAY_DEPLOYMENT_ID")
 LOCAL_TZ = ZoneInfo("America/Los_Angeles")
 ALERT_DECISION_MODEL = os.environ.get("ALERT_DECISION_MODEL", "gpt-4o")
-ALERT_PUSH_TIER_MAX = max(1, min(3, int(os.environ.get("ALERT_PUSH_TIER_MAX", "1"))))
-ALERT_PUSH_MAX_PER_CYCLE = max(1, int(os.environ.get("ALERT_PUSH_MAX_PER_CYCLE", "2")))
+ALERT_PUSH_TIER_MAX = max(1, min(3, int(os.environ.get("ALERT_PUSH_TIER_MAX", "2"))))
 GMAIL_ACCOUNT_EMAIL = os.environ.get("GMAIL_ACCOUNT_EMAIL", "").strip().lower()
 GMAIL_TOKEN_JSON = os.environ.get("GMAIL_TOKEN_JSON")
 DAILY_BRIEF_HOUR = 20
@@ -4785,6 +4784,24 @@ def get_alert_debug_summary():
     }
 
 
+def count_sent_tier_alerts_today(tier):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM alert_log
+        WHERE DATE(created_at) = DATE('now')
+          AND tier = ?
+          AND sent_to_user = 1
+        """,
+        (tier,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return int(row["count"]) if row else 0
+
+
 def get_recent_alerts_for_brief(limit=12, include_debug=False):
     conn = get_conn()
     cur = conn.cursor()
@@ -4927,41 +4944,11 @@ def format_alert_message(candidate, alert_result):
 
 def compose_daily_brief(include_debug=False):
     feedback_profile = get_feedback_profile(limit=20)
-    alerts = get_recent_alerts_for_brief(limit=40, include_debug=True)
-
-    # Strict brief policy:
-    # - Include tier 1 always.
-    # - Include tier 2 up to dynamic cap (typically around 4).
-    # - Exclude tier 3+ from user-facing brief.
-    tier2_cap = max(0, min(8, int(feedback_profile.get("tier2_cap", 4))))
-    seen_hashes = set()
-    filtered_alerts = []
-
-    for item in alerts:
-        if int(item.get("tier") or 3) != 1:
-            continue
-        event_hash = item.get("event_hash")
-        if event_hash and event_hash in seen_hashes:
-            continue
-        if event_hash:
-            seen_hashes.add(event_hash)
-        filtered_alerts.append(item)
-
-    tier2_count = 0
-    for item in alerts:
-        if int(item.get("tier") or 3) != 2:
-            continue
-        if tier2_count >= tier2_cap:
-            break
-        event_hash = item.get("event_hash")
-        if event_hash and event_hash in seen_hashes:
-            continue
-        if event_hash:
-            seen_hashes.add(event_hash)
-        filtered_alerts.append(item)
-        tier2_count += 1
-
-    filtered_alerts = build_brief_display_codes(filtered_alerts[:8])
+    alerts = get_recent_alerts_for_brief(limit=12, include_debug=include_debug)
+    brief_tier_limit = feedback_profile["brief_tier_limit"]
+    filtered_alerts = [item for item in alerts if item["tier"] <= brief_tier_limit]
+    filtered_alerts = filtered_alerts[:5]
+    filtered_alerts = build_brief_display_codes(filtered_alerts)
 
     lines = []
     if filtered_alerts:
@@ -5646,6 +5633,7 @@ def ai_decide_alert_candidates(candidates):
 def run_poll_cycle(log_to_alerts=True, send_messages=False):
     candidates, source_debug = build_poll_candidates()
     watchlist = get_watchlist()
+    feedback_profile = get_feedback_profile(limit=20)
     results = []
     shortlist, scored_candidates = prepare_alert_shortlist(candidates, watchlist, limit=AI_ALERT_SHORTLIST_MAX)
     ai_decisions = ai_decide_alert_candidates(shortlist)
@@ -5658,7 +5646,9 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False):
             "ai_decision": ai_decisions.get(f"C{idx}", {}),
         }
 
-    pushed_count = 0
+    tier2_push_cap = max(0, int(feedback_profile.get("tier2_cap", 4)))
+    tier2_pushed_today = count_sent_tier_alerts_today(2)
+
     for candidate in scored_candidates:
         event_hash = build_event_hash(candidate["category"], candidate["headline"])
         shortlist_item = shortlist_lookup.get(event_hash)
@@ -5725,11 +5715,13 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False):
                     "ai_why": ai_decision.get("why") if shortlist_item else None,
                 },
             }
-            should_push = (
-                bool(send_messages)
-                and int(effective_tier or 3) <= ALERT_PUSH_TIER_MAX
-                and pushed_count < ALERT_PUSH_MAX_PER_CYCLE
-            )
+            should_push = False
+            if send_messages:
+                tier_value = int(effective_tier or 3)
+                if tier_value == 1 and ALERT_PUSH_TIER_MAX >= 1:
+                    should_push = True
+                elif tier_value == 2 and ALERT_PUSH_TIER_MAX >= 2 and tier2_pushed_today < tier2_push_cap:
+                    should_push = True
 
             alert_result = log_alert(
                 effective_category,
@@ -5752,20 +5744,21 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False):
                 )
                 if send_result.get("ok"):
                     log_outbound_message("alert", alert_message)
-                    pushed_count += 1
+                    if int(effective_tier or 3) == 2:
+                        tier2_pushed_today += 1
             elif send_messages and alert_result.get("ok"):
                 log_alert_outcome(
                     stage="delivery",
                     outcome="skipped",
-                    reason="below_push_threshold_or_cycle_cap",
+                    reason="below_push_threshold_or_tier2_daily_cap",
                     event_hash=alert_result.get("event_hash"),
                     details={
                         "alert_id": alert_result.get("alert_id"),
                         "headline": candidate["headline"],
                         "effective_tier": effective_tier,
                         "push_tier_max": ALERT_PUSH_TIER_MAX,
-                        "pushed_count": pushed_count,
-                        "push_cap": ALERT_PUSH_MAX_PER_CYCLE,
+                        "tier2_pushed_today": tier2_pushed_today,
+                        "tier2_push_cap": tier2_push_cap,
                     },
                 )
         else:
