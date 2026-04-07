@@ -1656,11 +1656,119 @@ def store_journal_analysis(text):
         upsert_memory("long_term", "behavior_trends", "journal_durable_signal", durable_signal, source_text=text, confidence=max(0.55, confidence))
         record_memory_embedding("long_term", "behavior_trends", "journal_durable_signal", durable_signal)
 
+    return {
+        "summary": summary,
+        "tone": tone,
+        "energy": energy,
+        "outlook": outlook,
+        "stress": stress,
+        "friction": friction,
+        "notable_shift": notable_shift,
+        "durable_signal": durable_signal,
+        "confidence": confidence,
+    }
+
+
+def get_weather_context_snapshot():
+    return {
+        "available": False,
+        "status": "not_connected",
+        "summary": "",
+    }
+
+
+def get_sleep_context_snapshot():
+    return {
+        "available": False,
+        "status": "not_connected",
+        "summary": "",
+    }
+
+
+def get_calendar_context_snapshot():
+    return {
+        "available": False,
+        "status": "not_connected",
+        "summary": "",
+    }
+
+
+def build_journal_context_snapshot():
+    return {
+        "weather": get_weather_context_snapshot(),
+        "sleep": get_sleep_context_snapshot(),
+        "calendar": get_calendar_context_snapshot(),
+    }
+
+
+def fallback_journal_response_decision(journal_analysis):
+    return {
+        "mode": "silent",
+        "reply": "",
+        "why": "default_silent",
+    }
+
+
+def decide_journal_response(text, journal_analysis, context_snapshot):
+    prompt = f"""
+Decide whether Jeeves should reply to this journal/gratitude response.
+
+Rules:
+- Most of the time choose silent.
+- Choose brief_reply only when a short, human response would feel earned.
+- Choose deeper_reply only when something feels genuinely pressing or important.
+- Never be sycophantic.
+- Never flatter for the sake of it.
+- Be human, restrained, perceptive.
+- Weather, sleep, and calendar context matter when available.
+- Return JSON only.
+
+Journal text:
+\"\"\"{text}\"\"\"
+
+Journal analysis:
+{json.dumps(journal_analysis, ensure_ascii=True)}
+
+Context:
+{json.dumps(context_snapshot, ensure_ascii=True)}
+
+Return:
+{{
+  "mode": "silent|brief_reply|deeper_reply",
+  "reply": "empty if silent",
+  "why": "short reason"
+}}
+"""
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Return JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+        )
+        payload = json.loads(completion.choices[0].message.content)
+        mode = (payload.get("mode") or "silent").strip().lower()
+        if mode not in {"silent", "brief_reply", "deeper_reply"}:
+            return fallback_journal_response_decision(journal_analysis)
+        reply = (payload.get("reply") or "").strip()
+        if mode == "silent":
+            reply = ""
+        return {
+            "mode": mode,
+            "reply": reply,
+            "why": (payload.get("why") or "").strip(),
+        }
+    except:
+        return fallback_journal_response_decision(journal_analysis)
+
 
 def process_memory_updates(text):
     updates, gratitude_entry = extract_memory_updates(text)
     portfolio_symbols = []
     journal_context = in_gratitude_journal_context()
+    journal_analysis = None
 
     for update in updates:
         add_memory_observation(
@@ -1724,12 +1832,17 @@ def process_memory_updates(text):
             "gratitude_reflection",
             journal_entry,
         )
-        store_journal_analysis(journal_entry)
+        journal_analysis = store_journal_analysis(journal_entry)
 
     if portfolio_symbols:
         upsert_portfolio_symbols(portfolio_symbols, source_text=text)
 
     consolidate_memory_trends()
+    return {
+        "journal_context": journal_context,
+        "journal_entry": journal_entry,
+        "journal_analysis": journal_analysis,
+    }
 
 
 def run_nightly_memory_consolidation():
@@ -4023,7 +4136,7 @@ def sms():
             log_outbound_message("security_warning", warning)
         return ""
 
-    process_memory_updates(msg)
+    memory_result = process_memory_updates(msg)
     intent, value = route(msg)
     log_interaction_event(intent, msg)
 
@@ -4117,10 +4230,25 @@ def sms():
         resp.message(out if out else "N/A")
         return str(resp)
 
+    if memory_result.get("journal_context") and intent == "none":
+        context_snapshot = build_journal_context_snapshot()
+        decision = decide_journal_response(
+            memory_result.get("journal_entry") or msg,
+            memory_result.get("journal_analysis") or {},
+            context_snapshot,
+        )
+        add_message("user", msg)
+        if decision.get("mode") == "silent":
+            return ""
+        reply = decision.get("reply", "").strip()
+        if reply:
+            add_message("assistant", reply)
+            resp.message(reply)
+            return str(resp)
+        return ""
+
     if should_send_no_reply(msg):
         add_message("user", msg)
-        if recent_outbound_message_type_within("gratitude", hours=8):
-            add_gratitude_entry(msg)
         return ""
 
     try:
