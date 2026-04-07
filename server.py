@@ -1,6 +1,7 @@
 from openai import OpenAI
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
+from twilio.request_validator import RequestValidator
 import os
 import sqlite3
 import requests
@@ -48,6 +49,9 @@ EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM")
+PUBLIC_BASE_URL = (os.environ.get("PUBLIC_BASE_URL") or "").strip()
+INTERNAL_API_KEY = (os.environ.get("INTERNAL_API_KEY") or "").strip()
+ENFORCE_TWILIO_SIGNATURE = (os.environ.get("ENFORCE_TWILIO_SIGNATURE", "1").strip() != "0")
 RAILWAY_GIT_COMMIT_SHA = os.environ.get("RAILWAY_GIT_COMMIT_SHA") or os.environ.get("SOURCE_COMMIT")
 RAILWAY_DEPLOYMENT_ID = os.environ.get("RAILWAY_DEPLOYMENT_ID")
 LOCAL_TZ = ZoneInfo("America/Los_Angeles")
@@ -2190,6 +2194,58 @@ def build_suspicious_message_warning(source_number):
     if source_number:
         return f"Warning. Suspicious message activity at {timestamp} from {source_number}. Check Twilio logs."
     return f"Warning. Suspicious message activity at {timestamp}. Check Twilio logs."
+
+
+def build_unauthorized_message_warning(source_number, message_text):
+    timestamp = datetime.now(LOCAL_TZ).strftime("%-I:%M %p PT on %B %-d")
+    sender = source_number or "unknown"
+    verbatim = message_text if message_text is not None else ""
+    if verbatim == "":
+        verbatim = "[empty message]"
+    return (
+        f"Warning. Unauthorized inbound message at {timestamp}.\n"
+        f"From: {sender}\n"
+        f"Message (verbatim):\n{verbatim}"
+    )
+
+
+def require_internal_api_key():
+    if not INTERNAL_API_KEY:
+        return None
+    provided = (
+        request.headers.get("X-Internal-Key")
+        or request.args.get("key")
+        or request.form.get("key")
+    )
+    if provided == INTERNAL_API_KEY:
+        return None
+    return app.response_class(
+        response=json.dumps({"ok": False, "reason": "unauthorized"}, indent=2),
+        status=401,
+        mimetype="application/json",
+    )
+
+
+def get_twilio_validation_url():
+    if PUBLIC_BASE_URL:
+        base = PUBLIC_BASE_URL.rstrip("/")
+        return f"{base}{request.path}"
+    proto = request.headers.get("X-Forwarded-Proto", request.scheme)
+    host = request.headers.get("X-Forwarded-Host", request.host)
+    return f"{proto}://{host}{request.path}"
+
+
+def verify_twilio_request():
+    if not ENFORCE_TWILIO_SIGNATURE:
+        return True
+    if not TWILIO_AUTH_TOKEN:
+        return False
+    signature = request.headers.get("X-Twilio-Signature", "")
+    if not signature:
+        return False
+    validator = RequestValidator(TWILIO_AUTH_TOKEN)
+    url = get_twilio_validation_url()
+    return validator.validate(url, request.form.to_dict(), signature)
 
 
 def get_recent_alert_feedback(limit=20):
@@ -6407,6 +6463,9 @@ def home():
 
 @app.route("/debug/alerts", methods=["GET"])
 def debug_alerts():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
     return app.response_class(
         response=json.dumps(get_alert_debug_summary(), indent=2),
         status=200,
@@ -6416,6 +6475,9 @@ def debug_alerts():
 
 @app.route("/debug/alerts/test", methods=["POST"])
 def debug_alert_test():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
     category = (request.form.get("category") or "P").upper()
     tier = int(request.form.get("tier") or 2)
     headline = request.form.get("headline") or "Test alert"
@@ -6429,6 +6491,9 @@ def debug_alert_test():
 
 @app.route("/debug/poll/preview", methods=["GET"])
 def debug_poll_preview():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
     return app.response_class(
         response=json.dumps(run_poll_cycle(log_to_alerts=False), indent=2),
         status=200,
@@ -6438,6 +6503,9 @@ def debug_poll_preview():
 
 @app.route("/debug/poll/run", methods=["POST"])
 def debug_poll_run():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
     return app.response_class(
         response=json.dumps(run_poll_cycle(log_to_alerts=True), indent=2),
         status=200,
@@ -6447,6 +6515,9 @@ def debug_poll_run():
 
 @app.route("/debug/memory", methods=["GET"])
 def debug_memory():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
     return app.response_class(
         response=json.dumps(get_memory_debug_summary(), indent=2),
         status=200,
@@ -6456,6 +6527,9 @@ def debug_memory():
 
 @app.route("/debug/gmail", methods=["GET"])
 def debug_gmail():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
     accounts = get_gmail_accounts()
     return app.response_class(
         response=json.dumps({
@@ -6470,6 +6544,9 @@ def debug_gmail():
 
 @app.route("/debug/daily-brief", methods=["GET"])
 def debug_daily_brief():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
     return app.response_class(
         response=json.dumps({"brief": compose_daily_brief(include_debug=True)}, indent=2),
         status=200,
@@ -6479,6 +6556,9 @@ def debug_daily_brief():
 
 @app.route("/debug/memory/consolidate", methods=["POST"])
 def debug_memory_consolidate():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
     run_nightly_memory_consolidation()
     return app.response_class(
         response=json.dumps(get_memory_debug_summary(), indent=2),
@@ -6489,6 +6569,9 @@ def debug_memory_consolidate():
 
 @app.route("/debug/context", methods=["GET"])
 def debug_context():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
     snapshot = build_journal_context_snapshot()
     tone_vector = build_tone_vector({}, snapshot)
     return app.response_class(
@@ -6507,6 +6590,9 @@ def debug_context():
 
 @app.route("/debug/context/calendar", methods=["POST"])
 def debug_context_calendar_upsert():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
     payload = request.get_json(silent=True) or {}
     local_date = (payload.get("local_date") or get_local_date_string()).strip()
     upsert_calendar_daily_context(local_date, payload)
@@ -6519,6 +6605,9 @@ def debug_context_calendar_upsert():
 
 @app.route("/debug/context/sleep", methods=["POST"])
 def debug_context_sleep_upsert():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
     payload = request.get_json(silent=True) or {}
     local_date = (payload.get("local_date") or get_local_date_string()).strip()
     upsert_sleep_daily_context(local_date, payload)
@@ -6531,6 +6620,9 @@ def debug_context_sleep_upsert():
 
 @app.route("/debug/context/weather/refresh", methods=["POST"])
 def debug_context_weather_refresh():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
     local_date = get_local_date_string()
     payload = fetch_open_meteo_daily_context(local_date=local_date)
     row = get_weather_daily_context(local_date=local_date)
@@ -6543,6 +6635,9 @@ def debug_context_weather_refresh():
 
 @app.route("/tasks/poll", methods=["GET", "POST"])
 def task_poll():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
     return app.response_class(
         response=json.dumps(run_poll_cycle(log_to_alerts=True, send_messages=True), indent=2),
         status=200,
@@ -6552,6 +6647,9 @@ def task_poll():
 
 @app.route("/tasks/daily-brief", methods=["GET", "POST"])
 def task_daily_brief():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
     brief = compose_daily_brief(include_debug=True)
     result = send_whatsapp_message(brief)
     if result.get("ok"):
@@ -6565,6 +6663,9 @@ def task_daily_brief():
 
 @app.route("/tasks/gratitude", methods=["GET", "POST"])
 def task_gratitude():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
     run_nightly_memory_consolidation()
     prompt = "What is one thing you were grateful for today?"
     result = send_whatsapp_message(prompt)
@@ -6579,6 +6680,9 @@ def task_gratitude():
 
 @app.route("/tasks/memory-consolidation", methods=["GET", "POST"])
 def task_memory_consolidation():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
     run_nightly_memory_consolidation()
     return app.response_class(
         response=json.dumps({"ok": True, "memory": get_memory_debug_summary()}, indent=2),
@@ -6589,6 +6693,9 @@ def task_memory_consolidation():
 
 @app.route("/tasks/scheduled-check", methods=["GET", "POST"])
 def task_scheduled_check():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
     now_local = get_local_now()
     local_date = get_local_date_string(now_local)
     results = {
@@ -6629,9 +6736,17 @@ def sms():
 
     resp = MessagingResponse()
 
+    if not verify_twilio_request():
+        log_security_event("invalid_twilio_signature", source_number=from_number, message_text=msg)
+        warning = build_unauthorized_message_warning(from_number or "unknown", f"[invalid signature]\n{msg}")
+        result = send_whatsapp_message(warning)
+        if result.get("ok"):
+            log_outbound_message("security_warning", warning)
+        return ""
+
     if from_number != MY_NUMBER:
         log_security_event("unauthorized_message", source_number=from_number, message_text=msg)
-        warning = build_suspicious_message_warning(from_number)
+        warning = build_unauthorized_message_warning(from_number, msg)
         result = send_whatsapp_message(warning)
         if result.get("ok"):
             log_outbound_message("security_warning", warning)
