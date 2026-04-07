@@ -11,6 +11,7 @@ import math
 import base64
 import random
 from datetime import datetime
+from datetime import timedelta
 from zoneinfo import ZoneInfo
 from urllib.parse import quote_plus, urlparse
 from google.oauth2.credentials import Credentials
@@ -181,6 +182,7 @@ def init_db():
         memory_key TEXT NOT NULL,
         value TEXT NOT NULL,
         source_text TEXT,
+        source_trust TEXT NOT NULL DEFAULT 'inferred',
         confidence REAL NOT NULL DEFAULT 0.5,
         stability TEXT NOT NULL DEFAULT 'situational',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -217,8 +219,39 @@ def init_db():
         subtype TEXT,
         memory_key TEXT NOT NULL,
         value TEXT NOT NULL,
+        source_trust TEXT NOT NULL DEFAULT 'inferred',
         confidence REAL NOT NULL DEFAULT 0.5,
         stability TEXT NOT NULL DEFAULT 'situational',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS memory_provenance_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL,
+        category TEXT NOT NULL,
+        memory_key TEXT NOT NULL,
+        action TEXT NOT NULL,
+        source_text TEXT,
+        source_trust TEXT NOT NULL DEFAULT 'inferred',
+        confidence REAL,
+        stability TEXT,
+        old_value TEXT,
+        new_value TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS memory_decay_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL,
+        category TEXT NOT NULL,
+        memory_key TEXT NOT NULL,
+        from_confidence REAL NOT NULL,
+        to_confidence REAL NOT NULL,
+        reason TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
     """)
@@ -443,8 +476,10 @@ def init_db():
         "ALTER TABLE event_contexts ADD COLUMN dedupe_lineage_json TEXT",
         "ALTER TABLE memory_items ADD COLUMN subtype TEXT",
         "ALTER TABLE memory_items ADD COLUMN stability TEXT DEFAULT 'situational'",
+        "ALTER TABLE memory_items ADD COLUMN source_trust TEXT DEFAULT 'inferred'",
         "ALTER TABLE memory_observations ADD COLUMN subtype TEXT",
         "ALTER TABLE memory_observations ADD COLUMN stability TEXT DEFAULT 'situational'",
+        "ALTER TABLE memory_observations ADD COLUMN source_trust TEXT DEFAULT 'inferred'",
     ]:
         try:
             cur.execute(statement)
@@ -1466,28 +1501,106 @@ def classify_memory_metadata(scope, category, memory_key):
     return subtype, stability
 
 
-def upsert_memory(scope, category, memory_key, value, source_text=None, confidence=0.6, subtype=None, stability=None):
-    inferred_subtype, inferred_stability = classify_memory_metadata(scope, category, memory_key)
-    subtype = subtype or inferred_subtype
-    stability = stability or inferred_stability
+def classify_source_trust(scope, category, source_text=None, source_trust=None):
+    if source_trust in {"trusted", "semi_trusted", "inferred", "untrusted"}:
+        return source_trust
+    source = (source_text or "").lower()
+    category_l = (category or "").lower()
+
+    if "ibkr" in source or "trusted_portfolio" in source:
+        return "trusted"
+    if "nightly_deep_consolidation" in source or "trend_consolidation" in source:
+        return "semi_trusted"
+    if category_l in {"journal", "emotional_state", "state"} and source:
+        return "semi_trusted"
+    if scope == "long_term" and source:
+        return "semi_trusted"
+    return "inferred"
+
+
+def add_memory_provenance_event(scope, category, memory_key, action, source_text=None, source_trust="inferred", confidence=None, stability=None, old_value=None, new_value=None):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO memory_items (scope, category, subtype, memory_key, value, source_text, confidence, stability)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO memory_provenance_events (
+            scope, category, memory_key, action, source_text, source_trust,
+            confidence, stability, old_value, new_value
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            scope,
+            category,
+            memory_key,
+            action,
+            source_text or "",
+            source_trust or "inferred",
+            confidence,
+            stability,
+            old_value,
+            new_value,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def upsert_memory(scope, category, memory_key, value, source_text=None, confidence=0.6, subtype=None, stability=None, source_trust=None):
+    inferred_subtype, inferred_stability = classify_memory_metadata(scope, category, memory_key)
+    subtype = subtype or inferred_subtype
+    stability = stability or inferred_stability
+    source_trust = classify_source_trust(scope, category, source_text=source_text, source_trust=source_trust)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT value, stability, confidence, source_trust
+        FROM memory_items
+        WHERE scope = ? AND category = ? AND memory_key = ?
+        LIMIT 1
+        """,
+        (scope, category, memory_key),
+    )
+    existing = cur.fetchone()
+    cur.execute(
+        """
+        INSERT INTO memory_items (scope, category, subtype, memory_key, value, source_text, source_trust, confidence, stability)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(scope, category, memory_key) DO UPDATE SET
             subtype = excluded.subtype,
             value = excluded.value,
             source_text = excluded.source_text,
+            source_trust = excluded.source_trust,
             confidence = excluded.confidence,
             stability = excluded.stability,
             updated_at = CURRENT_TIMESTAMP
         """,
-        (scope, category, subtype, memory_key, value, source_text, confidence, stability),
+        (scope, category, subtype, memory_key, value, source_text, source_trust, confidence, stability),
     )
     conn.commit()
     conn.close()
+
+    old_value = existing["value"] if existing else None
+    old_stability = existing["stability"] if existing else None
+    old_confidence = existing["confidence"] if existing else None
+    action = "insert" if existing is None else "update"
+    if existing and old_stability != stability:
+        action = "stability_transition"
+    if existing and old_value == value and old_confidence == confidence and old_stability == stability:
+        action = "refresh"
+    add_memory_provenance_event(
+        scope=scope,
+        category=category,
+        memory_key=memory_key,
+        action=action,
+        source_text=source_text,
+        source_trust=source_trust,
+        confidence=confidence,
+        stability=stability,
+        old_value=old_value,
+        new_value=value,
+    )
 
 
 def add_journal_entry(entry_text):
@@ -1501,18 +1614,19 @@ def add_journal_entry(entry_text):
     conn.close()
 
 
-def add_memory_observation(category, memory_key, value, confidence=0.6, subtype=None, stability=None):
+def add_memory_observation(category, memory_key, value, confidence=0.6, subtype=None, stability=None, source_trust=None):
     inferred_subtype, inferred_stability = classify_memory_metadata("working", category, memory_key)
     subtype = subtype or inferred_subtype
     stability = stability or inferred_stability
+    source_trust = classify_source_trust("working", category, source_text=None, source_trust=source_trust)
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO memory_observations (category, subtype, memory_key, value, confidence, stability)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO memory_observations (category, subtype, memory_key, value, source_trust, confidence, stability)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (category, subtype, memory_key, value, confidence, stability),
+        (category, subtype, memory_key, value, source_trust, confidence, stability),
     )
     conn.commit()
     conn.close()
@@ -2380,6 +2494,198 @@ def get_recent_interaction_events(limit=120):
     return rows
 
 
+def get_recent_memory_provenance(limit=80):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT scope, category, memory_key, action, source_text, source_trust, confidence, stability, old_value, new_value, created_at
+        FROM memory_provenance_events
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_memory_stability_timeline(limit=80):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT scope, category, memory_key, action, stability, confidence, created_at
+        FROM memory_provenance_events
+        WHERE action IN ('insert', 'update', 'stability_transition')
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_contradiction_view(limit=30):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT scope, category, memory_key, value, confidence, stability, updated_at
+        FROM memory_items
+        WHERE category = 'behavior_trends'
+          AND memory_key LIKE 'contradiction_%'
+        ORDER BY updated_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    parsed = []
+    for row in rows:
+        try:
+            payload = json.loads(row.get("value") or "{}")
+        except:
+            payload = {}
+        parsed.append({
+            "memory_key": row.get("memory_key"),
+            "usually_true": payload.get("usually_true", ""),
+            "recently_true": payload.get("recently_true", ""),
+            "confidence": row.get("confidence"),
+            "stability": row.get("stability"),
+            "updated_at": row.get("updated_at"),
+        })
+    return parsed
+
+
+def get_thread_map(limit=20):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT scope, category, memory_key, value, confidence, stability, updated_at
+        FROM memory_items
+        WHERE category = 'memory_threads'
+        ORDER BY updated_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    thread_rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+
+    interactions = get_recent_interaction_events(limit=80)
+    interaction_texts = [((item.get("message_text") or "").lower()) for item in interactions]
+    mapped = []
+    for item in thread_rows:
+        value = (item.get("value") or "").lower()
+        keywords = [token for token in re.findall(r"[a-z]{4,}", value)[:4]]
+        mention_count = 0
+        if keywords:
+            for text in interaction_texts:
+                if any(keyword in text for keyword in keywords):
+                    mention_count += 1
+        status = "cooling"
+        if mention_count >= 3:
+            status = "intensifying"
+        elif mention_count >= 1:
+            status = "active"
+        mapped.append({
+            "memory_key": item.get("memory_key"),
+            "value": item.get("value"),
+            "confidence": item.get("confidence"),
+            "stability": item.get("stability"),
+            "status": status,
+            "mention_count_recent": mention_count,
+            "updated_at": item.get("updated_at"),
+        })
+    return mapped
+
+
+def get_recent_decay_audit(limit=80):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT scope, category, memory_key, from_confidence, to_confidence, reason, created_at
+        FROM memory_decay_audit
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_reinforce_decay_audit(limit=12):
+    logs = get_recent_nightly_consolidation_logs(limit=limit)
+    audit = []
+    for row in logs:
+        payload = row.get("payload") or {}
+        audit.append({
+            "local_date": row.get("local_date"),
+            "depth_label": row.get("depth_label"),
+            "reinforce_decisions": payload.get("reinforce_decisions", []),
+            "decay_decisions": payload.get("decay_decisions", []),
+            "uncertainty_flags": payload.get("uncertainty_flags", []),
+            "protected_updates": payload.get("protected_updates", []),
+            "summary_text": row.get("summary_text"),
+            "created_at": row.get("created_at"),
+        })
+    return audit
+
+
+def build_no_filler_validation(days=7):
+    end_date = get_local_now().date()
+    start_date = end_date - timedelta(days=max(1, days) - 1)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT local_date, meaningful_count
+        FROM daily_logs
+        WHERE local_date BETWEEN ? AND ?
+        """,
+        (start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")),
+    )
+    log_rows = {row["local_date"]: int(row["meaningful_count"]) for row in cur.fetchall()}
+
+    cur.execute(
+        """
+        SELECT date(created_at, 'localtime') AS local_date, COUNT(*) AS count
+        FROM memory_observations
+        WHERE date(created_at, 'localtime') BETWEEN ? AND ?
+          AND category IN ('journal', 'emotional_state', 'state', 'frictions', 'behavior_trends')
+        GROUP BY date(created_at, 'localtime')
+        """,
+        (start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")),
+    )
+    personal_rows = {row["local_date"]: int(row["count"]) for row in cur.fetchall()}
+    conn.close()
+
+    timeline = []
+    for offset in range(days):
+        day = start_date + timedelta(days=offset)
+        key = day.strftime("%Y-%m-%d")
+        meaningful_count = log_rows.get(key, 0)
+        personal_count = personal_rows.get(key, 0)
+        no_filler_ok = not (meaningful_count == 0 and personal_count > 0)
+        timeline.append({
+            "local_date": key,
+            "meaningful_count": meaningful_count,
+            "personal_memory_count": personal_count,
+            "no_filler_ok": no_filler_ok,
+        })
+    return timeline
+
+
 def build_memory_semantic_text(item):
     return " | ".join([
         item.get("scope", ""),
@@ -2840,7 +3146,7 @@ def apply_memory_decay():
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT id, category, confidence, julianday('now') - julianday(updated_at) AS age_days
+        SELECT id, category, memory_key, confidence, julianday('now') - julianday(updated_at) AS age_days
         FROM memory_items
         WHERE scope = 'long_term'
         """
@@ -2857,13 +3163,22 @@ def apply_memory_decay():
         decay_step = 0.015 * random_factor
         new_confidence = max(0.25, float(row["confidence"]) - decay_step)
         if new_confidence < float(row["confidence"]):
+            from_conf = float(row["confidence"])
+            to_conf = round(new_confidence, 4)
             cur.execute(
                 """
                 UPDATE memory_items
                 SET confidence = ?, updated_at = updated_at
                 WHERE id = ?
                 """,
-                (round(new_confidence, 4), row["id"]),
+                (to_conf, row["id"]),
+            )
+            cur.execute(
+                """
+                INSERT INTO memory_decay_audit (scope, category, memory_key, from_confidence, to_confidence, reason)
+                VALUES ('long_term', ?, ?, ?, ?, ?)
+                """,
+                (row["category"], row.get("memory_key", ""), from_conf, to_conf, "age_decay"),
             )
 
     conn.commit()
@@ -3637,6 +3952,14 @@ def get_memory_debug_summary():
         """
     )
     recent_event_lineage = [dict(row) for row in cur.fetchall()]
+    cur.execute(
+        """
+        SELECT source_trust, COUNT(*) AS count
+        FROM memory_items
+        GROUP BY source_trust
+        """
+    )
+    memory_source_trust = [dict(row) for row in cur.fetchall()]
     conn.close()
     for row in recent_alert_outcomes:
         try:
@@ -3661,6 +3984,14 @@ def get_memory_debug_summary():
         "recent_interactions": get_recent_interaction_events(limit=30),
         "recent_alert_feedback": get_recent_alert_feedback(limit=12),
         "recent_daily_logs": get_recent_daily_logs(limit=14),
+        "no_filler_validation": build_no_filler_validation(days=7),
+        "memory_source_trust": memory_source_trust,
+        "recent_memory_provenance": get_recent_memory_provenance(limit=60),
+        "stability_timeline": get_memory_stability_timeline(limit=60),
+        "contradiction_view": get_contradiction_view(limit=20),
+        "thread_map": get_thread_map(limit=20),
+        "reinforce_decay_audit": get_reinforce_decay_audit(limit=10),
+        "decay_audit": get_recent_decay_audit(limit=40),
         "recent_alert_outcomes": recent_alert_outcomes,
         "recent_event_lineage": recent_event_lineage,
         "recent_nightly_logs": get_recent_nightly_consolidation_logs(limit=6),
@@ -3841,6 +4172,20 @@ def get_candidate_source_refs(candidate):
     return [get_candidate_source_label(candidate)]
 
 
+def get_source_trust_for_source(source, source_label=""):
+    src = (source or "").upper()
+    label = (source_label or "").lower()
+    if src == "FRED":
+        return "trusted"
+    if src == "NYT":
+        return "semi_trusted"
+    if src == "CURRENTS":
+        if any(domain in label for domain in ["reuters", "apnews", "ft.com", "wsj.com", "bloomberg"]):
+            return "semi_trusted"
+        return "inferred"
+    return "inferred"
+
+
 def build_candidate_body_text(candidate):
     if not candidate:
         return ""
@@ -3871,9 +4216,11 @@ def upsert_event_context(alert_id, event_hash, category, tier, candidate):
     raw_payload = candidate.get("raw_payload", candidate)
     source_label = get_candidate_source_label(candidate)
     source_refs = get_candidate_source_refs(candidate)
+    source_trust = get_source_trust_for_source(candidate.get("source"), source_label=source_label)
     source_evaluation = candidate.get("source_evaluation") or {
         "source": candidate.get("source"),
         "source_refs": source_refs,
+        "source_trust": source_trust,
         "selection_reasons": selection_reasons,
         "score": candidate.get("score"),
         "ai_why": candidate.get("ai_why"),
