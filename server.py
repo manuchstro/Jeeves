@@ -913,6 +913,10 @@ def article_request_context_allowed():
     return recent_intent in {"daily_brief", "event_expand", "alert_delivery"}
 
 
+def in_gratitude_journal_context():
+    return recent_outbound_message_type_within("gratitude", hours=8)
+
+
 def recent_outbound_message_type_within(message_type, hours=6):
     conn = get_conn()
     cur = conn.cursor()
@@ -939,7 +943,7 @@ def should_send_no_reply(text):
 
     lower_text = stripped.lower()
 
-    if recent_outbound_message_type_within("gratitude", hours=8):
+    if in_gratitude_journal_context():
         return True
 
     if len(stripped) > 160 and "?" not in stripped:
@@ -1553,9 +1557,110 @@ def extract_memory_updates(text):
     return updates, gratitude_entry
 
 
+def fallback_journal_analysis(text):
+    return {
+        "summary": text.strip()[:220],
+        "emotional_tone": "reflective",
+        "energy_level": "medium",
+        "outlook": "steady",
+        "stress_level": "normal",
+        "friction_signal": "low",
+        "notable_shift": "",
+        "durable_signal": "",
+        "confidence": 0.35,
+    }
+
+
+def analyze_journal_entry(text):
+    prompt = f"""
+Analyze this private gratitude/journal response for memory only.
+
+Rules:
+- Be emotionally perceptive but not sycophantic.
+- Do not flatter.
+- Do not moralize.
+- Only identify useful human signals.
+- This is for memory and self-understanding, not for replying.
+- Return JSON only.
+
+Text:
+\"\"\"{text}\"\"\"
+
+Return:
+{{
+  "summary": "short neutral summary",
+  "emotional_tone": "positive|mixed|strained|calm|reflective",
+  "energy_level": "low|medium|high",
+  "outlook": "guarded|steady|upbeat",
+  "stress_level": "low|normal|elevated",
+  "friction_signal": "low|present",
+  "notable_shift": "optional short note",
+  "durable_signal": "optional short note",
+  "confidence": 0.0
+}}
+"""
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Return JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+        )
+        payload = json.loads(completion.choices[0].message.content)
+        if not isinstance(payload, dict):
+            return fallback_journal_analysis(text)
+        payload["confidence"] = float(payload.get("confidence") or 0.55)
+        return payload
+    except:
+        return fallback_journal_analysis(text)
+
+
+def store_journal_analysis(text):
+    analysis = analyze_journal_entry(text)
+
+    summary = (analysis.get("summary") or text.strip())[:240]
+    tone = (analysis.get("emotional_tone") or "reflective").strip()
+    energy = (analysis.get("energy_level") or "medium").strip()
+    outlook = (analysis.get("outlook") or "steady").strip()
+    stress = (analysis.get("stress_level") or "normal").strip()
+    friction = (analysis.get("friction_signal") or "low").strip()
+    notable_shift = (analysis.get("notable_shift") or "").strip()
+    durable_signal = (analysis.get("durable_signal") or "").strip()
+    confidence = max(0.4, min(0.95, float(analysis.get("confidence") or 0.55)))
+
+    add_memory_observation("journal", "entry_summary", summary, confidence=confidence)
+    add_memory_observation("journal", "emotional_tone", tone, confidence=confidence)
+    add_memory_observation("journal", "energy_level", energy, confidence=confidence)
+    add_memory_observation("journal", "outlook", outlook, confidence=confidence)
+    add_memory_observation("journal", "stress_level", stress, confidence=confidence)
+
+    upsert_memory("working", "emotional_state", "journal_tone", tone, source_text=text, confidence=confidence)
+    upsert_memory("working", "state", "journal_energy", energy, source_text=text, confidence=confidence)
+    upsert_memory("working", "state", "journal_outlook", outlook, source_text=text, confidence=confidence)
+    upsert_memory("working", "state", "journal_stress", stress, source_text=text, confidence=confidence)
+
+    record_memory_embedding("working", "emotional_state", "journal_tone", f"{summary}. tone: {tone}",)
+    record_memory_embedding("working", "state", "journal_energy", f"{summary}. energy: {energy}",)
+    record_memory_embedding("working", "state", "journal_outlook", f"{summary}. outlook: {outlook}",)
+
+    if friction == "present":
+        upsert_memory("working", "frictions", "journal_friction", summary, source_text=text, confidence=max(0.55, confidence))
+
+    if notable_shift:
+        upsert_memory("long_term", "behavior_trends", "journal_shift", notable_shift, source_text=text, confidence=max(0.55, confidence))
+        record_memory_embedding("long_term", "behavior_trends", "journal_shift", notable_shift)
+
+    if durable_signal:
+        upsert_memory("long_term", "behavior_trends", "journal_durable_signal", durable_signal, source_text=text, confidence=max(0.55, confidence))
+        record_memory_embedding("long_term", "behavior_trends", "journal_durable_signal", durable_signal)
+
+
 def process_memory_updates(text):
     updates, gratitude_entry = extract_memory_updates(text)
     portfolio_symbols = []
+    journal_context = in_gratitude_journal_context()
 
     for update in updates:
         add_memory_observation(
@@ -1581,19 +1686,21 @@ def process_memory_updates(text):
         if update["category"] == "portfolio_profile":
             portfolio_symbols.extend(extract_symbols_from_text(update["value"]))
 
-    if gratitude_entry:
-        add_gratitude_entry(gratitude_entry)
+    journal_entry = gratitude_entry or (text.strip() if journal_context and text.strip() else None)
+
+    if journal_entry:
+        add_gratitude_entry(journal_entry)
         add_memory_observation(
             "gratitude",
             "latest_gratitude",
-            gratitude_entry,
+            journal_entry,
             confidence=0.9,
         )
         upsert_memory(
             "working",
             "gratitude",
             "latest_gratitude",
-            gratitude_entry,
+            journal_entry,
             source_text=text,
             confidence=0.9,
         )
@@ -1601,7 +1708,7 @@ def process_memory_updates(text):
             "long_term",
             "gratitude",
             "gratitude_reflection",
-            gratitude_entry,
+            journal_entry,
             source_text=text,
             confidence=0.8,
         )
@@ -1609,14 +1716,15 @@ def process_memory_updates(text):
             "working",
             "gratitude",
             "latest_gratitude",
-            gratitude_entry,
+            journal_entry,
         )
         record_memory_embedding(
             "long_term",
             "gratitude",
             "gratitude_reflection",
-            gratitude_entry,
+            journal_entry,
         )
+        store_journal_analysis(journal_entry)
 
     if portfolio_symbols:
         upsert_portfolio_symbols(portfolio_symbols, source_text=text)
