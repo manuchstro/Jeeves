@@ -5911,6 +5911,8 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False
                     should_push = True
                 elif tier_value == 2 and ALERT_PUSH_TIER_MAX >= 2 and tier2_pushed_today < tier2_push_cap:
                     should_push = True
+                if should_push and not is_recent_fred_candidate(effective_candidate, max_age_days=5):
+                    should_push = False
 
             alert_result = log_alert(
                 effective_category,
@@ -5980,6 +5982,21 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False
         "source_debug": source_debug,
         "results": results,
     }
+
+
+def is_recent_fred_candidate(candidate, max_age_days=5):
+    if (candidate or {}).get("source") != "FRED":
+        return True
+    published = (candidate or {}).get("published_at") or ""
+    if not published:
+        return False
+    try:
+        day_part = published[:10]
+        published_dt = datetime.strptime(day_part, "%Y-%m-%d")
+        age_days = (get_local_now().date() - published_dt.date()).days
+        return age_days <= max_age_days
+    except:
+        return False
 
 # ---------------- FRED ----------------
 
