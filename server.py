@@ -48,6 +48,8 @@ RAILWAY_GIT_COMMIT_SHA = os.environ.get("RAILWAY_GIT_COMMIT_SHA") or os.environ.
 RAILWAY_DEPLOYMENT_ID = os.environ.get("RAILWAY_DEPLOYMENT_ID")
 LOCAL_TZ = ZoneInfo("America/Los_Angeles")
 ALERT_DECISION_MODEL = os.environ.get("ALERT_DECISION_MODEL", "gpt-4o")
+GMAIL_ACCOUNT_EMAIL = os.environ.get("GMAIL_ACCOUNT_EMAIL", "").strip().lower()
+GMAIL_TOKEN_JSON = os.environ.get("GMAIL_TOKEN_JSON")
 
 # ---------------- DB ----------------
 
@@ -315,6 +317,7 @@ def init_db():
 
     conn.commit()
     conn.close()
+    bootstrap_gmail_account_from_env()
 
 # ---------------- WATCHLIST ----------------
 
@@ -562,6 +565,20 @@ def get_gmail_accounts():
             row["scopes"] = []
         row.pop("scopes_json", None)
     return rows
+
+
+def bootstrap_gmail_account_from_env():
+    if not GMAIL_ACCOUNT_EMAIL or not GMAIL_TOKEN_JSON:
+        return {"ok": False, "reason": "missing_env"}
+
+    try:
+        token_payload = json.loads(GMAIL_TOKEN_JSON)
+    except:
+        return {"ok": False, "reason": "invalid_token_json"}
+
+    scopes = token_payload.get("scopes") or ["https://www.googleapis.com/auth/gmail.readonly"]
+    upsert_gmail_account(GMAIL_ACCOUNT_EMAIL, token_payload, scopes)
+    return {"ok": True, "email": GMAIL_ACCOUNT_EMAIL}
 
 
 def get_latest_trusted_portfolio_snapshot():
