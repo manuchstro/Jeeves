@@ -5138,8 +5138,10 @@ Write a short response with exactly these parts:
 1. What happened
 2. Why it matters
 3. Why I selected it
+4. Certainty score: <0-100> and one short reason
 
-Keep it concise and specific. Use first person ("I"), not third person ("Jeeves"). Do not mention missing data unless necessary.
+Keep it concise and specific. Use first person ("I"), not third person ("Jeeves").
+If a core part cannot be answered from the stored context, explicitly say "I don't know" for that part.
 """
 
     try:
@@ -5161,6 +5163,7 @@ Keep it concise and specific. Use first person ("I"), not third person ("Jeeves"
             lines.append("Sources: " + ", ".join(source_refs[:3]))
         if reasons:
             lines.append("Why selected: " + ", ".join(reasons[:3]))
+        lines.append("Certainty score: 55/100 (fallback mode with partial stored context).")
         if context.get("web_url"):
             lines.append(context["web_url"])
         return "\n".join(lines)
@@ -6024,6 +6027,16 @@ def interpret_event_reference(text):
     return None
 
 
+def interpret_event_references(text):
+    matches = re.findall(r"\b([A-Za-z]\d(?:\.\d+|-\d+)?)\b", text or "", re.IGNORECASE)
+    refs = []
+    for item in matches:
+        ref = (item or "").upper().strip()
+        if ref and ref not in refs:
+            refs.append(ref)
+    return refs
+
+
 def is_full_article_request(text):
     t = text.lower().strip()
     patterns = [
@@ -6335,6 +6348,7 @@ def format_ticker_quote_reply(tickers, snapshots):
 def route(text):
     t = text.lower()
     market_question = interpret_market_data_question(text)
+    expand_references = interpret_event_references(text)
     expand_reference = interpret_event_reference(text)
     email_request = {"intent": "none", "query_hint": "", "days_window": 7}
     watchlist_request = {"intent": "none", "symbols": []}
@@ -6380,6 +6394,9 @@ def route(text):
 
     if is_full_article_request(text):
         return ("full_article_request", None)
+
+    if len(expand_references) >= 2:
+        return ("event_expand_multi", expand_references)
 
     if expand_reference:
         return ("event_expand", expand_reference)
@@ -6515,6 +6532,18 @@ def run_generic_reply(user_text):
         return "Temporary error."
 
 
+def send_multi_expand_messages(reference_codes):
+    sent = 0
+    for ref in reference_codes or []:
+        detail = expand_brief_event(ref)
+        message = f"{ref}\n{detail}"
+        send_result = send_whatsapp_message(message)
+        if send_result.get("ok"):
+            sent += 1
+            log_outbound_message("event_expand", message)
+    return sent
+
+
 def build_reply_for_intent(intent, value, msg, memory_result=None):
     if intent == "alert_feedback":
         if not feedback_context_allowed():
@@ -6592,6 +6621,10 @@ def build_reply_for_intent(intent, value, msg, memory_result=None):
 
     if intent == "event_expand":
         return expand_brief_event(value)
+
+    if intent == "event_expand_multi":
+        sent = send_multi_expand_messages(value or [])
+        return None if sent > 0 else "I don't have enough stored context for those items."
 
     if intent == "fred":
         out = get_fred(value)
