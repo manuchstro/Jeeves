@@ -715,6 +715,39 @@ def get_latest_email_message(query=None):
         return None
 
 
+def get_recent_email_messages(query=None, max_results=12):
+    service, account_email = get_gmail_service()
+    if not service:
+        return None
+    try:
+        response = service.users().messages().list(
+            userId="me",
+            maxResults=max_results,
+            q=query or "",
+        ).execute()
+        messages = response.get("messages") or []
+        results = []
+        for item in messages:
+            message = service.users().messages().get(
+                userId="me",
+                id=item["id"],
+                format="full",
+            ).execute()
+            headers = extract_gmail_headers(message)
+            results.append({
+                "account_email": account_email,
+                "id": item["id"],
+                "subject": headers.get("subject", ""),
+                "from": headers.get("from", ""),
+                "date": headers.get("date", ""),
+                "snippet": message.get("snippet", "") or "",
+                "body_text": extract_gmail_body(message)[:2500],
+            })
+        return results
+    except:
+        return None
+
+
 def interpret_email_request(text):
     prompt = f"""
 Interpret this user message for inbox/email intent.
@@ -729,8 +762,9 @@ Message:
 
 Return:
 {{
-  "inbox_intent": "none|latest_email|latest_ibkr_email|email_summary",
-  "query_hint": "optional Gmail search hint"
+  "inbox_intent": "none|latest_email|latest_ibkr_email|email_summary|important_recent_email",
+  "query_hint": "optional Gmail search hint",
+  "days_window": 7
 }}
 """
     try:
@@ -744,14 +778,15 @@ Return:
         )
         payload = json.loads(completion.choices[0].message.content)
         intent = (payload.get("inbox_intent") or "none").strip().lower()
-        if intent not in {"none", "latest_email", "latest_ibkr_email", "email_summary"}:
+        if intent not in {"none", "latest_email", "latest_ibkr_email", "email_summary", "important_recent_email"}:
             intent = "none"
         return {
             "intent": intent,
             "query_hint": (payload.get("query_hint") or "").strip(),
+            "days_window": int(payload.get("days_window") or 7),
         }
     except:
-        return {"intent": "none", "query_hint": ""}
+        return {"intent": "none", "query_hint": "", "days_window": 7}
 
 
 def format_latest_email_reply(email_data, summary_mode=False):
@@ -792,6 +827,75 @@ Body:
 
     short_body = snippet[:240] + ("..." if len(snippet) > 240 else "")
     return f"Latest email: {subject} from {sender} at {date}. {short_body}"
+
+
+def rank_important_emails(email_messages, user_request):
+    if not email_messages:
+        return None
+    prompt = f"""
+Rank these recent emails by importance for Manu.
+
+Rules:
+- Use sender importance, urgency, actionability, personal relevance, and novelty.
+- Distinguish newsletters from genuinely important emails.
+- Prefer what most matters to Manu, not generic corporate importance.
+- Return JSON only.
+
+User request:
+\"\"\"{user_request}\"\"\"
+
+Emails:
+{json.dumps(email_messages[:12], ensure_ascii=True)}
+
+Return:
+{{
+  "top_ids": ["id1", "id2", "id3"],
+  "summary": "short direct answer",
+  "why": ["short reason 1", "short reason 2"]
+}}
+"""
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Return JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+        )
+        payload = json.loads(completion.choices[0].message.content)
+        if not isinstance(payload, dict):
+            return None
+        return payload
+    except:
+        return None
+
+
+def format_important_recent_email_reply(email_messages, ranked):
+    if not email_messages:
+        return "I don't know. Gmail access may not be available."
+    if not ranked:
+        return "I couldn't rank the inbox reliably."
+
+    by_id = {item["id"]: item for item in email_messages}
+    top = [by_id[email_id] for email_id in ranked.get("top_ids", []) if email_id in by_id][:3]
+    summary = (ranked.get("summary") or "").strip()
+    reasons = ranked.get("why") or []
+
+    lines = []
+    if summary:
+        lines.append(summary)
+    if top:
+        lines.append("Top emails:")
+        for item in top:
+            sender = item.get("from") or "unknown sender"
+            subject = item.get("subject") or "(no subject)"
+            lines.append(f"- {subject} from {sender}")
+    if reasons:
+        lines.append("Why:")
+        for reason in reasons[:3]:
+            lines.append(f"- {reason}")
+    return "\n".join(lines) if lines else "I couldn't find anything clearly important."
 
 
 def bootstrap_gmail_account_from_env():
@@ -4734,6 +4838,13 @@ def sms():
             query = query_hint or "from:interactivebrokers OR from:interactivebrokers.com OR subject:(Activity Statement)"
             email_data = get_latest_email_message(query=query)
             resp.message(format_latest_email_reply(email_data, summary_mode=True))
+            return str(resp)
+        if value.get("intent") == "important_recent_email":
+            days_window = max(1, min(30, int(value.get("days_window") or 7)))
+            query = (query_hint + " " if query_hint else "") + f"newer_than:{days_window}d"
+            email_messages = get_recent_email_messages(query=query, max_results=12)
+            ranked = rank_important_emails(email_messages or [], msg)
+            resp.message(format_important_recent_email_reply(email_messages, ranked))
             return str(resp)
         if value.get("intent") == "email_summary":
             email_data = get_latest_email_message(query=query_hint or "")
