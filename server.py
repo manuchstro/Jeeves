@@ -5648,14 +5648,16 @@ def build_dynamic_news_queries(limit=10):
     return query_items[:limit]
 
 
-def build_poll_candidates():
+def build_poll_candidates(force_currents=False):
     candidates = []
     watchlist = get_watchlist()
     news_queries = build_dynamic_news_queries(limit=10)
+    currents_due = bool(force_currents) or source_poll_due("CURRENTS", CURRENTS_MIN_INTERVAL_MINUTES)
     source_debug = {
         "nyt_queries": len(news_queries),
         "generated_queries": news_queries,
-        "currents_due": source_poll_due("CURRENTS", CURRENTS_MIN_INTERVAL_MINUTES),
+        "currents_due": currents_due,
+        "currents_forced": bool(force_currents),
         "currents_query": None,
         "currents_queries": [],
         "currents_burst_size": CURR_BURST_QUERIES_PER_CYCLE,
@@ -5817,8 +5819,8 @@ def ai_decide_alert_candidates(candidates):
     return decision_map
 
 
-def run_poll_cycle(log_to_alerts=True, send_messages=False):
-    candidates, source_debug = build_poll_candidates()
+def run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False):
+    candidates, source_debug = build_poll_candidates(force_currents=force_currents)
     watchlist = get_watchlist()
     feedback_profile = get_feedback_profile(limit=20)
     results = []
@@ -5864,7 +5866,7 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False):
         }
 
         if log_to_alerts:
-            if shortlist_item and not ai_decision.get("send"):
+            if shortlist_item and ai_decision.get("send") is False:
                 blocked_event_hash = build_event_hash(effective_category, candidate["headline"])
                 log_alert_outcome(
                     stage="ai_gate",
@@ -6951,8 +6953,9 @@ def task_poll():
     denied = require_internal_api_key()
     if denied:
         return denied
+    force_currents = (request.args.get("force_currents") or request.form.get("force_currents") or "").strip() == "1"
     return app.response_class(
-        response=json.dumps(run_poll_cycle(log_to_alerts=True, send_messages=True), indent=2),
+        response=json.dumps(run_poll_cycle(log_to_alerts=True, send_messages=True, force_currents=force_currents), indent=2),
         status=200,
         mimetype="application/json",
     )
