@@ -5249,16 +5249,18 @@ def score_candidate(candidate, watchlist, memory_vector_bundle=None):
         score += 1
         reasons.append(f"memory_vector:{interest_similarity:.2f}")
 
-    for item in watchlist:
-        if item.lower() in combined_text:
-            score += 5
-            reasons.append(f"watchlist:{item}")
+    # Portfolio/watchlist matching should only influence portfolio-classified items.
+    if candidate["category"] == "P":
+        for item in watchlist:
+            if item.lower() in combined_text:
+                score += 5
+                reasons.append(f"watchlist:{item}")
 
-    for item in trusted_portfolio_symbols:
-        if item.lower() in combined_text:
-            score += 6
-            reasons.append(f"portfolio:{item}")
-            has_trusted_portfolio_match = True
+        for item in trusted_portfolio_symbols:
+            if item.lower() in combined_text:
+                score += 6
+                reasons.append(f"portfolio:{item}")
+                has_trusted_portfolio_match = True
 
     if candidate["source"] == "FRED":
         score += 2
