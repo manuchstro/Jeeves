@@ -5354,14 +5354,16 @@ def score_candidate(candidate, watchlist, memory_vector_bundle=None, baseline_co
         score += 1
         reasons.append("source:currents")
 
-    if novelty_score >= 3.2:
+    # Slightly loosen novelty influence so more genuinely new stories can
+    # clear push thresholds without changing the rest of the scoring system.
+    if novelty_score >= 3.0:
+        score += 4
+        reasons.append(f"novelty:{novelty_score:.2f}")
+    elif novelty_score >= 2.1:
         score += 3
         reasons.append(f"novelty:{novelty_score:.2f}")
-    elif novelty_score >= 2.3:
+    elif novelty_score >= 1.3:
         score += 2
-        reasons.append(f"novelty:{novelty_score:.2f}")
-    elif novelty_score >= 1.5:
-        score += 1
         reasons.append(f"novelty:{novelty_score:.2f}")
 
     if candidate["category"] == "G" and unseen_share >= 0.6:
@@ -5473,13 +5475,19 @@ def classify_news_category(query, headline, snippet, section, watchlist=None):
         snippet or "",
         section or "",
     ]).lower()
-    if any(term in text for term in ["bay area", "san francisco", "berkeley", "baja california", "bcs", "earthquake"]):
+    if any(term in text for term in [
+        "bay area", "san francisco", "berkeley", "oakland", "san jose",
+        "sacramento", "california", "local", "city", "county", "state",
+        "wildfire", "transit", "housing", "school", "police", "mayor", "earthquake"
+    ]):
         return "L"
     if any(term in text for term in ["fed", "inflation", "cpi", "rates", "rate cut", "jobs", "employment", "treasury"]):
         return "E"
-    if any(term in text for term in ["uranium", "nuclear", "cameco", "ccj", "kazatomprom", "kazakhstan"]):
-        return "G"
-    if any(term in text for term in ["iran", "russia", "sanction", "war", "shipping", "strait", "conflict"]):
+    if any(term in text for term in [
+        "iran", "russia", "china", "taiwan", "ukraine", "israel", "gaza",
+        "sanction", "war", "shipping", "strait", "conflict", "ceasefire",
+        "nato", "missile", "drone", "military", "embassy", "diplomatic", "geopolitics"
+    ]):
         return "G"
     return "G"
 
@@ -5620,11 +5628,19 @@ def is_fred_observation_recent(observation_date, max_age_days=5):
 
 def infer_category_hint_from_text(text):
     t = (text or "").lower()
-    if any(term in t for term in ["berkeley", "bay area", "san francisco", "california", "earthquake"]):
+    if any(term in t for term in [
+        "berkeley", "bay area", "san francisco", "oakland", "san jose",
+        "sacramento", "california", "local", "city", "county", "state",
+        "wildfire", "transit", "housing", "school", "police", "mayor", "earthquake"
+    ]):
         return "L"
     if any(term in t for term in ["fed", "inflation", "cpi", "rate", "rates", "jobs", "employment", "treasury"]):
         return "E"
-    if any(term in t for term in ["uranium", "nuclear", "energy", "oil", "gas", "iran", "russia", "sanction", "shipping", "strait", "conflict"]):
+    if any(term in t for term in [
+        "iran", "russia", "china", "taiwan", "ukraine", "israel", "gaza",
+        "sanction", "war", "shipping", "strait", "conflict", "ceasefire",
+        "nato", "missile", "drone", "military", "embassy", "diplomatic", "geopolitics"
+    ]):
         return "G"
     return "G"
 
