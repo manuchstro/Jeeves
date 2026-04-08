@@ -5984,6 +5984,37 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False
     }
 
 
+def build_readable_poll_summary(poll_payload, limit=20):
+    source_debug = poll_payload.get("source_debug") or {}
+    results = poll_payload.get("results") or []
+    lines = [
+        "Poll summary:",
+        f"- candidates: {poll_payload.get('candidate_count', 0)}",
+        f"- shortlist: {poll_payload.get('shortlist_count', 0)}",
+        f"- currents_due: {source_debug.get('currents_due')}",
+        f"- currents_forced: {source_debug.get('currents_forced')}",
+        f"- currents_added: {source_debug.get('currents_added')}",
+    ]
+
+    currents_queries = source_debug.get("currents_queries") or []
+    if currents_queries:
+        lines.append("- currents_queries: " + "; ".join(currents_queries[:3]))
+
+    lines.append("Top results:")
+    for item in results[:limit]:
+        headline = (item.get("headline") or "").strip()
+        category = item.get("category")
+        tier = item.get("tier")
+        source = item.get("source")
+        ai_send = item.get("ai_send")
+        alert_result = item.get("alert_result") or {}
+        reason = alert_result.get("reason") or ("sent" if alert_result.get("ok") else "unknown")
+        lines.append(
+            f"- [{category}{tier}] {headline} | source={source} | ai_send={ai_send} | outcome={reason}"
+        )
+    return "\n".join(lines)
+
+
 def is_recent_fred_candidate(candidate, max_age_days=5):
     if (candidate or {}).get("source") != "FRED":
         return True
@@ -6971,8 +7002,16 @@ def task_poll():
     if denied:
         return denied
     force_currents = (request.args.get("force_currents") or request.form.get("force_currents") or "").strip() == "1"
+    readable = (request.args.get("readable") or request.form.get("readable") or "").strip() == "1"
+    payload = run_poll_cycle(log_to_alerts=True, send_messages=True, force_currents=force_currents)
+    if readable:
+        return app.response_class(
+            response=build_readable_poll_summary(payload, limit=25),
+            status=200,
+            mimetype="text/plain",
+        )
     return app.response_class(
-        response=json.dumps(run_poll_cycle(log_to_alerts=True, send_messages=True, force_currents=force_currents), indent=2),
+        response=json.dumps(payload, indent=2),
         status=200,
         mimetype="application/json",
     )
