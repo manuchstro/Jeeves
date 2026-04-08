@@ -6958,6 +6958,86 @@ def home():
     return "Jeeves is running"
 
 
+@app.route("/privacy", methods=["GET"])
+def privacy_policy():
+    # Keep statements aligned with actual runtime behavior in this codebase.
+    html = """
+    <html>
+      <head>
+        <title>Jeeves Privacy Policy</title>
+        <meta charset="utf-8" />
+      </head>
+      <body style="font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; max-width: 900px; margin: 40px auto; line-height: 1.5;">
+        <h1>Jeeves Privacy Policy</h1>
+        <p>Last updated: 2026-04-08</p>
+
+        <h2>Scope</h2>
+        <p>This policy applies to the Jeeves assistant service at this domain.</p>
+
+        <h2>Data Collected</h2>
+        <p>Jeeves stores message and app data in its application database, including conversation messages, alert history, memory items, outbound message logs, and related debugging/audit records used by the service.</p>
+
+        <h2>How Data Is Used</h2>
+        <p>Data is used to run assistant features such as replies, alerts, daily brief generation, watchlist/portfolio behavior, and memory/context functions.</p>
+
+        <h2>Third-Party Services</h2>
+        <p>Jeeves uses third-party APIs to operate features. Based on current code, this includes Twilio (messaging), OpenAI (language/decision processing), and optional connected data providers such as Gmail, FRED, NYT, Currents, Massive, TwelveData, and Open-Meteo when configured.</p>
+
+        <h2>Sharing</h2>
+        <p>Jeeves does not sell personal data. Data necessary to process requests may be sent to the third-party services listed above.</p>
+
+        <h2>Access Controls</h2>
+        <p>Inbound message handling is restricted in code to a single configured sender number. Messages from other numbers are treated as unauthorized.</p>
+
+        <h2>Retention</h2>
+        <p>Data is retained in the application database until removed by the operator. This app does not currently enforce a universal automatic deletion timeline for all stored records.</p>
+
+        <h2>Security</h2>
+        <p>The service verifies Twilio request signatures when enabled by configuration and uses internal key checks on task/debug endpoints when configured. No system can guarantee absolute security.</p>
+      </body>
+    </html>
+    """
+    return app.response_class(response=html, status=200, mimetype="text/html")
+
+
+@app.route("/terms", methods=["GET"])
+def terms_of_service():
+    html = """
+    <html>
+      <head>
+        <title>Jeeves Terms of Service</title>
+        <meta charset="utf-8" />
+      </head>
+      <body style="font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; max-width: 900px; margin: 40px auto; line-height: 1.5;">
+        <h1>Jeeves Terms of Service</h1>
+        <p>Last updated: 2026-04-08</p>
+
+        <h2>Service Description</h2>
+        <p>Jeeves is a personal assistant service that processes incoming messages and can send responses, alerts, and summaries based on configured data sources and schedules.</p>
+
+        <h2>Authorized Use</h2>
+        <p>This deployment is configured for personal use by the owner. Inbound handling is restricted in code to a single configured phone number.</p>
+
+        <h2>No Professional Advice</h2>
+        <p>Outputs are informational only and are not legal, tax, investment, medical, or other professional advice.</p>
+
+        <h2>Availability</h2>
+        <p>Service may be unavailable, delayed, or degraded due to platform outages, upstream API issues, network failures, or configuration errors.</p>
+
+        <h2>No Guarantee</h2>
+        <p>The service is provided "as is" without a guarantee of uninterrupted operation, complete accuracy, or fitness for a particular purpose.</p>
+
+        <h2>External Services</h2>
+        <p>Use of Jeeves depends on third-party providers (for example, Twilio and OpenAI). Their availability and policies may affect service behavior.</p>
+
+        <h2>User Controls</h2>
+        <p>The operator may modify configuration, data sources, thresholds, and schedules at any time.</p>
+      </body>
+    </html>
+    """
+    return app.response_class(response=html, status=200, mimetype="text/html")
+
+
 @app.route("/debug/alerts", methods=["GET"])
 def debug_alerts():
     denied = require_internal_api_key()
