@@ -5514,6 +5514,18 @@ def get_fred_candidate(category, tier, series):
     }
 
 
+def is_fred_observation_recent(observation_date, max_age_days=5):
+    date_text = (observation_date or "")[:10]
+    if not date_text:
+        return False
+    try:
+        observation_dt = datetime.strptime(date_text, "%Y-%m-%d")
+        age_days = (get_local_now().date() - observation_dt.date()).days
+        return age_days <= max_age_days
+    except:
+        return False
+
+
 def infer_category_hint_from_text(text):
     t = (text or "").lower()
     if any(term in t for term in ["berkeley", "bay area", "san francisco", "california", "earthquake"]):
@@ -5667,6 +5679,9 @@ def build_poll_candidates(force_currents=False):
 
     for category, tier, series in POLL_SERIES:
         candidate = get_fred_candidate(category, tier, series)
+        if candidate and candidate.get("source") == "FRED":
+            if not is_fred_observation_recent(candidate.get("published_at"), max_age_days=5):
+                continue
         if candidate:
             candidates.append(candidate)
 
