@@ -1,5 +1,5 @@
 from openai import OpenAI
-from flask import Flask, request
+from flask import Flask, request, has_request_context
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.request_validator import RequestValidator
 import os
@@ -2279,6 +2279,28 @@ def verify_twilio_request():
     validator = RequestValidator(TWILIO_AUTH_TOKEN)
     url = get_twilio_validation_url()
     return validator.validate(url, request.form.to_dict(), signature)
+
+
+def get_public_base_url():
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL.rstrip("/")
+    if has_request_context():
+        proto = request.headers.get("X-Forwarded-Proto", request.scheme)
+        host = request.headers.get("X-Forwarded-Host", request.host)
+        return f"{proto}://{host}".rstrip("/")
+    return ""
+
+
+def build_command_key_reply():
+    base = get_public_base_url()
+    privacy_link = f"{base}/privacy" if base else "/privacy"
+    terms_link = f"{base}/terms" if base else "/terms"
+    return "\n".join([
+        COMMAND_KEY_REPLY,
+        "",
+        f"privacy: {privacy_link}",
+        f"terms: {terms_link}",
+    ])
 
 
 def get_recent_alert_feedback(limit=20):
@@ -6890,7 +6912,7 @@ def build_reply_for_intent(intent, value, msg, memory_result=None):
         return compose_daily_brief(include_debug=False)
 
     if intent == "command_key":
-        return COMMAND_KEY_REPLY
+        return build_command_key_reply()
 
     if intent == "full_article_request":
         if article_request_context_allowed():
