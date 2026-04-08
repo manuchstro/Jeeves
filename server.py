@@ -6025,8 +6025,10 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False
                 tier_value = int(effective_tier or 3)
                 if tier_value == 1 and ALERT_PUSH_TIER_MAX >= 1:
                     should_push = True
-                elif tier_value == 2 and ALERT_PUSH_TIER_MAX >= 2 and tier2_pushed_today < tier2_push_cap:
-                    should_push = True
+                elif tier_value == 2:
+                    # Tier 2 is never pushed as a live alert. It can still be logged
+                    # for downstream use (e.g., daily brief ranking/selection).
+                    should_push = False
                 if should_push and not is_recent_fred_candidate(effective_candidate, max_age_days=5):
                     should_push = False
 
