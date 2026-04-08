@@ -12,6 +12,7 @@ import math
 import base64
 import random
 import time
+from collections import Counter
 from datetime import datetime
 from datetime import timedelta
 from zoneinfo import ZoneInfo
@@ -5224,7 +5225,79 @@ def announce_current_deploy_once():
 
 # ---------------- POLLING ----------------
 
-def score_candidate(candidate, watchlist, memory_vector_bundle=None):
+def tokenize_news_text(text):
+    tokens = re.findall(r"[a-z0-9]{4,}", (text or "").lower())
+    return [tok for tok in tokens if tok not in STORY_STOPWORDS]
+
+
+def build_recent_news_baseline_context(hours=72, limit=250):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT headline, created_at
+        FROM alert_log
+        WHERE datetime(created_at) >= datetime('now', ?)
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (f"-{hours} hours", limit),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    counter = Counter()
+    docs = 0
+    for row in rows:
+        headline = row["headline"] if isinstance(row, sqlite3.Row) else row[0]
+        tokens = set(tokenize_news_text(headline))
+        if not tokens:
+            continue
+        docs += 1
+        for token in tokens:
+            counter[token] += 1
+
+    return {
+        "token_counts": counter,
+        "docs": docs,
+    }
+
+
+def calculate_candidate_novelty(candidate, baseline_context=None):
+    baseline_context = baseline_context or {"token_counts": Counter(), "docs": 0}
+    token_counts = baseline_context.get("token_counts") or Counter()
+    text = " ".join([
+        candidate.get("headline", ""),
+        candidate.get("snippet", ""),
+        candidate.get("section", ""),
+    ])
+    tokens = set(tokenize_news_text(text))
+    if not tokens:
+        return {
+            "novelty_score": 0.0,
+            "unseen_share": 0.0,
+            "avg_rarity": 0.0,
+        }
+
+    unseen = 0
+    rarity_values = []
+    for token in tokens:
+        freq = token_counts.get(token, 0)
+        if freq == 0:
+            unseen += 1
+        rarity_values.append(1.0 / (1.0 + float(freq)))
+
+    unseen_share = unseen / max(1, len(tokens))
+    avg_rarity = sum(rarity_values) / max(1, len(rarity_values))
+    novelty_score = (unseen_share * 3.0) + (avg_rarity * 2.0)
+    return {
+        "novelty_score": round(novelty_score, 3),
+        "unseen_share": round(unseen_share, 3),
+        "avg_rarity": round(avg_rarity, 3),
+    }
+
+
+def score_candidate(candidate, watchlist, memory_vector_bundle=None, baseline_context=None):
     headline = candidate["headline"].lower()
     combined_text = " ".join([
         candidate.get("headline", ""),
@@ -5238,6 +5311,9 @@ def score_candidate(candidate, watchlist, memory_vector_bundle=None):
     has_trusted_portfolio_match = False
     memory_vector_bundle = memory_vector_bundle or build_memory_interest_vector()
     interest_similarity = get_candidate_interest_similarity(candidate, memory_vector_bundle.get("vector"))
+    novelty = calculate_candidate_novelty(candidate, baseline_context=baseline_context)
+    novelty_score = float(novelty.get("novelty_score", 0.0))
+    unseen_share = float(novelty.get("unseen_share", 0.0))
 
     if interest_similarity >= 0.42:
         score += 5
@@ -5277,6 +5353,20 @@ def score_candidate(candidate, watchlist, memory_vector_bundle=None):
     if candidate["source"] == "CURRENTS":
         score += 1
         reasons.append("source:currents")
+
+    if novelty_score >= 3.2:
+        score += 3
+        reasons.append(f"novelty:{novelty_score:.2f}")
+    elif novelty_score >= 2.3:
+        score += 2
+        reasons.append(f"novelty:{novelty_score:.2f}")
+    elif novelty_score >= 1.5:
+        score += 1
+        reasons.append(f"novelty:{novelty_score:.2f}")
+
+    if candidate["category"] == "G" and unseen_share >= 0.6:
+        score += 1
+        reasons.append(f"baseline_shift:{unseen_share:.2f}")
 
     if candidate["category"] == "P" and has_trusted_portfolio_match:
         score += 2
@@ -5716,9 +5806,15 @@ def build_poll_candidates(force_currents=False):
 
 def prepare_alert_shortlist(candidates, watchlist, limit=AI_ALERT_SHORTLIST_MAX):
     memory_vector_bundle = build_memory_interest_vector()
+    baseline_context = build_recent_news_baseline_context(hours=72, limit=250)
     scored = []
     for candidate in candidates:
-        scoring = score_candidate(candidate, watchlist, memory_vector_bundle=memory_vector_bundle)
+        scoring = score_candidate(
+            candidate,
+            watchlist,
+            memory_vector_bundle=memory_vector_bundle,
+            baseline_context=baseline_context,
+        )
         scored.append({
             **candidate,
             "score": scoring["score"],
