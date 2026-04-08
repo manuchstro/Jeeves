@@ -6989,11 +6989,14 @@ def privacy_policy():
         <h2>Access Controls</h2>
         <p>Inbound message handling is restricted in code to a single configured sender number. Messages from other numbers are treated as unauthorized.</p>
 
+        <h2>Data Handling Boundaries</h2>
+        <p>This deployment does not expose a public bulk data export endpoint. Data is stored in the app database and only used by the server logic for assistant operation, with outbound transfers limited to configured providers required to run features.</p>
+
         <h2>Retention</h2>
         <p>Data is retained in the application database until removed by the operator. This app does not currently enforce a universal automatic deletion timeline for all stored records.</p>
 
         <h2>Security</h2>
-        <p>The service verifies Twilio request signatures when enabled by configuration and uses internal key checks on task/debug endpoints when configured. No system can guarantee absolute security.</p>
+        <p>Hardcoded security controls include sender-number allowlisting for inbound messages, Twilio request-signature verification (when enabled), and internal-key protection for task/debug endpoints (when configured).</p>
       </body>
     </html>
     """
