@@ -5783,7 +5783,7 @@ def build_poll_candidates(force_currents=False):
     if source_debug["currents_due"] and news_queries:
         step_bucket = int(datetime.now(LOCAL_TZ).timestamp() // (CURRENTS_MIN_INTERVAL_MINUTES * 60))
         start_index = step_bucket % len(news_queries)
-        burst_size = min(CURR_BURST_QUERIES_PER_CYCLE, len(news_queries))
+        burst_size = len(news_queries) if force_currents else min(CURR_BURST_QUERIES_PER_CYCLE, len(news_queries))
         selected = []
         for offset in range(burst_size):
             selected.append(news_queries[(start_index + offset) % len(news_queries)])
@@ -5923,9 +5923,12 @@ def ai_decide_alert_candidates(candidates):
         candidate_id = item.get("candidate_id")
         if not candidate_id:
             continue
+        raw_category = (item.get("category") or "").upper()[:1] or None
+        if raw_category not in {"P", "E", "G", "L"}:
+            raw_category = None
         decision_map[candidate_id] = {
             "send": bool(item.get("send")),
-            "category": (item.get("category") or "").upper()[:1] or None,
+            "category": raw_category,
             "tier": int(item.get("tier") or 3),
             "why": (item.get("why") or "").strip(),
         }
