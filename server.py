@@ -12,6 +12,7 @@ import math
 import base64
 import random
 import time
+from difflib import SequenceMatcher
 from collections import Counter
 from datetime import datetime
 from datetime import timedelta
@@ -68,6 +69,10 @@ GRATITUDE_HOUR = 22
 GRATITUDE_MINUTE = 15
 OPEN_METEO_LAT = os.environ.get("OPEN_METEO_LAT", "").strip()
 OPEN_METEO_LON = os.environ.get("OPEN_METEO_LON", "").strip()
+MEMORY_CONFIDENCE_MAX = 0.99
+MEMORY_CORRELATION_THRESHOLD = 0.8
+MEMORY_DELETE_THRESHOLD = 0.10
+MEMORY_DELETE_MIN_AGE_DAYS = 120
 
 # ---------------- DB ----------------
 
@@ -294,6 +299,27 @@ def init_db():
         to_confidence REAL NOT NULL,
         reason TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS memory_decay_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        local_date TEXT NOT NULL UNIQUE,
+        ran_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS memory_correlation_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL,
+        category TEXT NOT NULL,
+        memory_key TEXT NOT NULL,
+        related_memory_key TEXT NOT NULL,
+        correlation REAL NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(scope, category, memory_key, related_memory_key)
     )
     """)
 
@@ -1559,6 +1585,132 @@ def classify_source_trust(scope, category, source_text=None, source_trust=None):
     return "inferred"
 
 
+def get_effective_protected_memory_categories():
+    # Expanded protected scope for memory upgrade behavior.
+    return set(PROTECTED_MEMORY_CATEGORIES) | {"journal", "risk_profile"}
+
+
+def normalize_memory_value_for_correlation(value):
+    text = (value or "").strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    return text[:500]
+
+
+def memory_correlation_score(value_a, value_b):
+    a = normalize_memory_value_for_correlation(value_a)
+    b = normalize_memory_value_for_correlation(value_b)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def correlation_bonus(correlation):
+    if correlation < MEMORY_CORRELATION_THRESHOLD:
+        return 0.0
+    span = min(1.0, max(0.0, (correlation - MEMORY_CORRELATION_THRESHOLD) / 0.2))
+    return round(0.02 + (0.03 * span), 4)
+
+
+def apply_memory_correlation_reinforcement(scope, category, memory_key, value):
+    if scope != "long_term":
+        return
+    if category in get_effective_protected_memory_categories():
+        return
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, memory_key, value, confidence
+        FROM memory_items
+        WHERE scope = ? AND category = ? AND memory_key != ?
+        """,
+        (scope, category, memory_key),
+    )
+    peers = [dict(row) for row in cur.fetchall()]
+    if not peers:
+        conn.close()
+        return
+
+    cur.execute(
+        """
+        SELECT id, confidence, value
+        FROM memory_items
+        WHERE scope = ? AND category = ? AND memory_key = ?
+        LIMIT 1
+        """,
+        (scope, category, memory_key),
+    )
+    current = cur.fetchone()
+    if not current:
+        conn.close()
+        return
+
+    current_id = int(current["id"])
+    current_conf = float(current["confidence"] or 0.0)
+    current_value = current["value"] or value
+    current_best_bonus = 0.0
+
+    for peer in peers:
+        corr = memory_correlation_score(current_value, peer.get("value", ""))
+        if corr < MEMORY_CORRELATION_THRESHOLD:
+            continue
+        bonus = correlation_bonus(corr)
+        if bonus <= 0:
+            continue
+
+        peer_conf = float(peer.get("confidence") or 0.0)
+        boosted_peer = min(MEMORY_CONFIDENCE_MAX, peer_conf + bonus)
+        if boosted_peer > peer_conf:
+            cur.execute(
+                """
+                UPDATE memory_items
+                SET confidence = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (round(boosted_peer, 4), int(peer["id"])),
+            )
+        current_best_bonus = max(current_best_bonus, bonus)
+
+        cur.execute(
+            """
+            INSERT INTO memory_correlation_links (scope, category, memory_key, related_memory_key, correlation, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(scope, category, memory_key, related_memory_key) DO UPDATE SET
+                correlation = excluded.correlation,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (scope, category, memory_key, peer["memory_key"], round(corr, 4)),
+        )
+        cur.execute(
+            """
+            INSERT INTO memory_correlation_links (scope, category, memory_key, related_memory_key, correlation, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(scope, category, memory_key, related_memory_key) DO UPDATE SET
+                correlation = excluded.correlation,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (scope, category, peer["memory_key"], memory_key, round(corr, 4)),
+        )
+
+    if current_best_bonus > 0:
+        boosted_current = min(MEMORY_CONFIDENCE_MAX, current_conf + current_best_bonus)
+        if boosted_current > current_conf:
+            cur.execute(
+                """
+                UPDATE memory_items
+                SET confidence = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (round(boosted_current, 4), current_id),
+            )
+
+    conn.commit()
+    conn.close()
+
+
 def add_memory_provenance_event(scope, category, memory_key, action, source_text=None, source_trust="inferred", confidence=None, stability=None, old_value=None, new_value=None):
     conn = get_conn()
     cur = conn.cursor()
@@ -1604,6 +1756,17 @@ def upsert_memory(scope, category, memory_key, value, source_text=None, confiden
         (scope, category, memory_key),
     )
     existing = cur.fetchone()
+    proposed_confidence = max(0.0, min(MEMORY_CONFIDENCE_MAX, float(confidence)))
+    if existing:
+        existing_value = existing["value"] or ""
+        existing_confidence = float(existing["confidence"] or 0.0)
+        corr = memory_correlation_score(existing_value, value)
+        if corr >= MEMORY_CORRELATION_THRESHOLD:
+            proposed_confidence = min(
+                MEMORY_CONFIDENCE_MAX,
+                max(proposed_confidence, existing_confidence) + correlation_bonus(corr),
+            )
+
     cur.execute(
         """
         INSERT INTO memory_items (scope, category, subtype, memory_key, value, source_text, source_trust, confidence, stability)
@@ -1617,7 +1780,7 @@ def upsert_memory(scope, category, memory_key, value, source_text=None, confiden
             stability = excluded.stability,
             updated_at = CURRENT_TIMESTAMP
         """,
-        (scope, category, subtype, memory_key, value, source_text, source_trust, confidence, stability),
+        (scope, category, subtype, memory_key, value, source_text, source_trust, proposed_confidence, stability),
     )
     conn.commit()
     conn.close()
@@ -1628,7 +1791,7 @@ def upsert_memory(scope, category, memory_key, value, source_text=None, confiden
     action = "insert" if existing is None else "update"
     if existing and old_stability != stability:
         action = "stability_transition"
-    if existing and old_value == value and old_confidence == confidence and old_stability == stability:
+    if existing and old_value == value and old_confidence == proposed_confidence and old_stability == stability:
         action = "refresh"
     add_memory_provenance_event(
         scope=scope,
@@ -1637,11 +1800,12 @@ def upsert_memory(scope, category, memory_key, value, source_text=None, confiden
         action=action,
         source_text=source_text,
         source_trust=source_trust,
-        confidence=confidence,
+        confidence=proposed_confidence,
         stability=stability,
         old_value=old_value,
         new_value=value,
     )
+    apply_memory_correlation_reinforcement(scope, category, memory_key, value)
 
 
 def add_journal_entry(entry_text):
@@ -3086,6 +3250,97 @@ def fallback_deep_memory_consolidation(material):
     }
 
 
+def sanitize_deep_memory_payload(payload):
+    if not isinstance(payload, dict):
+        return None
+
+    allowed_deep_categories = {
+        "core_identity",
+        "core_traits",
+        "defining_moments",
+        "major_successes",
+        "major_failures",
+        "deep_preferences",
+        "long_term_frictions",
+    }
+
+    def clean_text_list(items, max_items=8, max_len=260):
+        cleaned = []
+        for item in (items or []):
+            value = re.sub(r"\s+", " ", str(item or "")).strip()
+            if not value:
+                continue
+            cleaned.append(value[:max_len])
+            if len(cleaned) >= max_items:
+                break
+        return cleaned
+
+    def clean_obj_list(items, fields, max_items=8):
+        cleaned = []
+        for item in (items or []):
+            if not isinstance(item, dict):
+                continue
+            obj = {}
+            for field in fields:
+                obj[field] = re.sub(r"\s+", " ", str(item.get(field, "") or "")).strip()
+            if "confidence" in item:
+                try:
+                    obj["confidence"] = float(item.get("confidence") or 0.0)
+                except:
+                    obj["confidence"] = 0.0
+            cleaned.append(obj)
+            if len(cleaned) >= max_items:
+                break
+        return cleaned
+
+    summary = re.sub(r"\s+", " ", str(payload.get("summary") or "")).strip()[:320] or "Nightly consolidation completed."
+    depth_label = (str(payload.get("depth_label") or "light").strip().lower())
+    if depth_label not in {"light", "deep"}:
+        depth_label = "light"
+
+    cleaned = {
+        "summary": summary,
+        "more_true": clean_text_list(payload.get("more_true"), max_items=5),
+        "less_true": clean_text_list(payload.get("less_true"), max_items=5),
+        "emerging": clean_text_list(payload.get("emerging"), max_items=6),
+        "reinforce_decisions": clean_text_list(payload.get("reinforce_decisions"), max_items=6),
+        "decay_decisions": clean_text_list(payload.get("decay_decisions"), max_items=6),
+        "uncertainty_flags": clean_text_list(payload.get("uncertainty_flags"), max_items=6),
+        "relationship_memory": clean_obj_list(payload.get("relationship_memory"), ["memory_key", "value"], max_items=6),
+        "thread_memory": clean_obj_list(payload.get("thread_memory"), ["memory_key", "value"], max_items=8),
+        "deep_self_memory": clean_obj_list(payload.get("deep_self_memory"), ["category", "memory_key", "value"], max_items=8),
+        "contradictions": clean_obj_list(payload.get("contradictions"), ["memory_key", "usually_true", "recently_true"], max_items=6),
+        "protect": clean_text_list(payload.get("protect"), max_items=8),
+        "protected_updates": clean_text_list(payload.get("protected_updates"), max_items=8),
+        "depth_label": depth_label,
+    }
+
+    valid_deep = []
+    for item in cleaned["deep_self_memory"]:
+        category = (item.get("category") or "").strip()
+        if category not in allowed_deep_categories:
+            continue
+        if not item.get("memory_key") or not item.get("value"):
+            continue
+        valid_deep.append(item)
+    cleaned["deep_self_memory"] = valid_deep
+
+    cleaned["relationship_memory"] = [
+        item for item in cleaned["relationship_memory"]
+        if item.get("memory_key") and item.get("value")
+    ]
+    cleaned["thread_memory"] = [
+        item for item in cleaned["thread_memory"]
+        if item.get("memory_key") and item.get("value")
+    ]
+    cleaned["contradictions"] = [
+        item for item in cleaned["contradictions"]
+        if item.get("memory_key") and (item.get("usually_true") or item.get("recently_true"))
+    ]
+
+    return cleaned
+
+
 def run_ai_deep_memory_consolidation(material):
     interactions = material.get("interactions", [])[:40]
     observations = material.get("observations", [])[:50]
@@ -3148,14 +3403,16 @@ Return:
             response_format={"type": "json_object"},
         )
         payload = json.loads(completion.choices[0].message.content)
-        if not isinstance(payload, dict):
+        sanitized = sanitize_deep_memory_payload(payload)
+        if not sanitized:
             return fallback_deep_memory_consolidation(material)
-        return payload
+        return sanitized
     except:
         return fallback_deep_memory_consolidation(material)
 
 
 def store_deep_memory_consolidation(payload):
+    payload = sanitize_deep_memory_payload(payload) or sanitize_deep_memory_payload(fallback_deep_memory_consolidation({}))
     summary = (payload.get("summary") or "Nightly consolidation completed.").strip()
     depth_label = (payload.get("depth_label") or "light").strip().lower()
 
@@ -3240,12 +3497,43 @@ def store_deep_memory_consolidation(payload):
 
 
 def is_protected_memory_item(item):
-    return item.get("category") in PROTECTED_MEMORY_CATEGORIES
+    return item.get("category") in get_effective_protected_memory_categories()
 
 
 def apply_memory_decay():
     conn = get_conn()
     cur = conn.cursor()
+    local_date = get_local_date_string()
+    cur.execute(
+        """
+        INSERT INTO memory_decay_runs (local_date)
+        VALUES (?)
+        ON CONFLICT(local_date) DO NOTHING
+        """,
+        (local_date,),
+    )
+    if cur.rowcount == 0:
+        conn.commit()
+        conn.close()
+        return
+
+    protected = get_effective_protected_memory_categories()
+    cur.execute(
+        """
+        SELECT memory_key, MAX(correlation) AS corr
+        FROM memory_correlation_links
+        WHERE scope = 'long_term'
+          AND datetime(updated_at) >= datetime('now', '-45 days')
+        GROUP BY memory_key
+        """
+    )
+    correlation_map = {}
+    for row in cur.fetchall():
+        try:
+            correlation_map[row["memory_key"]] = float(row["corr"] or 0.0)
+        except:
+            correlation_map[row["memory_key"]] = 0.0
+
     cur.execute(
         """
         SELECT id, category, memory_key, confidence, julianday('now') - julianday(updated_at) AS age_days
@@ -3256,16 +3544,59 @@ def apply_memory_decay():
     rows = [dict(row) for row in cur.fetchall()]
 
     for row in rows:
-        if row["category"] in PROTECTED_MEMORY_CATEGORIES:
+        if row["category"] in protected:
             continue
         age_days = row["age_days"] or 0
         if age_days < 7:
             continue
+        current_conf = float(row["confidence"] or 0.0)
+        if current_conf <= MEMORY_DELETE_THRESHOLD and age_days >= MEMORY_DELETE_MIN_AGE_DAYS:
+            cur.execute(
+                """
+                DELETE FROM memory_items
+                WHERE id = ?
+                """,
+                (row["id"],),
+            )
+            cur.execute(
+                """
+                INSERT INTO memory_decay_audit (scope, category, memory_key, from_confidence, to_confidence, reason)
+                VALUES ('long_term', ?, ?, ?, ?, ?)
+                """,
+                (row["category"], row.get("memory_key", ""), current_conf, 0.0, "low_confidence_delete"),
+            )
+            cur.execute(
+                """
+                INSERT INTO memory_provenance_events (
+                    scope, category, memory_key, action, source_text, source_trust,
+                    confidence, stability, old_value, new_value
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "long_term",
+                    row["category"],
+                    row.get("memory_key", ""),
+                    "delete_low_confidence",
+                    "memory_decay",
+                    "inferred",
+                    0.0,
+                    "decayed_out",
+                    None,
+                    None,
+                ),
+            )
+            continue
+
         random_factor = 1 + random.uniform(-0.01, 0.01)
         decay_step = 0.015 * random_factor
-        new_confidence = max(0.25, float(row["confidence"]) - decay_step)
-        if new_confidence < float(row["confidence"]):
-            from_conf = float(row["confidence"])
+        corr = float(correlation_map.get(row.get("memory_key", ""), 0.0))
+        if corr >= MEMORY_CORRELATION_THRESHOLD:
+            slowdown_multiplier = max(0.5, 1 - (0.05 * ((corr - MEMORY_CORRELATION_THRESHOLD) / 0.1)))
+            decay_step *= slowdown_multiplier
+        new_confidence = max(0.0, current_conf - decay_step)
+        if new_confidence < current_conf:
+            from_conf = current_conf
             to_conf = round(new_confidence, 4)
             cur.execute(
                 """
@@ -4021,12 +4352,8 @@ def run_nightly_memory_consolidation():
             )
 
     material = build_recent_memory_material(interaction_limit=60, observation_limit=80, gratitude_limit=10)
-    if should_run_deep_memory_consolidation(material):
-        payload = run_ai_deep_memory_consolidation(material)
-        store_deep_memory_consolidation(payload)
-    else:
-        payload = fallback_deep_memory_consolidation(material)
-        store_deep_memory_consolidation(payload)
+    payload = run_ai_deep_memory_consolidation(material)
+    store_deep_memory_consolidation(payload)
 
     apply_memory_decay()
 
@@ -5768,7 +6095,7 @@ def build_dynamic_news_queries(limit=10):
         if not value:
             continue
         category = item.get("category") or ""
-        if category in {"behavior_trends", "priorities", "portfolio_profile", "deep_preferences", "preferences", "goals"}:
+        if category in {"behavior_trends", "priorities", "deep_preferences", "preferences", "goals"}:
             add_query(value, infer_category_hint_from_text(value))
 
     for event in get_recent_interaction_events(limit=20):
