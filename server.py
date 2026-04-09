@@ -81,11 +81,17 @@ KNOWN_ETF_SYMBOLS = {
     "XLI", "XLP", "XLU", "XLV", "XLB", "XLC", "SMH", "SOXX", "ARKK",
     "KWEB", "EEM", "GLD", "SLV", "USO", "URA", "URNM", "NLR",
 }
-QUERY_CATEGORY_BUDGET = {
+QUERY_CATEGORY_BUDGET_WITH_LOCAL = {
     "E": 2,
     "L": 2,
     "G": 3,
     "P": 3,
+}
+QUERY_CATEGORY_BUDGET_NO_LOCAL = {
+    "E": 2,
+    "L": 0,
+    "G": 3,
+    "P": 5,
 }
 QUERY_NEAR_DUPLICATE_JACCARD = 0.7
 LOW_QUALITY_CURRENTS_DOMAINS = {
@@ -6611,7 +6617,7 @@ def is_news_query_signal(query_text, watchlist=None, trusted_portfolio=None):
     return False
 
 
-def build_dynamic_news_queries(limit=10):
+def build_dynamic_news_queries(limit=10, include_local=False):
     query_items = []
     seen = set()
     watchlist = get_watchlist()
@@ -6634,11 +6640,14 @@ def build_dynamic_news_queries(limit=10):
             return
         if not is_news_query_signal(query, watchlist=watchlist, trusted_portfolio=trusted_portfolio):
             return
+        resolved_hint = (category_hint or infer_category_hint_from_text(query))
+        if not include_local and resolved_hint == "L":
+            return
         if query in seen:
             query_debug["exact_deduped"] += 1
             return
         seen.add(query)
-        query_items.append((query, category_hint or infer_category_hint_from_text(query)))
+        query_items.append((query, resolved_hint))
 
     for query, category_hint in BASELINE_NEWS_QUERIES:
         add_query(query, category_hint)
@@ -6671,11 +6680,15 @@ def build_dynamic_news_queries(limit=10):
 
     selected = []
     category_counts = Counter()
+    budget_map = QUERY_CATEGORY_BUDGET_WITH_LOCAL if include_local else QUERY_CATEGORY_BUDGET_NO_LOCAL
     for query, category_hint in query_items:
         category = ((category_hint or "G").upper()[:1]) or "G"
         if category not in {"P", "E", "G", "L"}:
             category = infer_category_hint_from_text(query)
-        budget = QUERY_CATEGORY_BUDGET.get(category, limit)
+        if not include_local and category == "L":
+            query_debug["category_limited"] += 1
+            continue
+        budget = budget_map.get(category, limit)
         if category_counts[category] >= budget:
             query_debug["category_limited"] += 1
             continue
@@ -6693,13 +6706,14 @@ def build_dynamic_news_queries(limit=10):
 
     query_debug["category_counts"] = dict(category_counts)
     query_debug["p_query_count"] = int(category_counts.get("P", 0))
+    query_debug["include_local"] = bool(include_local)
     return selected, query_debug
 
 
-def build_poll_candidates(force_currents=False):
+def build_poll_candidates(force_currents=False, include_local=False):
     candidates = []
     watchlist = get_watchlist()
-    news_queries, query_debug = build_dynamic_news_queries(limit=10)
+    news_queries, query_debug = build_dynamic_news_queries(limit=10, include_local=include_local)
     currents_due = bool(force_currents) or source_poll_due("CURRENTS", CURRENTS_MIN_INTERVAL_MINUTES)
     source_debug = {
         "nyt_queries": len(news_queries),
@@ -6708,6 +6722,7 @@ def build_poll_candidates(force_currents=False):
         "p_queries_expected": True,
         "p_queries_present": bool(query_debug.get("p_query_count")),
         "p_queries_reason": query_debug.get("p_query_reason"),
+        "include_local_queries": bool(include_local),
         "currents_due": currents_due,
         "currents_forced": bool(force_currents),
         "currents_query": None,
@@ -6917,8 +6932,8 @@ def ai_decide_alert_candidates(candidates):
     return decision_map
 
 
-def run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False):
-    candidates, source_debug = build_poll_candidates(force_currents=force_currents)
+def run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False, include_local=False):
+    candidates, source_debug = build_poll_candidates(force_currents=force_currents, include_local=include_local)
     watchlist = get_watchlist()
     feedback_profile = get_feedback_profile(limit=20)
     results = []
@@ -8327,6 +8342,9 @@ def task_daily_brief():
             status=200,
             mimetype="application/json",
         )
+    # Daily brief path gets one local-inclusive poll pass before composing.
+    # This keeps local context available in the brief while excluding it from live polls.
+    run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False, include_local=True)
     brief = compose_daily_brief(include_debug=False)
     result = send_whatsapp_message(brief)
     if result.get("ok"):
@@ -8394,6 +8412,7 @@ def task_scheduled_check():
     if scheduled_task_due("daily_brief", DAILY_BRIEF_HOUR, DAILY_BRIEF_MINUTE, now_local=now_local):
         results["daily_brief"]["due"] = True
         if mark_scheduled_task_run("daily_brief", local_date=local_date):
+            run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False, include_local=True)
             brief = compose_daily_brief(include_debug=False)
             send_result = send_whatsapp_message(brief)
             results["daily_brief"]["send_result"] = send_result
