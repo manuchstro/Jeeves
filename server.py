@@ -2753,7 +2753,7 @@ def get_memory_items(scope, limit=20):
             julianday('now') - julianday(updated_at) AS recency_days
         FROM memory_items
         WHERE scope = ?
-        ORDER BY updated_at DESC
+        ORDER BY e.updated_at DESC
         LIMIT ?
         """,
         (scope, limit),
