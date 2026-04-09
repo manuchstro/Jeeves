@@ -4484,6 +4484,10 @@ def build_memory_debug_compact(summary):
     recent_decay = summary.get("decay_audit") or []
     nightly_logs = summary.get("recent_nightly_logs") or []
 
+    journal_groups = build_grouped_journal_rows(recent_journal)
+    provenance_rollup = build_provenance_rollup(recent_prov)
+    diagnostics = detect_memory_debug_issues(summary, journal_groups, provenance_rollup)
+
     return {
         "counts": {
             "working_memory": len(working),
@@ -4496,7 +4500,9 @@ def build_memory_debug_compact(summary):
         "top_working_memory": [slim_memory_item(item) for item in working[:8]],
         "top_long_term_memory": [slim_memory_item(item) for item in long_term[:8]],
         "recent_journal": recent_journal[:8],
+        "recent_journal_grouped": journal_groups[:10],
         "recent_provenance": [slim_provenance(item) for item in recent_prov[:16]],
+        "recent_provenance_rollup": provenance_rollup[:12],
         "recent_decay_audit": recent_decay[:16],
         "recent_nightly_logs": [
             {
@@ -4512,7 +4518,116 @@ def build_memory_debug_compact(summary):
             "trusted_portfolio_snapshot": summary.get("trusted_portfolio_snapshot"),
         },
         "tone_vector": summary.get("tone_vector"),
+        "diagnostics": diagnostics,
     }
+
+
+def normalize_debug_text(value):
+    text = re.sub(r"\s+", " ", (value or "").strip().lower())
+    text = re.sub(r"[^a-z0-9 ?!.,'-]", "", text)
+    return text
+
+
+def build_grouped_journal_rows(rows):
+    grouped = {}
+    for row in rows or []:
+        text = (row.get("entry_text") or "").strip()
+        created_at = row.get("created_at") or ""
+        normalized = normalize_debug_text(text)
+        if not normalized:
+            continue
+        key = normalized
+        item = grouped.get(key)
+        if not item:
+            grouped[key] = {
+                "entry_text": text,
+                "count": 1,
+                "latest_at": created_at,
+                "oldest_at": created_at,
+                "is_question": "?" in text,
+            }
+        else:
+            item["count"] += 1
+            if created_at > (item.get("latest_at") or ""):
+                item["latest_at"] = created_at
+            if (not item.get("oldest_at")) or created_at < item["oldest_at"]:
+                item["oldest_at"] = created_at
+    out = list(grouped.values())
+    out.sort(key=lambda item: (-int(item.get("count") or 0), item.get("latest_at") or ""), reverse=False)
+    out.sort(key=lambda item: int(item.get("count") or 0), reverse=True)
+    return out
+
+
+def build_provenance_rollup(rows):
+    grouped = {}
+    for row in rows or []:
+        key = (
+            row.get("scope") or "",
+            row.get("category") or "",
+            row.get("memory_key") or "",
+            row.get("action") or "",
+        )
+        item = grouped.get(key)
+        created_at = row.get("created_at") or ""
+        if not item:
+            grouped[key] = {
+                "scope": key[0],
+                "category": key[1],
+                "memory_key": key[2],
+                "action": key[3],
+                "count": 1,
+                "latest_at": created_at,
+            }
+        else:
+            item["count"] += 1
+            if created_at > (item.get("latest_at") or ""):
+                item["latest_at"] = created_at
+    out = list(grouped.values())
+    out.sort(key=lambda item: (int(item.get("count") or 0), item.get("latest_at") or ""), reverse=True)
+    return out
+
+
+def detect_memory_debug_issues(summary, journal_groups=None, provenance_rollup=None):
+    issues = []
+    journal_groups = journal_groups or build_grouped_journal_rows(summary.get("recent_journal") or [])
+    provenance_rollup = provenance_rollup or build_provenance_rollup(summary.get("recent_memory_provenance") or [])
+
+    duplicated_journal = [item for item in journal_groups if int(item.get("count") or 0) >= 2]
+    if duplicated_journal:
+        issues.append({
+            "type": "duplicate_journal_entries",
+            "severity": "info",
+            "detail": f"{len(duplicated_journal)} repeated journal text groups detected.",
+        })
+
+    gratitude_rows = []
+    for item in (summary.get("working_memory") or []) + (summary.get("long_term_memory") or []):
+        if (item.get("category") or "") == "gratitude":
+            gratitude_rows.append(item)
+    likely_miscategorized = []
+    for row in gratitude_rows:
+        value = (row.get("value") or "").strip().lower()
+        if "?" in value or value in {"hello", "hello?"} or value.startswith(("what ", "show ", "tell ", "check ")):
+            likely_miscategorized.append(row)
+    if likely_miscategorized:
+        issues.append({
+            "type": "likely_gratitude_miscategorization",
+            "severity": "warning",
+            "detail": f"{len(likely_miscategorized)} gratitude memory rows look like commands/questions.",
+        })
+
+    repetitive_refresh = [
+        item for item in provenance_rollup
+        if item.get("action") == "refresh" and int(item.get("count") or 0) >= 3
+    ]
+    if repetitive_refresh:
+        issues.append({
+            "type": "high_refresh_repetition",
+            "severity": "info",
+            "detail": f"{len(repetitive_refresh)} memory keys show repeated refreshes in recent provenance.",
+        })
+
+    return issues
 
 # ---------------- ALERTS ----------------
 
@@ -7518,11 +7633,41 @@ def debug_memory_view():
     count_block = compact.get("counts") or {}
     top_working = compact.get("top_working_memory") or []
     top_long_term = compact.get("top_long_term_memory") or []
-    recent_journal = compact.get("recent_journal") or []
-    recent_prov = compact.get("recent_provenance") or []
+    journal_grouped = compact.get("recent_journal_grouped") or []
+    prov_rollup = compact.get("recent_provenance_rollup") or []
+    diagnostics = compact.get("diagnostics") or []
     base = get_public_base_url()
     raw_link = append_internal_key(f"{base}/debug/memory" if base else "/debug/memory")
     compact_link = append_internal_key(f"{base}/debug/memory?compact=1" if base else "/debug/memory?compact=1")
+    diagnostics_html = "".join([
+        f"<li><strong>{html.escape(str(item.get('type')))}</strong> ({html.escape(str(item.get('severity')))}): {html.escape(str(item.get('detail')))}</li>"
+        for item in diagnostics
+    ]) or "<li>No obvious structural issues detected in this snapshot.</li>"
+    journal_html = "".join([
+        (
+            f"<li><span class='badge'>x{int(item.get('count') or 0)}</span> "
+            f"<span class='muted'>{html.escape(str(item.get('latest_at')))}</span> - "
+            f"{html.escape(str(item.get('entry_text'))[:240])}</li>"
+        )
+        for item in journal_grouped
+    ]) or "<li>No journal rows.</li>"
+    prov_html = "".join([
+        (
+            f"<li><span class='badge'>x{int(item.get('count') or 0)}</span> "
+            f"<code>{html.escape(str(item.get('scope')))}::{html.escape(str(item.get('category')))}::{html.escape(str(item.get('memory_key')))}</code> "
+            f"action={html.escape(str(item.get('action')))} "
+            f"<span class='muted'>{html.escape(str(item.get('latest_at')))}</span></li>"
+        )
+        for item in prov_rollup
+    ]) or "<li>No provenance rows.</li>"
+    top_working_html = "".join([
+        f"<li><code>{html.escape(str(item.get('category')))}::{html.escape(str(item.get('memory_key')))}</code> conf={html.escape(str(item.get('confidence')))} updated={html.escape(str(item.get('updated_at')))}</li>"
+        for item in top_working
+    ]) or "<li>No rows.</li>"
+    top_long_term_html = "".join([
+        f"<li><code>{html.escape(str(item.get('category')))}::{html.escape(str(item.get('memory_key')))}</code> conf={html.escape(str(item.get('confidence')))} updated={html.escape(str(item.get('updated_at')))}</li>"
+        for item in top_long_term
+    ]) or "<li>No rows.</li>"
     html_page = f"""
     <html>
       <head>
@@ -7530,12 +7675,13 @@ def debug_memory_view():
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>Jeeves Memory Debug View</title>
         <style>
-          body {{ font-family: Arial, sans-serif; margin: 16px; line-height: 1.4; color: #1f2937; }}
+          body {{ font-family: Arial, sans-serif; margin: 16px; line-height: 1.45; color: #1f2937; background: #f9fafb; }}
           h1, h2 {{ margin: 0 0 8px 0; }}
           .muted {{ color: #6b7280; font-size: 14px; }}
           .card {{ border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px; margin: 12px 0; background: #ffffff; }}
           .row {{ display: flex; gap: 12px; flex-wrap: wrap; }}
           .pill {{ background: #f3f4f6; border-radius: 999px; padding: 6px 10px; font-size: 13px; }}
+          .badge {{ background: #e5e7eb; border-radius: 999px; padding: 2px 8px; font-size: 12px; margin-right: 6px; }}
           ul {{ margin: 8px 0 0 18px; }}
           a {{ color: #2563eb; text-decoration: none; }}
           a:hover {{ text-decoration: underline; }}
@@ -7547,6 +7693,12 @@ def debug_memory_view():
         <div class="muted">Presentation-only summary. Raw data is unchanged.</div>
         <div class="card">
           <div><a href="{html.escape(raw_link)}">Raw JSON</a> | <a href="{html.escape(compact_link)}">Compact JSON</a></div>
+        </div>
+        <div class="card">
+          <h2>Potential Issues</h2>
+          <ul>
+            {diagnostics_html}
+          </ul>
         </div>
         <div class="card">
           <h2>Counts</h2>
@@ -7562,25 +7714,25 @@ def debug_memory_view():
         <div class="card">
           <h2>Top Working Memory</h2>
           <ul>
-            {"".join([f"<li><code>{html.escape(str(item.get('category')))}::{html.escape(str(item.get('memory_key')))}</code> conf={html.escape(str(item.get('confidence')))} updated={html.escape(str(item.get('updated_at')))}</li>" for item in top_working])}
+            {top_working_html}
           </ul>
         </div>
         <div class="card">
           <h2>Top Long-Term Memory</h2>
           <ul>
-            {"".join([f"<li><code>{html.escape(str(item.get('category')))}::{html.escape(str(item.get('memory_key')))}</code> conf={html.escape(str(item.get('confidence')))} updated={html.escape(str(item.get('updated_at')))}</li>" for item in top_long_term])}
+            {top_long_term_html}
           </ul>
         </div>
         <div class="card">
-          <h2>Recent Journal</h2>
+          <h2>Recent Journal (Grouped)</h2>
           <ul>
-            {"".join([f"<li>{html.escape(str(item.get('created_at')))} - {html.escape(str(item.get('entry_text'))[:180])}</li>" for item in recent_journal])}
+            {journal_html}
           </ul>
         </div>
         <div class="card">
-          <h2>Recent Provenance</h2>
+          <h2>Recent Provenance (Rollup)</h2>
           <ul>
-            {"".join([f"<li>{html.escape(str(item.get('created_at')))} - <code>{html.escape(str(item.get('scope')))}::{html.escape(str(item.get('category')))}::{html.escape(str(item.get('memory_key')))}</code> action={html.escape(str(item.get('action')))}</li>" for item in recent_prov])}
+            {prov_html}
           </ul>
         </div>
       </body>
