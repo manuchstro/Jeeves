@@ -3,6 +3,7 @@ from flask import Flask, request, has_request_context
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.request_validator import RequestValidator
 import os
+import html
 import sqlite3
 import requests
 import json
@@ -2502,15 +2503,28 @@ def get_public_base_url():
     return ""
 
 
+def append_internal_key(url):
+    if not INTERNAL_API_KEY:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}key={quote_plus(INTERNAL_API_KEY)}"
+
+
 def build_command_key_reply():
     base = get_public_base_url()
     privacy_link = f"{base}/privacy" if base else "/privacy"
     terms_link = f"{base}/terms" if base else "/terms"
+    memory_raw = append_internal_key(f"{base}/debug/memory" if base else "/debug/memory")
+    memory_compact = append_internal_key(f"{base}/debug/memory?compact=1" if base else "/debug/memory?compact=1")
+    memory_view = append_internal_key(f"{base}/debug/memory/view" if base else "/debug/memory/view")
     return "\n".join([
         COMMAND_KEY_REPLY,
         "",
         f"privacy: {privacy_link}",
         f"terms: {terms_link}",
+        f"memory debug raw: {memory_raw}",
+        f"memory debug compact: {memory_compact}",
+        f"memory debug view: {memory_view}",
     ])
 
 
@@ -4442,6 +4456,62 @@ def get_memory_debug_summary():
         "context_snapshot": context_snapshot,
         "tone_vector": tone_vector,
         "semantic_memory_count": len(get_memory_embedding_rows(limit=500)),
+    }
+
+
+def build_memory_debug_compact(summary):
+    def slim_memory_item(item):
+        return {
+            "category": item.get("category"),
+            "memory_key": item.get("memory_key"),
+            "confidence": item.get("confidence"),
+            "updated_at": item.get("updated_at"),
+        }
+
+    def slim_provenance(item):
+        return {
+            "scope": item.get("scope"),
+            "category": item.get("category"),
+            "memory_key": item.get("memory_key"),
+            "action": item.get("action"),
+            "created_at": item.get("created_at"),
+        }
+
+    working = summary.get("working_memory") or []
+    long_term = summary.get("long_term_memory") or []
+    recent_journal = summary.get("recent_journal") or []
+    recent_prov = summary.get("recent_memory_provenance") or []
+    recent_decay = summary.get("decay_audit") or []
+    nightly_logs = summary.get("recent_nightly_logs") or []
+
+    return {
+        "counts": {
+            "working_memory": len(working),
+            "long_term_memory": len(long_term),
+            "recent_journal": len(recent_journal),
+            "recent_provenance": len(recent_prov),
+            "decay_audit": len(recent_decay),
+            "semantic_memory_count": summary.get("semantic_memory_count"),
+        },
+        "top_working_memory": [slim_memory_item(item) for item in working[:8]],
+        "top_long_term_memory": [slim_memory_item(item) for item in long_term[:8]],
+        "recent_journal": recent_journal[:8],
+        "recent_provenance": [slim_provenance(item) for item in recent_prov[:16]],
+        "recent_decay_audit": recent_decay[:16],
+        "recent_nightly_logs": [
+            {
+                "local_date": item.get("local_date"),
+                "depth_label": item.get("depth_label"),
+                "created_at": item.get("created_at"),
+                "summary_text": item.get("summary_text"),
+            }
+            for item in nightly_logs[:6]
+        ],
+        "portfolio": {
+            "portfolio_holdings": summary.get("portfolio_holdings"),
+            "trusted_portfolio_snapshot": summary.get("trusted_portfolio_snapshot"),
+        },
+        "tone_vector": summary.get("tone_vector"),
     }
 
 # ---------------- ALERTS ----------------
@@ -7428,11 +7498,95 @@ def debug_memory():
     denied = require_internal_api_key()
     if denied:
         return denied
+    compact = (request.args.get("compact") or "").strip() == "1"
+    summary = get_memory_debug_summary()
+    payload = build_memory_debug_compact(summary) if compact else summary
     return app.response_class(
-        response=json.dumps(get_memory_debug_summary(), indent=2),
+        response=json.dumps(payload, indent=2),
         status=200,
         mimetype="application/json",
     )
+
+
+@app.route("/debug/memory/view", methods=["GET"])
+def debug_memory_view():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
+    summary = get_memory_debug_summary()
+    compact = build_memory_debug_compact(summary)
+    count_block = compact.get("counts") or {}
+    top_working = compact.get("top_working_memory") or []
+    top_long_term = compact.get("top_long_term_memory") or []
+    recent_journal = compact.get("recent_journal") or []
+    recent_prov = compact.get("recent_provenance") or []
+    base = get_public_base_url()
+    raw_link = append_internal_key(f"{base}/debug/memory" if base else "/debug/memory")
+    compact_link = append_internal_key(f"{base}/debug/memory?compact=1" if base else "/debug/memory?compact=1")
+    html_page = f"""
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Jeeves Memory Debug View</title>
+        <style>
+          body {{ font-family: Arial, sans-serif; margin: 16px; line-height: 1.4; color: #1f2937; }}
+          h1, h2 {{ margin: 0 0 8px 0; }}
+          .muted {{ color: #6b7280; font-size: 14px; }}
+          .card {{ border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px; margin: 12px 0; background: #ffffff; }}
+          .row {{ display: flex; gap: 12px; flex-wrap: wrap; }}
+          .pill {{ background: #f3f4f6; border-radius: 999px; padding: 6px 10px; font-size: 13px; }}
+          ul {{ margin: 8px 0 0 18px; }}
+          a {{ color: #2563eb; text-decoration: none; }}
+          a:hover {{ text-decoration: underline; }}
+          code {{ background: #f3f4f6; padding: 2px 4px; border-radius: 4px; }}
+        </style>
+      </head>
+      <body>
+        <h1>Jeeves Memory Debug View</h1>
+        <div class="muted">Presentation-only summary. Raw data is unchanged.</div>
+        <div class="card">
+          <div><a href="{html.escape(raw_link)}">Raw JSON</a> | <a href="{html.escape(compact_link)}">Compact JSON</a></div>
+        </div>
+        <div class="card">
+          <h2>Counts</h2>
+          <div class="row">
+            <span class="pill">working: {count_block.get("working_memory", 0)}</span>
+            <span class="pill">long-term: {count_block.get("long_term_memory", 0)}</span>
+            <span class="pill">journal rows: {count_block.get("recent_journal", 0)}</span>
+            <span class="pill">provenance rows: {count_block.get("recent_provenance", 0)}</span>
+            <span class="pill">decay rows: {count_block.get("decay_audit", 0)}</span>
+            <span class="pill">semantic embeddings: {count_block.get("semantic_memory_count", 0)}</span>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Top Working Memory</h2>
+          <ul>
+            {"".join([f"<li><code>{html.escape(str(item.get('category')))}::{html.escape(str(item.get('memory_key')))}</code> conf={html.escape(str(item.get('confidence')))} updated={html.escape(str(item.get('updated_at')))}</li>" for item in top_working])}
+          </ul>
+        </div>
+        <div class="card">
+          <h2>Top Long-Term Memory</h2>
+          <ul>
+            {"".join([f"<li><code>{html.escape(str(item.get('category')))}::{html.escape(str(item.get('memory_key')))}</code> conf={html.escape(str(item.get('confidence')))} updated={html.escape(str(item.get('updated_at')))}</li>" for item in top_long_term])}
+          </ul>
+        </div>
+        <div class="card">
+          <h2>Recent Journal</h2>
+          <ul>
+            {"".join([f"<li>{html.escape(str(item.get('created_at')))} - {html.escape(str(item.get('entry_text'))[:180])}</li>" for item in recent_journal])}
+          </ul>
+        </div>
+        <div class="card">
+          <h2>Recent Provenance</h2>
+          <ul>
+            {"".join([f"<li>{html.escape(str(item.get('created_at')))} - <code>{html.escape(str(item.get('scope')))}::{html.escape(str(item.get('category')))}::{html.escape(str(item.get('memory_key')))}</code> action={html.escape(str(item.get('action')))}</li>" for item in recent_prov])}
+          </ul>
+        </div>
+      </body>
+    </html>
+    """
+    return app.response_class(response=html_page, status=200, mimetype="text/html")
 
 
 @app.route("/debug/gmail", methods=["GET"])
