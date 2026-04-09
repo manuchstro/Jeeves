@@ -925,7 +925,7 @@ def get_trusted_portfolio_symbols(limit=10):
     return [item["symbol"] for item in get_portfolio_holdings(limit=limit, trusted_only=True)]
 
 
-def get_top_non_etf_trusted_portfolio_symbols(limit=4):
+def get_top_non_etf_trusted_portfolio_symbols(limit=10):
     items = get_portfolio_holdings(limit=max(12, limit * 3), trusted_only=True)
     picked = []
     for item in items:
@@ -6395,7 +6395,7 @@ def build_dynamic_news_queries(limit=10):
     seen = set()
     watchlist = get_watchlist()
     trusted_portfolio = get_trusted_portfolio_symbols(limit=8)
-    trusted_non_etf = get_top_non_etf_trusted_portfolio_symbols(limit=4)
+    trusted_non_etf = get_top_non_etf_trusted_portfolio_symbols(limit=10)
 
     def add_query(query, category_hint=None):
         query = normalize_candidate_query_text(query)
@@ -6411,9 +6411,9 @@ def build_dynamic_news_queries(limit=10):
     for query, category_hint in BASELINE_NEWS_QUERIES:
         add_query(query, category_hint)
 
-    # P-query symbols: prioritize up to 4 non-ETF trusted portfolio symbols.
-    # If trusted portfolio is not available yet, fallback to watchlist symbols.
-    p_query_symbols = trusted_non_etf if trusted_non_etf else watchlist[:4]
+    # P-query symbols: use up to 10 non-ETF trusted portfolio symbols only.
+    # If trusted portfolio is not available yet, leave P-symbol expansion empty.
+    p_query_symbols = trusted_non_etf
     if p_query_symbols:
         add_query(" ".join(p_query_symbols) + " stock market performance", "P")
         add_query(" ".join(p_query_symbols) + " company news", "P")
