@@ -4464,6 +4464,7 @@ def build_memory_debug_compact(summary):
         return {
             "category": item.get("category"),
             "memory_key": item.get("memory_key"),
+            "value": item.get("value"),
             "confidence": item.get("confidence"),
             "updated_at": item.get("updated_at"),
         }
@@ -4628,6 +4629,25 @@ def detect_memory_debug_issues(summary, journal_groups=None, provenance_rollup=N
         })
 
     return issues
+
+
+def memory_label(category, memory_key):
+    labels = {
+        ("nightly_summary", "recent_personal_signal"): "Recent Personal Signal Mix",
+        ("usage_patterns", "recent_usage"): "How You Have Been Using Jeeves",
+        ("memory_threads", "open_loop"): "Open Loop Topic",
+        ("nightly_summary", "more_true_1"): "Model-Inferred 'More True' Shift",
+        ("nightly_summary", "less_true_1"): "Model-Inferred 'Less True' Shift",
+        ("emotional_state", "journal_tone"): "Journal Tone",
+        ("state", "journal_energy"): "Journal Energy",
+        ("state", "journal_outlook"): "Journal Outlook",
+        ("state", "journal_stress"): "Journal Stress",
+        ("gratitude", "latest_gratitude"): "Most Recent Journal/Gratitude Entry",
+        ("frictions", "journal_friction"): "Recent Friction Signal",
+        ("behavior_trends", "nightly_usage_summary"): "Long-Term Usage Pattern",
+        ("behavior_trends", "recurrent_focus"): "Recurring Focus Theme",
+    }
+    return labels.get((category or "", memory_key or ""), f"{(category or 'memory').replace('_', ' ').title()} / {(memory_key or 'entry').replace('_', ' ')}")
 
 # ---------------- ALERTS ----------------
 
@@ -7631,8 +7651,8 @@ def debug_memory_view():
     summary = get_memory_debug_summary()
     compact = build_memory_debug_compact(summary)
     count_block = compact.get("counts") or {}
-    top_working = compact.get("top_working_memory") or []
-    top_long_term = compact.get("top_long_term_memory") or []
+    top_working = (summary.get("working_memory") or [])[:8]
+    top_long_term = (summary.get("long_term_memory") or [])[:8]
     journal_grouped = compact.get("recent_journal_grouped") or []
     prov_rollup = compact.get("recent_provenance_rollup") or []
     diagnostics = compact.get("diagnostics") or []
@@ -7661,13 +7681,27 @@ def debug_memory_view():
         for item in prov_rollup
     ]) or "<li>No provenance rows.</li>"
     top_working_html = "".join([
-        f"<li><code>{html.escape(str(item.get('category')))}::{html.escape(str(item.get('memory_key')))}</code> conf={html.escape(str(item.get('confidence')))} updated={html.escape(str(item.get('updated_at')))}</li>"
+        (
+            f"<div class='memory-item'>"
+            f"<div class='memory-title'>{html.escape(memory_label(item.get('category'), item.get('memory_key')))}</div>"
+            f"<div><strong>What this memory says:</strong> {html.escape(str(item.get('value') or ''))}</div>"
+            f"<div class='muted'>confidence={html.escape(str(item.get('confidence')))} | updated={html.escape(str(item.get('updated_at')))}</div>"
+            f"<div class='muted'>internal id: <code>{html.escape(str(item.get('category')))}::{html.escape(str(item.get('memory_key')))}</code></div>"
+            f"</div>"
+        )
         for item in top_working
-    ]) or "<li>No rows.</li>"
+    ]) or "<div class='memory-item'>No rows.</div>"
     top_long_term_html = "".join([
-        f"<li><code>{html.escape(str(item.get('category')))}::{html.escape(str(item.get('memory_key')))}</code> conf={html.escape(str(item.get('confidence')))} updated={html.escape(str(item.get('updated_at')))}</li>"
+        (
+            f"<div class='memory-item'>"
+            f"<div class='memory-title'>{html.escape(memory_label(item.get('category'), item.get('memory_key')))}</div>"
+            f"<div><strong>What this memory says:</strong> {html.escape(str(item.get('value') or ''))}</div>"
+            f"<div class='muted'>confidence={html.escape(str(item.get('confidence')))} | updated={html.escape(str(item.get('updated_at')))}</div>"
+            f"<div class='muted'>internal id: <code>{html.escape(str(item.get('category')))}::{html.escape(str(item.get('memory_key')))}</code></div>"
+            f"</div>"
+        )
         for item in top_long_term
-    ]) or "<li>No rows.</li>"
+    ]) or "<div class='memory-item'>No rows.</div>"
     html_page = f"""
     <html>
       <head>
@@ -7686,6 +7720,8 @@ def debug_memory_view():
           a {{ color: #2563eb; text-decoration: none; }}
           a:hover {{ text-decoration: underline; }}
           code {{ background: #f3f4f6; padding: 2px 4px; border-radius: 4px; }}
+          .memory-item {{ border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; margin: 8px 0; background: #fcfcfd; }}
+          .memory-title {{ font-weight: 700; margin-bottom: 4px; }}
         </style>
       </head>
       <body>
@@ -7712,16 +7748,18 @@ def debug_memory_view():
           </div>
         </div>
         <div class="card">
-          <h2>Top Working Memory</h2>
-          <ul>
+          <h2>Top Working Memory (Plain English)</h2>
+          <div class="muted">These are active short-term memory items Jeeves is currently carrying.</div>
+          <div>
             {top_working_html}
-          </ul>
+          </div>
         </div>
         <div class="card">
-          <h2>Top Long-Term Memory</h2>
-          <ul>
+          <h2>Top Long-Term Memory (Plain English)</h2>
+          <div class="muted">These are slower-changing patterns and durable summaries.</div>
+          <div>
             {top_long_term_html}
-          </ul>
+          </div>
         </div>
         <div class="card">
           <h2>Recent Journal (Grouped)</h2>
