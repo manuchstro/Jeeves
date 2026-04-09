@@ -362,6 +362,10 @@ def init_db():
         "ALTER TABLE portfolio_holdings ADD COLUMN source_type TEXT DEFAULT 'manual'",
         "ALTER TABLE portfolio_holdings ADD COLUMN trusted INTEGER DEFAULT 0",
         "ALTER TABLE portfolio_holdings ADD COLUMN effective_date TEXT",
+        "ALTER TABLE portfolio_holdings ADD COLUMN shares REAL",
+        "ALTER TABLE portfolio_holdings ADD COLUMN market_value REAL",
+        "ALTER TABLE portfolio_holdings ADD COLUMN pct_net_liq REAL",
+        "ALTER TABLE portfolio_holdings ADD COLUMN is_etf INTEGER DEFAULT 0",
     ]:
         try:
             cur.execute(statement)
@@ -809,19 +813,95 @@ def extract_symbols_from_text(text):
     return symbols
 
 
+def parse_portfolio_numeric(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    text = text.replace("$", "").replace(",", "").replace("%", "")
+    try:
+        return float(text)
+    except:
+        return None
+
+
+def normalize_portfolio_positions(symbols):
+    positions = []
+    for index, item in enumerate(symbols or [], start=1):
+        if isinstance(item, dict):
+            raw_symbol = item.get("symbol")
+            symbol = re.sub(r"[^A-Z0-9.\-]", "", str(raw_symbol or "").upper())
+            if not symbol:
+                continue
+            pct_net_liq = parse_portfolio_numeric(item.get("pct_net_liq"))
+            market_value = parse_portfolio_numeric(item.get("market_value"))
+            shares = parse_portfolio_numeric(item.get("shares"))
+            is_etf = item.get("is_etf")
+            if isinstance(is_etf, str):
+                is_etf = is_etf.strip().lower() in {"1", "true", "yes", "y"}
+            is_etf = bool(is_etf) if is_etf is not None else (symbol in KNOWN_ETF_SYMBOLS)
+            positions.append({
+                "symbol": symbol,
+                "incoming_index": index,
+                "pct_net_liq": pct_net_liq,
+                "market_value": market_value,
+                "shares": shares,
+                "is_etf": 1 if is_etf else 0,
+            })
+        else:
+            symbol = re.sub(r"[^A-Z0-9.\-]", "", str(item or "").upper())
+            if not symbol:
+                continue
+            positions.append({
+                "symbol": symbol,
+                "incoming_index": index,
+                "pct_net_liq": None,
+                "market_value": None,
+                "shares": None,
+                "is_etf": 1 if symbol in KNOWN_ETF_SYMBOLS else 0,
+            })
+
+    deduped = {}
+    for position in positions:
+        deduped[position["symbol"]] = position
+    positions = list(deduped.values())
+
+    positions.sort(
+        key=lambda row: (
+            -(row.get("pct_net_liq") if row.get("pct_net_liq") is not None else -1e12),
+            -(row.get("market_value") if row.get("market_value") is not None else -1e12),
+            row.get("incoming_index", 9999),
+        )
+    )
+    for rank, row in enumerate(positions, start=1):
+        row["conviction_rank"] = rank
+    return positions
+
+
 def upsert_portfolio_symbols(symbols, source_text=None, source_type="manual", trusted=False, effective_date=None):
     if not symbols:
         return
 
+    positions = normalize_portfolio_positions(symbols)
+    if not positions:
+        return
+
     conn = get_conn()
     cur = conn.cursor()
-    for index, symbol in enumerate(symbols, start=1):
+    for position in positions:
+        symbol = position["symbol"]
         cur.execute(
             """
-            INSERT INTO portfolio_holdings (symbol, conviction_rank, note, source_type, trusted, effective_date)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO portfolio_holdings (
+                symbol, conviction_rank, note, source_type, trusted, effective_date,
+                shares, market_value, pct_net_liq, is_etf
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(symbol) DO UPDATE SET
-                conviction_rank = COALESCE(portfolio_holdings.conviction_rank, excluded.conviction_rank),
+                conviction_rank = COALESCE(excluded.conviction_rank, portfolio_holdings.conviction_rank),
                 note = CASE
                     WHEN excluded.trusted = 1 THEN COALESCE(excluded.note, portfolio_holdings.note)
                     ELSE COALESCE(portfolio_holdings.note, excluded.note)
@@ -835,9 +915,24 @@ def upsert_portfolio_symbols(symbols, source_text=None, source_type="manual", tr
                     ELSE portfolio_holdings.trusted
                 END,
                 effective_date = COALESCE(excluded.effective_date, portfolio_holdings.effective_date),
+                shares = COALESCE(excluded.shares, portfolio_holdings.shares),
+                market_value = COALESCE(excluded.market_value, portfolio_holdings.market_value),
+                pct_net_liq = COALESCE(excluded.pct_net_liq, portfolio_holdings.pct_net_liq),
+                is_etf = COALESCE(excluded.is_etf, portfolio_holdings.is_etf),
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (symbol, index, source_text, source_type, 1 if trusted else 0, effective_date),
+            (
+                symbol,
+                position.get("conviction_rank"),
+                source_text,
+                source_type,
+                1 if trusted else 0,
+                effective_date,
+                position.get("shares"),
+                position.get("market_value"),
+                position.get("pct_net_liq"),
+                position.get("is_etf"),
+            ),
         )
     conn.commit()
     conn.close()
@@ -894,7 +989,9 @@ def get_portfolio_holdings(limit=8, trusted_only=False):
     if trusted_only:
         cur.execute(
             """
-            SELECT symbol, conviction_rank, note, updated_at, source_type, trusted, effective_date
+            SELECT
+                symbol, conviction_rank, note, updated_at, source_type, trusted, effective_date,
+                shares, market_value, pct_net_liq, is_etf
             FROM portfolio_holdings
             WHERE trusted = 1
             ORDER BY
@@ -907,7 +1004,9 @@ def get_portfolio_holdings(limit=8, trusted_only=False):
     else:
         cur.execute(
             """
-            SELECT symbol, conviction_rank, note, updated_at, source_type, trusted, effective_date
+            SELECT
+                symbol, conviction_rank, note, updated_at, source_type, trusted, effective_date,
+                shares, market_value, pct_net_liq, is_etf
             FROM portfolio_holdings
             ORDER BY
                 CASE WHEN conviction_rank IS NULL THEN 999 ELSE conviction_rank END ASC,
@@ -932,7 +1031,7 @@ def get_top_non_etf_trusted_portfolio_symbols(limit=10):
         symbol = (item.get("symbol") or "").upper().strip()
         if not symbol:
             continue
-        if symbol in KNOWN_ETF_SYMBOLS:
+        if int(item.get("is_etf") or 0) == 1 or symbol in KNOWN_ETF_SYMBOLS:
             continue
         if symbol not in picked:
             picked.append(symbol)
