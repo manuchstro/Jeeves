@@ -1748,7 +1748,7 @@ def upsert_memory(scope, category, memory_key, value, source_text=None, confiden
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT value, stability, confidence, source_trust
+        SELECT value, stability, confidence, source_trust, updated_at
         FROM memory_items
         WHERE scope = ? AND category = ? AND memory_key = ?
         LIMIT 1
@@ -1766,6 +1766,35 @@ def upsert_memory(scope, category, memory_key, value, source_text=None, confiden
                 MEMORY_CONFIDENCE_MAX,
                 max(proposed_confidence, existing_confidence) + correlation_bonus(corr),
             )
+
+    old_value = existing["value"] if existing else None
+    old_stability = existing["stability"] if existing else None
+    old_confidence = existing["confidence"] if existing else None
+    old_updated_at = existing["updated_at"] if existing else None
+    old_source_trust = existing["source_trust"] if existing else None
+
+    refresh_candidate = bool(
+        existing
+        and old_value == value
+        and old_confidence == proposed_confidence
+        and old_stability == stability
+        and old_source_trust == source_trust
+    )
+    if refresh_candidate and not has_real_new_signal_since(old_updated_at):
+        conn.close()
+        add_memory_provenance_event(
+            scope=scope,
+            category=category,
+            memory_key=memory_key,
+            action="refresh_skipped_no_new_signal",
+            source_text=source_text,
+            source_trust=source_trust,
+            confidence=proposed_confidence,
+            stability=stability,
+            old_value=old_value,
+            new_value=value,
+        )
+        return
 
     cur.execute(
         """
@@ -1785,13 +1814,10 @@ def upsert_memory(scope, category, memory_key, value, source_text=None, confiden
     conn.commit()
     conn.close()
 
-    old_value = existing["value"] if existing else None
-    old_stability = existing["stability"] if existing else None
-    old_confidence = existing["confidence"] if existing else None
     action = "insert" if existing is None else "update"
     if existing and old_stability != stability:
         action = "stability_transition"
-    if existing and old_value == value and old_confidence == proposed_confidence and old_stability == stability:
+    if existing and old_value == value and old_confidence == proposed_confidence and old_stability == stability and old_source_trust == source_trust:
         action = "refresh"
     add_memory_provenance_event(
         scope=scope,
@@ -1975,6 +2001,28 @@ def upsert_daily_log(intent, message_text, memory_result=None, local_date=None):
 
     conn.commit()
     conn.close()
+
+
+def has_real_new_signal_since(timestamp):
+    if not timestamp:
+        return True
+
+    conn = get_conn()
+    cur = conn.cursor()
+    checks = [
+        ("SELECT COUNT(*) AS count FROM interaction_events WHERE datetime(created_at) > datetime(?)", (timestamp,)),
+        ("SELECT COUNT(*) AS count FROM memory_observations WHERE datetime(created_at) > datetime(?)", (timestamp,)),
+        ("SELECT COUNT(*) AS count FROM journal_entries WHERE datetime(created_at) > datetime(?)", (timestamp,)),
+    ]
+    has_signal = False
+    for sql, params in checks:
+        cur.execute(sql, params)
+        row = cur.fetchone()
+        if row and int(row["count"] or 0) > 0:
+            has_signal = True
+            break
+    conn.close()
+    return has_signal
 
 
 def get_recent_daily_logs(limit=14):
