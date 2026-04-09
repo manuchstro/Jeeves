@@ -1758,6 +1758,13 @@ def upsert_memory(scope, category, memory_key, value, source_text=None, confiden
     )
     existing = cur.fetchone()
     proposed_confidence = max(0.0, min(MEMORY_CONFIDENCE_MAX, float(confidence)))
+    old_value = existing["value"] if existing else None
+    old_stability = existing["stability"] if existing else None
+    old_confidence = existing["confidence"] if existing else None
+    old_updated_at = existing["updated_at"] if existing else None
+    old_source_trust = existing["source_trust"] if existing else None
+    has_new_signal = has_real_new_signal_since(old_updated_at) if existing else True
+
     if existing:
         existing_value = existing["value"] or ""
         existing_confidence = float(existing["confidence"] or 0.0)
@@ -1767,12 +1774,26 @@ def upsert_memory(scope, category, memory_key, value, source_text=None, confiden
                 MEMORY_CONFIDENCE_MAX,
                 max(proposed_confidence, existing_confidence) + correlation_bonus(corr),
             )
+        # Confidence can only move upward when there is real new signal since last update.
+        if proposed_confidence > existing_confidence and not has_new_signal:
+            proposed_confidence = existing_confidence
 
-    old_value = existing["value"] if existing else None
-    old_stability = existing["stability"] if existing else None
-    old_confidence = existing["confidence"] if existing else None
-    old_updated_at = existing["updated_at"] if existing else None
-    old_source_trust = existing["source_trust"] if existing else None
+    # If value is unchanged and there is no real new signal, skip the write entirely.
+    if existing and old_value == value and not has_new_signal:
+        conn.close()
+        add_memory_provenance_event(
+            scope=scope,
+            category=category,
+            memory_key=memory_key,
+            action="refresh_skipped_no_new_signal",
+            source_text=source_text,
+            source_trust=source_trust,
+            confidence=old_confidence,
+            stability=old_stability or stability,
+            old_value=old_value,
+            new_value=value,
+        )
+        return
 
     refresh_candidate = bool(
         existing
@@ -1832,7 +1853,8 @@ def upsert_memory(scope, category, memory_key, value, source_text=None, confiden
         old_value=old_value,
         new_value=value,
     )
-    apply_memory_correlation_reinforcement(scope, category, memory_key, value)
+    if has_new_signal:
+        apply_memory_correlation_reinforcement(scope, category, memory_key, value)
 
 
 def add_journal_entry(entry_text):
