@@ -3073,8 +3073,19 @@ def get_memory_embedding_rows(limit=100):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT scope, category, memory_key, embedding_json, semantic_text, updated_at
-        FROM memory_embeddings
+        SELECT
+            e.scope,
+            e.category,
+            e.memory_key,
+            e.embedding_json,
+            e.semantic_text,
+            e.updated_at,
+            COALESCE(m.confidence, 0.5) AS memory_confidence
+        FROM memory_embeddings e
+        LEFT JOIN memory_items m
+          ON m.scope = e.scope
+         AND m.category = e.category
+         AND m.memory_key = e.memory_key
         ORDER BY updated_at DESC
         LIMIT ?
         """,
@@ -3216,7 +3227,11 @@ def build_memory_interest_vector(limit=80):
         updated_at = parse_sqlite_timestamp(row.get("updated_at"))
         age_days = max(0.0, (now - updated_at).total_seconds() / 86400.0) if updated_at else 0.0
         recency_weight = max(0.45, 1.0 - min(age_days, 45.0) / 90.0)
-        weight = base_weight * recency_weight
+        confidence_value = max(0.0, min(0.99, float(row.get("memory_confidence") or 0.5)))
+        # Confidence now directly controls influence: low-confidence memories still
+        # contribute but are muted; high-confidence memories pull harder.
+        confidence_weight = 0.35 + (0.95 * confidence_value)
+        weight = base_weight * recency_weight * confidence_weight
 
         if aggregate is None:
             aggregate = [0.0] * len(embedding)
@@ -3227,6 +3242,7 @@ def build_memory_interest_vector(limit=80):
         weighted_rows.append({
             "category": category,
             "memory_key": row.get("memory_key"),
+            "confidence": round(confidence_value, 4),
             "semantic_text": row.get("semantic_text", ""),
             "weight": round(weight, 4),
         })
@@ -4144,6 +4160,48 @@ def compute_market_stress_signal():
     return 0.85
 
 
+def get_memory_state_confidence_profile():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT category, memory_key, value, confidence
+        FROM memory_items
+        WHERE scope = 'working'
+          AND (
+              (category = 'state' AND memory_key IN ('journal_stress', 'journal_energy', 'journal_outlook'))
+              OR (category = 'emotional_state' AND memory_key = 'journal_tone')
+          )
+        """
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+
+    profile = {
+        "stress": {"value": None, "confidence": 0.0},
+        "energy": {"value": None, "confidence": 0.0},
+        "outlook": {"value": None, "confidence": 0.0},
+        "tone": {"value": None, "confidence": 0.0},
+    }
+    key_map = {
+        ("state", "journal_stress"): "stress",
+        ("state", "journal_energy"): "energy",
+        ("state", "journal_outlook"): "outlook",
+        ("emotional_state", "journal_tone"): "tone",
+    }
+    for row in rows:
+        slot = key_map.get((row.get("category"), row.get("memory_key")))
+        if not slot:
+            continue
+        conf = max(0.0, min(0.99, float(row.get("confidence") or 0.0)))
+        if conf >= profile[slot]["confidence"]:
+            profile[slot] = {
+                "value": (row.get("value") or "").strip().lower(),
+                "confidence": conf,
+            }
+    return profile
+
+
 def build_tone_vector(journal_analysis, context_snapshot):
     weather = (context_snapshot or {}).get("weather", {})
     sleep = (context_snapshot or {}).get("sleep", {})
@@ -4166,6 +4224,13 @@ def build_tone_vector(journal_analysis, context_snapshot):
     friction_signal = 0.75 if friction == "present" else 0.25
     energy_signal = energy_map.get(energy, 0.5)
     outlook_signal = outlook_map.get(outlook, 0.45)
+    memory_profile = get_memory_state_confidence_profile()
+    memory_stress = stress_map.get(memory_profile["stress"]["value"], 0.45)
+    memory_energy = energy_map.get(memory_profile["energy"]["value"], 0.5)
+    memory_outlook = outlook_map.get(memory_profile["outlook"]["value"], 0.45)
+    stress_signal = ((1.0 - memory_profile["stress"]["confidence"]) * stress_signal) + (memory_profile["stress"]["confidence"] * memory_stress)
+    energy_signal = ((1.0 - memory_profile["energy"]["confidence"]) * energy_signal) + (memory_profile["energy"]["confidence"] * memory_energy)
+    outlook_signal = ((1.0 - memory_profile["outlook"]["confidence"]) * outlook_signal) + (memory_profile["outlook"]["confidence"] * memory_outlook)
 
     busy_score = clamp01((calendar_features.get("busy_score") or 0.0))
     fatigue_score = clamp01((sleep_features.get("fatigue_score") or 0.5))
