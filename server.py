@@ -88,6 +88,11 @@ QUERY_CATEGORY_BUDGET = {
     "P": 3,
 }
 QUERY_NEAR_DUPLICATE_JACCARD = 0.7
+LOW_QUALITY_CURRENTS_DOMAINS = {
+    "nypost.com",
+    "mirror.co.uk",
+    "sott.net",
+}
 
 # ---------------- DB ----------------
 
@@ -6280,13 +6285,22 @@ def classify_news_category(query, headline, snippet, section, watchlist=None):
         snippet or "",
         section or "",
     ]).lower()
+    # Local should be explicit to Bay Area/California context only.
     if any(term in text for term in [
         "bay area", "san francisco", "berkeley", "oakland", "san jose",
-        "sacramento", "california", "local", "city", "county", "state",
-        "wildfire", "transit", "housing", "school", "police", "mayor", "earthquake"
+        "sacramento", "california", "earthquake", "wildfire",
     ]):
         return "L"
-    if any(term in text for term in ["fed", "inflation", "cpi", "rates", "rate cut", "jobs", "employment", "treasury"]):
+    # Finance/macro/business should route to E (not default to G).
+    if any(term in text for term in [
+        "fed", "inflation", "cpi", "rates", "rate cut", "jobs", "employment", "treasury",
+        "stock", "stocks", "shares", "earnings", "guidance", "nasdaq", "nyse",
+        "dow", "s&p", "market", "gdp", "imf", "bond", "bonds", "yield", "yields",
+        "finance", "business",
+    ]):
+        return "E"
+    # Detect common ticker syntax in headlines/snippets (e.g. NASDAQ:CRWD, NYSE:XYZ).
+    if re.search(r"\b(?:nasdaq|nyse|arca)\s*:\s*[a-z]{1,6}\b", text):
         return "E"
     if any(term in text for term in [
         "iran", "russia", "china", "taiwan", "ukraine", "israel", "gaza",
@@ -6334,9 +6348,30 @@ def normalize_candidate_category(candidate, watchlist=None):
     return original, None
 
 
+def _normalize_domain(web_url):
+    domain = (urlparse(web_url or "").netloc or "").lower().strip()
+    if domain.startswith("www."):
+        domain = domain[4:]
+    return domain
+
+
+def currents_quality_reject_reason(headline, snippet, section, web_url):
+    domain = _normalize_domain(web_url)
+    if domain in LOW_QUALITY_CURRENTS_DOMAINS:
+        return f"blocked_domain:{domain}"
+    title = (headline or "").strip().lower()
+    text = " ".join([headline or "", snippet or "", section or ""]).lower()
+    if not title or len(title) < 20:
+        return "weak_headline"
+    # Very light pattern filter for tabloid-style ragebait language.
+    if any(token in text for token in ["deranged", "rage against", "whoppers", "nut jobs"]):
+        return "tabloid_pattern"
+    return None
+
+
 def get_currents_candidates(query, category_hint=None, watchlist=None):
     if not CURRENTS_API_KEY:
-        return []
+        return [], {"filtered": 0, "filter_reasons": {}, "considered": 0}
 
     try:
         response = requests.get(
@@ -6350,13 +6385,17 @@ def get_currents_candidates(query, category_hint=None, watchlist=None):
             timeout=10,
         )
         if response.status_code != 200:
-            return []
+            return [], {"filtered": 0, "filter_reasons": {}, "considered": 0}
 
         data = response.json()
         articles = data.get("news", [])[:3]
         candidates = []
+        filtered = 0
+        filter_reasons = Counter()
+        considered = 0
 
         for article in articles:
+            considered += 1
             headline = article.get("title") or ""
             snippet = article.get("description") or ""
             body_text = article.get("description") or ""
@@ -6364,6 +6403,11 @@ def get_currents_candidates(query, category_hint=None, watchlist=None):
             web_url = article.get("url") or ""
             published_at = (article.get("published") or "")[:19]
             if not headline:
+                continue
+            reject_reason = currents_quality_reject_reason(headline, snippet, section, web_url)
+            if reject_reason:
+                filtered += 1
+                filter_reasons[reject_reason] += 1
                 continue
 
             category = category_hint or classify_news_category(query, headline, snippet, section, watchlist=watchlist)
@@ -6386,9 +6430,13 @@ def get_currents_candidates(query, category_hint=None, watchlist=None):
                 "raw_payload": article,
             })
 
-        return candidates
+        return candidates, {
+            "filtered": filtered,
+            "filter_reasons": dict(filter_reasons),
+            "considered": considered,
+        }
     except:
-        return []
+        return [], {"filtered": 0, "filter_reasons": {}, "considered": 0}
 
 
 def get_nyt_headline_candidates(query, category_hint=None, watchlist=None):
@@ -6666,7 +6714,10 @@ def build_poll_candidates(force_currents=False):
         "currents_queries": [],
         "currents_burst_size": CURR_BURST_QUERIES_PER_CYCLE,
         "currents_added_by_query": [],
+        "currents_filtered_by_query": [],
         "currents_added": 0,
+        "currents_filtered": 0,
+        "currents_filter_reasons": {},
     }
 
     for category, tier, series in POLL_SERIES:
@@ -6689,16 +6740,28 @@ def build_poll_candidates(force_currents=False):
             selected.append(news_queries[(start_index + offset) % len(news_queries)])
 
         total_added = 0
+        total_filtered = 0
+        total_filter_reasons = Counter()
         for query, category_hint in selected:
-            current_candidates = get_currents_candidates(query, category_hint=category_hint, watchlist=watchlist)
+            current_candidates, quality_meta = get_currents_candidates(query, category_hint=category_hint, watchlist=watchlist)
             added_count = len(current_candidates)
             source_debug["currents_queries"].append(query)
             source_debug["currents_added_by_query"].append({"query": query, "added": added_count})
+            source_debug["currents_filtered_by_query"].append({
+                "query": query,
+                "filtered": int((quality_meta or {}).get("filtered", 0)),
+                "considered": int((quality_meta or {}).get("considered", 0)),
+                "reasons": (quality_meta or {}).get("filter_reasons", {}),
+            })
             total_added += added_count
+            total_filtered += int((quality_meta or {}).get("filtered", 0))
+            total_filter_reasons.update((quality_meta or {}).get("filter_reasons", {}))
             candidates.extend(current_candidates)
 
         source_debug["currents_query"] = selected[0][0] if selected else None
         source_debug["currents_added"] = total_added
+        source_debug["currents_filtered"] = total_filtered
+        source_debug["currents_filter_reasons"] = dict(total_filter_reasons)
         mark_source_polled("CURRENTS", note=" | ".join(source_debug["currents_queries"]))
 
     normalized_candidates = []
