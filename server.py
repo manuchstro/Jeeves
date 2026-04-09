@@ -2687,12 +2687,8 @@ def get_recent_journal(limit=30):
         cur.execute(
             """
             SELECT entry_text, created_at
-            FROM (
-                SELECT entry_text, created_at FROM journal_entries
-                UNION ALL
-                SELECT entry_text, created_at FROM gratitude_entries
-            )
-            ORDER BY created_at DESC
+            FROM journal_entries
+            ORDER BY datetime(created_at) DESC, id DESC
             LIMIT ?
             """,
             (limit,),
@@ -2702,8 +2698,8 @@ def get_recent_journal(limit=30):
         cur.execute(
             """
             SELECT entry_text, created_at
-            FROM journal_entries
-            ORDER BY id DESC
+            FROM gratitude_entries
+            ORDER BY datetime(created_at) DESC, id DESC
             LIMIT ?
             """,
             (limit,),
