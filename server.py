@@ -62,6 +62,7 @@ LOCAL_TZ = ZoneInfo("America/Los_Angeles")
 ALERT_DECISION_MODEL = os.environ.get("ALERT_DECISION_MODEL", "gpt-4o")
 ALERT_PUSH_TIER_MAX = max(1, min(3, int(os.environ.get("ALERT_PUSH_TIER_MAX", "2"))))
 CURR_BURST_QUERIES_PER_CYCLE = max(1, min(4, int(os.environ.get("CURR_BURST_QUERIES_PER_CYCLE", "3"))))
+PROVENANCE_SKIP_DEDUPE_SECONDS = max(30, int(os.environ.get("PROVENANCE_SKIP_DEDUPE_SECONDS", "180")))
 GMAIL_ACCOUNT_EMAIL = os.environ.get("GMAIL_ACCOUNT_EMAIL", "").strip().lower()
 GMAIL_TOKEN_JSON = os.environ.get("GMAIL_TOKEN_JSON")
 DAILY_BRIEF_HOUR = 20
@@ -80,6 +81,13 @@ KNOWN_ETF_SYMBOLS = {
     "XLI", "XLP", "XLU", "XLV", "XLB", "XLC", "SMH", "SOXX", "ARKK",
     "KWEB", "EEM", "GLD", "SLV", "USO", "URA", "URNM", "NLR",
 }
+QUERY_CATEGORY_BUDGET = {
+    "E": 2,
+    "L": 2,
+    "G": 3,
+    "P": 3,
+}
+QUERY_NEAR_DUPLICATE_JACCARD = 0.7
 
 # ---------------- DB ----------------
 
@@ -1836,6 +1844,35 @@ def apply_memory_correlation_reinforcement(scope, category, memory_key, value):
 def add_memory_provenance_event(scope, category, memory_key, action, source_text=None, source_trust="inferred", confidence=None, stability=None, old_value=None, new_value=None):
     conn = get_conn()
     cur = conn.cursor()
+    if action == "refresh_skipped_no_new_signal":
+        # Collapse rapid repeat no-signal events for the same memory row.
+        cur.execute(
+            """
+            SELECT id
+            FROM memory_provenance_events
+            WHERE scope = ?
+              AND category = ?
+              AND memory_key = ?
+              AND action = ?
+              AND COALESCE(old_value, '') = COALESCE(?, '')
+              AND COALESCE(new_value, '') = COALESCE(?, '')
+              AND created_at >= datetime('now', ?)
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (
+                scope,
+                category,
+                memory_key,
+                action,
+                old_value,
+                new_value,
+                f"-{int(PROVENANCE_SKIP_DEDUPE_SECONDS)} seconds",
+            ),
+        )
+        if cur.fetchone():
+            conn.close()
+            return
     cur.execute(
         """
         INSERT INTO memory_provenance_events (
@@ -6260,6 +6297,43 @@ def classify_news_category(query, headline, snippet, section, watchlist=None):
     return "G"
 
 
+def _query_terms(text):
+    return set(re.findall(r"[a-z0-9]{3,}", (text or "").lower()))
+
+
+def is_near_duplicate_query(query_a, query_b, threshold=QUERY_NEAR_DUPLICATE_JACCARD):
+    terms_a = _query_terms(query_a)
+    terms_b = _query_terms(query_b)
+    if not terms_a or not terms_b:
+        return False
+    overlap = len(terms_a & terms_b)
+    denom = max(len(terms_a), len(terms_b))
+    if denom <= 0:
+        return False
+    return (overlap / denom) >= float(threshold)
+
+
+def normalize_candidate_category(candidate, watchlist=None):
+    original = ((candidate.get("category") or "G").upper()[:1]) or "G"
+    source = candidate.get("source") or ""
+    if source == "FRED":
+        return "E", "source_fred"
+    if original == "P":
+        return "P", None
+    normalized = classify_news_category(
+        "",
+        candidate.get("headline") or "",
+        candidate.get("snippet") or "",
+        candidate.get("section") or "",
+        watchlist=watchlist,
+    )
+    if normalized not in {"P", "E", "G", "L"}:
+        normalized = "G"
+    if normalized != original:
+        return normalized, "content_classifier"
+    return original, None
+
+
 def get_currents_candidates(query, category_hint=None, watchlist=None):
     if not CURRENTS_API_KEY:
         return []
@@ -6495,14 +6569,25 @@ def build_dynamic_news_queries(limit=10):
     watchlist = get_watchlist()
     trusted_portfolio = get_trusted_portfolio_symbols(limit=8)
     trusted_non_etf = get_top_non_etf_trusted_portfolio_symbols(limit=10)
+    query_debug = {
+        "input_total": 0,
+        "exact_deduped": 0,
+        "near_deduped_non_p": 0,
+        "category_limited": 0,
+        "p_query_count": 0,
+        "p_query_reason": None,
+        "category_counts": {},
+    }
 
     def add_query(query, category_hint=None):
+        query_debug["input_total"] += 1
         query = normalize_candidate_query_text(query)
         if not query or len(query) < 8:
             return
         if not is_news_query_signal(query, watchlist=watchlist, trusted_portfolio=trusted_portfolio):
             return
         if query in seen:
+            query_debug["exact_deduped"] += 1
             return
         seen.add(query)
         query_items.append((query, category_hint or infer_category_hint_from_text(query)))
@@ -6517,6 +6602,8 @@ def build_dynamic_news_queries(limit=10):
         add_query(" ".join(p_query_symbols) + " stock market performance", "P")
         add_query(" ".join(p_query_symbols) + " company news", "P")
         add_query(" ".join(p_query_symbols) + " earnings guidance risk", "P")
+    else:
+        query_debug["p_query_reason"] = "no_trusted_non_etf_symbols"
 
     relevant = get_relevant_memories("current interests recurring focus active concerns", limit=12)
     for item in relevant.get("working", []) + relevant.get("long_term", []):
@@ -6534,17 +6621,45 @@ def build_dynamic_news_queries(limit=10):
         if event.get("intent") in {"news", "watchlist_stats", "ticker_quote", "fred", "daily_brief"}:
             add_query(message_text, infer_category_hint_from_text(message_text))
 
-    return query_items[:limit]
+    selected = []
+    category_counts = Counter()
+    for query, category_hint in query_items:
+        category = ((category_hint or "G").upper()[:1]) or "G"
+        if category not in {"P", "E", "G", "L"}:
+            category = infer_category_hint_from_text(query)
+        budget = QUERY_CATEGORY_BUDGET.get(category, limit)
+        if category_counts[category] >= budget:
+            query_debug["category_limited"] += 1
+            continue
+        if category != "P":
+            if any(
+                existing_category != "P" and is_near_duplicate_query(query, existing_query)
+                for existing_query, existing_category in selected
+            ):
+                query_debug["near_deduped_non_p"] += 1
+                continue
+        selected.append((query, category))
+        category_counts[category] += 1
+        if len(selected) >= limit:
+            break
+
+    query_debug["category_counts"] = dict(category_counts)
+    query_debug["p_query_count"] = int(category_counts.get("P", 0))
+    return selected, query_debug
 
 
 def build_poll_candidates(force_currents=False):
     candidates = []
     watchlist = get_watchlist()
-    news_queries = build_dynamic_news_queries(limit=10)
+    news_queries, query_debug = build_dynamic_news_queries(limit=10)
     currents_due = bool(force_currents) or source_poll_due("CURRENTS", CURRENTS_MIN_INTERVAL_MINUTES)
     source_debug = {
         "nyt_queries": len(news_queries),
         "generated_queries": news_queries,
+        "query_debug": query_debug,
+        "p_queries_expected": True,
+        "p_queries_present": bool(query_debug.get("p_query_count")),
+        "p_queries_reason": query_debug.get("p_query_reason"),
         "currents_due": currents_due,
         "currents_forced": bool(force_currents),
         "currents_query": None,
@@ -6586,7 +6701,26 @@ def build_poll_candidates(force_currents=False):
         source_debug["currents_added"] = total_added
         mark_source_polled("CURRENTS", note=" | ".join(source_debug["currents_queries"]))
 
-    return dedupe_candidates(candidates), source_debug
+    normalized_candidates = []
+    category_reassigned_count = 0
+    category_reassigned_examples = []
+    for candidate in candidates:
+        normalized_category, reason = normalize_candidate_category(candidate, watchlist=watchlist)
+        if normalized_category != candidate.get("category"):
+            category_reassigned_count += 1
+            if len(category_reassigned_examples) < 6:
+                category_reassigned_examples.append({
+                    "headline": candidate.get("headline"),
+                    "from": candidate.get("category"),
+                    "to": normalized_category,
+                    "source": candidate.get("source"),
+                    "reason": reason,
+                })
+        normalized_candidates.append({**candidate, "category": normalized_category})
+
+    source_debug["category_reassigned_count"] = category_reassigned_count
+    source_debug["category_reassigned_examples"] = category_reassigned_examples
+    return dedupe_candidates(normalized_candidates), source_debug
 
 
 def prepare_alert_shortlist(candidates, watchlist, limit=AI_ALERT_SHORTLIST_MAX):
