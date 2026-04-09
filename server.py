@@ -1551,7 +1551,7 @@ def classify_memory_metadata(scope, category, memory_key):
     elif category_l in {"gratitude"}:
         subtype = "journal"
         stability = "situational"
-    elif category_l in {"risk_profile", "portfolio_profile"}:
+    elif category_l in {"risk_profile"}:
         subtype = "portfolio"
         stability = "adaptive"
     elif category_l in {"state", "emotional_state", "nightly_summary"}:
@@ -1909,7 +1909,6 @@ def is_meaningful_daily_interaction(intent, message_text, memory_result=None):
         "fred",
         "news",
         "email_request",
-        "portfolio_update",
         "portfolio_show",
         "full_article_request",
     }:
@@ -3660,7 +3659,6 @@ def consolidate_memory_trends():
                 "learning_style",
                 "frictions",
                 "taste",
-                "portfolio_profile",
                 "risk_profile",
             }:
                 upsert_memory(
@@ -3798,8 +3796,6 @@ def extract_memory_updates(text):
         (r"\bi regret\s+(.+)", "major_failures", "regret_pattern"),
         (r"\ba defining moment for me was\s+(.+)", "defining_moments", "defining_memory"),
         (r"\bi want\s+(.+)", "goals", "stated_goal"),
-        (r"\bmy portfolio is\s+(.+)", "portfolio_profile", "portfolio_shape"),
-        (r"\bmy holdings are\s+(.+)", "portfolio_profile", "holdings_shape"),
     ]
 
     for pattern, category, memory_key in preference_patterns:
@@ -3832,25 +3828,6 @@ def extract_memory_updates(text):
                 "confidence": 0.8,
             })
             break
-
-    portfolio_patterns = [
-        (r"\bi own\s+(.+)", "portfolio_profile", "holdings"),
-        (r"\bi am heavy in\s+(.+)", "portfolio_profile", "concentration"),
-        (r"\bi am mostly in\s+(.+)", "portfolio_profile", "concentration"),
-        (r"\bi am moving into cash\b", "portfolio_profile", "cash_shift"),
-    ]
-
-    for pattern, category, memory_key in portfolio_patterns:
-        match = re.search(pattern, t, re.IGNORECASE)
-        if match:
-            value = match.group(1).strip() if match.groups() else match.group(0).strip()
-            updates.append({
-                "scope": "long_term",
-                "category": category,
-                "memory_key": memory_key,
-                "value": value,
-                "confidence": 0.8,
-            })
 
     return updates, gratitude_entry
 
@@ -4227,7 +4204,6 @@ Return:
 
 def process_memory_updates(text):
     updates, gratitude_entry = extract_memory_updates(text)
-    portfolio_symbols = []
     journal_context = in_gratitude_journal_context()
     journal_analysis = None
 
@@ -4252,8 +4228,6 @@ def process_memory_updates(text):
             update["memory_key"],
             update["value"],
         )
-        if update["category"] == "portfolio_profile":
-            portfolio_symbols.extend(extract_symbols_from_text(update["value"]))
 
     journal_entry = gratitude_entry or (text.strip() if journal_context and text.strip() else None)
 
@@ -4294,9 +4268,6 @@ def process_memory_updates(text):
             journal_entry,
         )
         journal_analysis = store_journal_analysis(journal_entry)
-
-    if portfolio_symbols:
-        upsert_portfolio_symbols(portfolio_symbols, source_text=text)
 
     consolidate_memory_trends()
     return {
@@ -6686,22 +6657,6 @@ def is_portfolio_show_question(text):
     return t in phrases
 
 
-def extract_portfolio_symbols(text):
-    patterns = [
-        r"^\s*add\s+(.+?)\s+to\s+my\s+portfolio\s*$",
-        r"^\s*my portfolio is\s+(.+?)\s*$",
-        r"^\s*i own\s+(.+?)\s*$",
-        r"^\s*my holdings are\s+(.+?)\s*$",
-    ]
-    for pattern in patterns:
-        match = re.match(pattern, text.strip(), re.IGNORECASE)
-        if match:
-            symbols = extract_symbols_from_text(match.group(1))
-            if symbols:
-                return symbols
-    return None
-
-
 def normalize_ticker_candidate(token):
     cleaned = re.sub(r"[^A-Za-z]", "", token or "").upper()
     if not cleaned or len(cleaned) > 5:
@@ -7019,10 +6974,6 @@ def route(text):
     if expand_reference:
         return ("event_expand", expand_reference)
 
-    portfolio_symbols = extract_portfolio_symbols(text)
-    if portfolio_symbols:
-        return ("portfolio_update", portfolio_symbols)
-
     if is_portfolio_show_question(text):
         return ("portfolio_show", None)
 
@@ -7185,11 +7136,6 @@ def build_reply_for_intent(intent, value, msg, memory_result=None):
             add_to_watchlist(item)
             added.append(item)
         return f"Added {', '.join(added)}."
-
-    if intent == "portfolio_update":
-        upsert_portfolio_symbols(value, source_text=msg)
-        record_portfolio_snapshot(value, source_type="manual", trusted=False, summary={"source_text": msg})
-        return f"Portfolio noted: {', '.join(value)}."
 
     if intent == "portfolio_show":
         holdings = [item["symbol"] for item in get_portfolio_holdings(limit=12)]

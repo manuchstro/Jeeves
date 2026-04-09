@@ -146,7 +146,6 @@ STORY_STOPWORDS = {
 MEMORY_VECTOR_CATEGORY_WEIGHTS = {
     "behavior_trends": 1.3,
     "priorities": 1.2,
-    "portfolio_profile": 1.2,
     "deep_preferences": 1.2,
     "preferences": 1.0,
     "learning_style": 0.9,
