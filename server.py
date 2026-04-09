@@ -2475,24 +2475,15 @@ def should_send_no_reply(text):
     if not stripped:
         return True
 
-    lower_text = stripped.lower()
-
     if in_gratitude_journal_context():
         return True
 
-    if len(stripped) > 160 and "?" not in stripped:
+    # Explicit silent marker: any message ending with "-" gets processed
+    # normally but does not trigger an outbound reply.
+    if stripped.endswith("-"):
         return True
 
-    closed_patterns = [
-        r"\bthat'?s all\b",
-        r"\bno need to respond\b",
-        r"\bno response needed\b",
-        r"\bjust wanted to say\b",
-        r"\bi just wanted to share\b",
-        r"\bgoodnight\b",
-        r"\btalk tomorrow\b",
-    ]
-    if any(re.search(pattern, lower_text, re.IGNORECASE) for pattern in closed_patterns):
+    if len(stripped) > 160 and "?" not in stripped:
         return True
 
     return False
