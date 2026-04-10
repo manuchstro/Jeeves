@@ -5074,6 +5074,12 @@ def build_tone_vector(journal_analysis, context_snapshot):
     energy_signal = energy_map.get(energy, 0.5)
     outlook_signal = outlook_map.get(outlook, 0.45)
     memory_profile = get_memory_state_confidence_profile()
+    memory_confidence = (
+        float(memory_profile["stress"]["confidence"])
+        + float(memory_profile["energy"]["confidence"])
+        + float(memory_profile["outlook"]["confidence"])
+        + float(memory_profile["tone"]["confidence"])
+    ) / 4.0
     memory_stress = stress_map.get(memory_profile["stress"]["value"], 0.45)
     memory_energy = energy_map.get(memory_profile["energy"]["value"], 0.5)
     memory_outlook = outlook_map.get(memory_profile["outlook"]["value"], 0.45)
@@ -5096,6 +5102,21 @@ def build_tone_vector(journal_analysis, context_snapshot):
     directness = clamp01(0.3 + (0.28 * busy_score) + (0.2 * stress_signal) + (0.12 * friction_signal))
     seriousness = clamp01(0.22 + (0.2 * market_stress) + (0.2 * stress_signal) + (0.2 * outlook_signal) + max(0.0, weather_drag))
     warmth = clamp01(0.58 + (0.12 * energy_signal) - (0.18 * stress_signal) - (0.16 * fatigue_score) - (0.14 * busy_score) - weather_drag)
+    # High confidence in memory-state signals should influence tone behavior,
+    # not only debug visibility. This keeps style stable and deliberate.
+    directness = clamp01(directness + (0.08 * memory_confidence))
+    seriousness = clamp01(seriousness + (0.08 * memory_confidence))
+    warmth = clamp01(warmth - (0.07 * memory_confidence * friction_signal))
+    anti_sycophancy = clamp01(
+        0.42
+        + (0.28 * directness)
+        + (0.24 * seriousness)
+        + (0.18 * friction_signal)
+        + (0.14 * market_stress)
+        - (0.20 * warmth)
+    )
+    if anti_sycophancy >= 0.72:
+        warmth = clamp01(warmth - 0.06)
 
     style = "balanced"
     if brevity >= 0.65 and directness >= 0.6:
@@ -5118,8 +5139,28 @@ def build_tone_vector(journal_analysis, context_snapshot):
             "stress_signal": round(stress_signal, 3),
             "friction_signal": round(friction_signal, 3),
             "weather_drag": round(weather_drag, 3),
+            "memory_confidence": round(memory_confidence, 3),
+            "anti_sycophancy": round(anti_sycophancy, 3),
         },
     }
+
+
+def build_tone_guardrail_text(tone_vector):
+    signals = (tone_vector or {}).get("signals") or {}
+    anti = float(signals.get("anti_sycophancy") or 0.0)
+    if anti >= 0.75:
+        candor = "very_high"
+    elif anti >= 0.6:
+        candor = "high"
+    elif anti >= 0.45:
+        candor = "medium"
+    else:
+        candor = "balanced"
+    return (
+        f"Candor guardrail: {candor} (anti_sycophancy={anti:.2f}). "
+        "Do not flatter or validate without evidence. "
+        "If user assumptions look weak, politely challenge them and explain why."
+    )
 
 
 def fallback_journal_response_decision(journal_analysis):
@@ -5132,6 +5173,7 @@ def fallback_journal_response_decision(journal_analysis):
 
 def decide_journal_response(text, journal_analysis, context_snapshot):
     tone_vector = build_tone_vector(journal_analysis, context_snapshot)
+    tone_guardrail = build_tone_guardrail_text(tone_vector)
     prompt = f"""
 Decide whether Jeeves should reply to this journal/gratitude response.
 
@@ -5147,6 +5189,7 @@ Rules:
 - If tone style is concise_direct, prefer shorter responses.
 - If tone style is restrained_serious, avoid cheerfulness.
 - If tone style is cheery_light, warmth can increase slightly but do not be fluffy.
+- {tone_guardrail}
 - Return JSON only.
 
 Journal text:
@@ -8648,11 +8691,13 @@ def run_generic_reply(user_text):
     try:
         context_snapshot = build_journal_context_snapshot()
         tone_vector = build_tone_vector({}, context_snapshot)
+        tone_guardrail = build_tone_guardrail_text(tone_vector)
         tone_instruction = (
             f"Tone vector: {json.dumps(tone_vector, ensure_ascii=True)}. "
             "Follow this style matrix with restraint. "
             "Be concise when brevity/directness is high, more warm when warmth is high, "
-            "and serious when seriousness is high. Never be sycophantic."
+            "and serious when seriousness is high. Never be sycophantic. "
+            f"{tone_guardrail}"
         )
         add_message("user", user_text)
         messages = [
