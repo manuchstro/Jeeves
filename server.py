@@ -9459,97 +9459,61 @@ def debug_context():
     )
 
 
-@app.route("/debug/context/calendar", methods=["POST"])
-def debug_context_calendar_upsert():
+def _debug_context_upsert_response(provider_name):
     denied = require_internal_api_key()
     if denied:
         return denied
     payload = request.get_json(silent=True) or {}
     local_date = (payload.get("local_date") or get_local_date_string()).strip()
-    upsert_context_provider("calendar", local_date, payload)
+    upsert_context_provider(provider_name, local_date, payload)
     return app.response_class(
-        response=json.dumps({"ok": True, "local_date": local_date, "row": get_context_provider_row("calendar", local_date)}, indent=2),
+        response=json.dumps({"ok": True, "local_date": local_date, "row": get_context_provider_row(provider_name, local_date)}, indent=2),
         status=200,
         mimetype="application/json",
     )
+
+
+def _debug_context_refresh_response(provider_name, include_configured=False, missing_status=200):
+    denied = require_internal_api_key()
+    if denied:
+        return denied
+    local_date = get_local_date_string()
+    payload = refresh_context_provider(provider_name, local_date=local_date)
+    row = get_context_provider_row(provider_name, local_date=local_date)
+    body = {"ok": bool(payload or row), "local_date": local_date, "row": row}
+    if include_configured:
+        body["configured"] = context_provider_configured(provider_name)
+    status = 200 if (payload or row) else int(missing_status)
+    return app.response_class(
+        response=json.dumps(body, indent=2),
+        status=status,
+        mimetype="application/json",
+    )
+
+
+@app.route("/debug/context/calendar", methods=["POST"])
+def debug_context_calendar_upsert():
+    return _debug_context_upsert_response("calendar")
 
 
 @app.route("/debug/context/sleep", methods=["POST"])
 def debug_context_sleep_upsert():
-    denied = require_internal_api_key()
-    if denied:
-        return denied
-    payload = request.get_json(silent=True) or {}
-    local_date = (payload.get("local_date") or get_local_date_string()).strip()
-    upsert_context_provider("sleep", local_date, payload)
-    return app.response_class(
-        response=json.dumps({"ok": True, "local_date": local_date, "row": get_context_provider_row("sleep", local_date)}, indent=2),
-        status=200,
-        mimetype="application/json",
-    )
+    return _debug_context_upsert_response("sleep")
 
 
 @app.route("/debug/context/inbox/refresh", methods=["POST"])
 def debug_context_inbox_refresh():
-    denied = require_internal_api_key()
-    if denied:
-        return denied
-    local_date = get_local_date_string()
-    payload = refresh_context_provider("inbox", local_date=local_date)
-    row = get_context_provider_row("inbox", local_date=local_date)
-    return app.response_class(
-        response=json.dumps({"ok": bool(payload or row), "local_date": local_date, "row": row}, indent=2),
-        status=200,
-        mimetype="application/json",
-    )
+    return _debug_context_refresh_response("inbox", include_configured=False, missing_status=200)
 
 
 @app.route("/debug/context/calendar/refresh", methods=["POST"])
 def debug_context_calendar_refresh():
-    denied = require_internal_api_key()
-    if denied:
-        return denied
-    local_date = get_local_date_string()
-    payload = refresh_context_provider("calendar", local_date=local_date)
-    row = get_context_provider_row("calendar", local_date=local_date)
-    status = 200 if (payload or row) else 400
-    return app.response_class(
-        response=json.dumps(
-            {
-                "ok": bool(payload or row),
-                "local_date": local_date,
-                "configured": context_provider_configured("calendar"),
-                "row": row,
-            },
-            indent=2,
-        ),
-        status=status,
-        mimetype="application/json",
-    )
+    return _debug_context_refresh_response("calendar", include_configured=True, missing_status=400)
 
 
 @app.route("/debug/context/sleep/refresh", methods=["POST"])
 def debug_context_sleep_refresh():
-    denied = require_internal_api_key()
-    if denied:
-        return denied
-    local_date = get_local_date_string()
-    payload = refresh_context_provider("sleep", local_date=local_date)
-    row = get_context_provider_row("sleep", local_date=local_date)
-    status = 200 if (payload or row) else 400
-    return app.response_class(
-        response=json.dumps(
-            {
-                "ok": bool(payload or row),
-                "local_date": local_date,
-                "configured": context_provider_configured("sleep"),
-                "row": row,
-            },
-            indent=2,
-        ),
-        status=status,
-        mimetype="application/json",
-    )
+    return _debug_context_refresh_response("sleep", include_configured=True, missing_status=400)
 
 
 @app.route("/tasks/context-refresh", methods=["GET", "POST"])
