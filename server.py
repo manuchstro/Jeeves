@@ -536,6 +536,16 @@ def init_db():
     """)
 
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS calendar_daily_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        local_date TEXT NOT NULL UNIQUE,
+        events_json TEXT NOT NULL DEFAULT '[]',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS sleep_daily_context (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         local_date TEXT NOT NULL UNIQUE,
@@ -2976,6 +2986,76 @@ def upsert_calendar_daily_context(local_date, payload):
     conn.close()
 
 
+def normalize_calendar_events(events):
+    if not isinstance(events, list):
+        return []
+    out = []
+    for raw in events[:100]:
+        if not isinstance(raw, dict):
+            continue
+        title = str(raw.get("title") or "").strip()
+        start_local = str(raw.get("start_local") or "").strip()
+        end_local = str(raw.get("end_local") or "").strip()
+        all_day = bool(raw.get("all_day"))
+        if not title and not start_local and not end_local:
+            continue
+        out.append(
+            {
+                "title": title or "(untitled)",
+                "start_local": start_local,
+                "end_local": end_local,
+                "all_day": all_day,
+            }
+        )
+    return out
+
+
+def upsert_calendar_daily_events(local_date, events):
+    normalized = normalize_calendar_events(events)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO calendar_daily_events (
+            local_date, events_json, updated_at
+        )
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(local_date) DO UPDATE SET
+            events_json = excluded.events_json,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            local_date,
+            json.dumps(normalized, ensure_ascii=True),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_calendar_daily_events(local_date=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT events_json
+        FROM calendar_daily_events
+        WHERE local_date = ?
+        LIMIT 1
+        """,
+        (local_date or get_local_date_string(),),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return []
+    try:
+        parsed = json.loads(row["events_json"] or "[]")
+    except:
+        return []
+    return normalize_calendar_events(parsed)
+
+
 def get_calendar_daily_context(local_date=None):
     conn = get_conn()
     cur = conn.cursor()
@@ -3179,6 +3259,7 @@ def refresh_calendar_context_from_provider(local_date=None):
         "confidence": payload.get("confidence") or 0.7,
     }
     upsert_calendar_daily_context(day, normalized)
+    upsert_calendar_daily_events(day, payload.get("events") or [])
     return normalized
 
 
@@ -4078,6 +4159,22 @@ def format_memory_context(user_text):
         lines.append("Long-term memory:")
         for item in long_term:
             lines.append(f"- {item['category']}: {item['value']}")
+
+    calendar_ctx = get_calendar_context_snapshot()
+    calendar_events = (calendar_ctx.get("events") or [])[:10]
+    if calendar_events:
+        lines.append("Calendar events:")
+        for event in calendar_events:
+            title = (event.get("title") or "(untitled)").strip()
+            start_local = (event.get("start_local") or "").strip()
+            end_local = (event.get("end_local") or "").strip()
+            all_day = bool(event.get("all_day"))
+            if all_day:
+                lines.append(f"- all-day: {title}")
+            elif start_local or end_local:
+                lines.append(f"- {start_local} to {end_local}: {title}")
+            else:
+                lines.append(f"- {title}")
 
     return "\n".join(lines)
 
@@ -4983,6 +5080,7 @@ def get_sleep_context_snapshot():
 
 def get_calendar_context_snapshot():
     stored = get_calendar_daily_context(local_date=get_local_date_string())
+    events = get_calendar_daily_events(local_date=get_local_date_string())
     if not stored:
         return {
             "available": False,
@@ -5000,6 +5098,7 @@ def get_calendar_context_snapshot():
             "stress_windows": stored.get("stress_windows"),
             "confidence": stored.get("confidence"),
         },
+        "events": events[:20],
     }
 
 
@@ -9562,8 +9661,17 @@ def debug_context_calendar_upsert():
     payload = request.get_json(silent=True) or {}
     local_date = (payload.get("local_date") or get_local_date_string()).strip()
     upsert_calendar_daily_context(local_date, payload)
+    upsert_calendar_daily_events(local_date, payload.get("events") or [])
     return app.response_class(
-        response=json.dumps({"ok": True, "local_date": local_date, "row": get_calendar_daily_context(local_date)}, indent=2),
+        response=json.dumps(
+            {
+                "ok": True,
+                "local_date": local_date,
+                "row": get_calendar_daily_context(local_date),
+                "events": get_calendar_daily_events(local_date),
+            },
+            indent=2,
+        ),
         status=200,
         mimetype="application/json",
     )
@@ -9607,6 +9715,7 @@ def debug_context_calendar_refresh():
     local_date = get_local_date_string()
     payload = refresh_calendar_context_from_provider(local_date=local_date)
     row = get_calendar_daily_context(local_date=local_date)
+    events = get_calendar_daily_events(local_date=local_date)
     status = 200 if (payload or row) else 400
     return app.response_class(
         response=json.dumps(
@@ -9615,6 +9724,8 @@ def debug_context_calendar_refresh():
                 "local_date": local_date,
                 "configured": bool(CALENDAR_CONTEXT_URL),
                 "row": row,
+                "events_count": len(events),
+                "events_preview": events[:5],
             },
             indent=2,
         ),
