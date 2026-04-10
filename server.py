@@ -13,10 +13,12 @@ import math
 import base64
 import random
 import time
+from email.utils import parsedate_to_datetime
 from difflib import SequenceMatcher
 from collections import Counter
 from datetime import datetime
 from datetime import timedelta
+from html.parser import HTMLParser
 from zoneinfo import ZoneInfo
 from urllib.parse import quote_plus, urlparse
 from google.oauth2.credentials import Credentials
@@ -99,6 +101,7 @@ LOW_QUALITY_CURRENTS_DOMAINS = {
     "mirror.co.uk",
     "sott.net",
 }
+IBKR_TRUSTED_PORTFOLIO_FILENAME_RE = re.compile(r"^Jeeves_#1\..+\.html$", re.IGNORECASE)
 
 # ---------------- DB ----------------
 
@@ -1183,6 +1186,454 @@ def extract_gmail_body(message):
     return snippet.strip()
 
 
+def iter_gmail_parts(payload):
+    if not payload:
+        return
+    yield payload
+    for part in payload.get("parts") or []:
+        yield from iter_gmail_parts(part)
+
+
+def extract_gmail_attachments(message):
+    attachments = []
+    payload = message.get("payload") or {}
+    for part in iter_gmail_parts(payload):
+        filename = (part.get("filename") or "").strip()
+        body = part.get("body") or {}
+        attachment_id = body.get("attachmentId")
+        inline_data = body.get("data")
+        if not filename:
+            continue
+        attachments.append({
+            "filename": filename,
+            "mime_type": (part.get("mimeType") or "").lower(),
+            "attachment_id": attachment_id,
+            "inline_data": inline_data,
+            "size": body.get("size"),
+        })
+    return attachments
+
+
+def decode_gmail_base64(data):
+    if not data:
+        return None
+    try:
+        padded = data + "=" * (-len(data) % 4)
+        return base64.urlsafe_b64decode(padded.encode("utf-8"))
+    except:
+        return None
+
+
+def fetch_gmail_attachment_bytes(service, message_id, attachment):
+    inline_data = attachment.get("inline_data")
+    if inline_data:
+        return decode_gmail_base64(inline_data)
+
+    attachment_id = attachment.get("attachment_id")
+    if not attachment_id:
+        return None
+    try:
+        payload = service.users().messages().attachments().get(
+            userId="me",
+            messageId=message_id,
+            id=attachment_id,
+        ).execute()
+        return decode_gmail_base64(payload.get("data"))
+    except:
+        return None
+
+
+def parse_email_datetime(value):
+    if not value:
+        return None
+    try:
+        dt = parsedate_to_datetime(value)
+        if dt and dt.tzinfo:
+            return dt.astimezone(LOCAL_TZ)
+        return dt
+    except:
+        return None
+
+
+def parse_human_date_to_iso(value):
+    text = " ".join(str(value or "").replace("\xa0", " ").split()).strip(", ")
+    if not text:
+        return None
+    formats = [
+        "%B %d, %Y",
+        "%b %d, %Y",
+        "%B %d %Y",
+        "%b %d %Y",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(text, fmt).date().isoformat()
+        except:
+            continue
+    return None
+
+
+class StatementSectionTableParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.div_stack = []
+        self.sections = {}
+        self.current_row = None
+        self.current_cell = None
+        self.current_row_section = None
+
+    def _active_section(self):
+        for section_id in reversed(self.div_stack):
+            if not section_id:
+                continue
+            if section_id == "tblAccountSummaryBody":
+                return section_id
+            if section_id.startswith("tblNAV_") and section_id.endswith("Body"):
+                return section_id
+            if section_id.startswith("tblPosAndMTM_") and section_id.endswith("Body"):
+                return section_id
+        return None
+
+    def handle_starttag(self, tag, attrs):
+        attr = dict(attrs or [])
+        if tag == "div":
+            self.div_stack.append(attr.get("id", ""))
+            return
+        if tag == "tr":
+            section_id = self._active_section()
+            if section_id:
+                self.current_row_section = section_id
+                self.current_row = []
+            return
+        if tag in {"td", "th"} and self.current_row is not None:
+            self.current_cell = []
+
+    def handle_data(self, data):
+        if self.current_cell is not None:
+            self.current_cell.append(data)
+
+    def handle_entityref(self, name):
+        if self.current_cell is not None:
+            self.current_cell.append(f"&{name};")
+
+    def handle_charref(self, name):
+        if self.current_cell is not None:
+            self.current_cell.append(f"&#{name};")
+
+    def handle_endtag(self, tag):
+        if tag in {"td", "th"} and self.current_cell is not None and self.current_row is not None:
+            text = html.unescape("".join(self.current_cell))
+            text = " ".join(text.replace("\xa0", " ").split()).strip()
+            self.current_row.append(text)
+            self.current_cell = None
+            return
+        if tag == "tr" and self.current_row is not None and self.current_row_section:
+            if self.current_row:
+                self.sections.setdefault(self.current_row_section, []).append(self.current_row)
+            self.current_row = None
+            self.current_row_section = None
+            return
+        if tag == "div":
+            if self.div_stack:
+                self.div_stack.pop()
+
+
+def is_probable_position_row(cells):
+    if not cells or len(cells) < 9:
+        return False
+    symbol = (cells[0] or "").strip().upper()
+    if not symbol:
+        return False
+    skip_prefixes = (
+        "TOTAL",
+        "CARRIED BY",
+    )
+    skip_exact = {
+        "STOCKS",
+        "FOREX",
+        "CRYPTO",
+        "USD",
+        "CAD",
+        "EUR",
+        "GBP",
+        "JPY",
+        "SYMBOL",
+    }
+    if symbol in skip_exact:
+        return False
+    if any(symbol.startswith(prefix) for prefix in skip_prefixes):
+        return False
+    if len(symbol) > 24:
+        return False
+    if re.search(r"[^A-Z0-9.\-]", symbol):
+        return False
+    return True
+
+
+def classify_is_etf(symbol, description):
+    symbol_u = (symbol or "").upper()
+    desc_u = (description or "").upper()
+    if symbol_u in KNOWN_ETF_SYMBOLS:
+        return True
+    etf_markers = [" ETF", "ISHARES", "VANECK", "SPDR", "INDEX FUND", "ETN"]
+    return any(marker in desc_u for marker in etf_markers)
+
+
+def parse_ibkr_activity_statement_html(html_text):
+    parser = StatementSectionTableParser()
+    parser.feed(html_text or "")
+    sections = parser.sections
+
+    statement_date = None
+    title_match = re.search(r"<title>\s*MTM Summary\s+([^<]+?)\s*-\s*Interactive Brokers\s*</title>", html_text or "", re.IGNORECASE)
+    if title_match:
+        statement_date = parse_human_date_to_iso(title_match.group(1))
+    if not statement_date:
+        summary_date_match = re.search(r"Account Summary\s*<br>\s*<span>([^<]+)</span>", html_text or "", re.IGNORECASE)
+        if summary_date_match:
+            statement_date = parse_human_date_to_iso(summary_date_match.group(1))
+
+    account_navs = {}
+    total_nav = None
+    for row in sections.get("tblAccountSummaryBody", []):
+        account_label = row[0]
+        current_nav = parse_portfolio_numeric(row[4] if len(row) > 4 else None)
+        if current_nav is None and "TOTAL" in (account_label or "").upper() and len(row) >= 3:
+            current_nav = parse_portfolio_numeric(row[2])
+        if current_nav is None:
+            continue
+        if account_label.upper().startswith("U"):
+            account_navs[account_label] = current_nav
+        elif "TOTAL" in account_label.upper():
+            total_nav = current_nav
+
+    primary_account = None
+    for account_label, nav_value in sorted(account_navs.items(), key=lambda kv: kv[1], reverse=True):
+        if "ZERO HASH" not in account_label.upper():
+            primary_account = account_label
+            break
+    if not primary_account and account_navs:
+        primary_account = max(account_navs.items(), key=lambda kv: kv[1])[0]
+
+    nav_sections = {}
+    for section_id, rows in sections.items():
+        if section_id.startswith("tblNAV_") and section_id.endswith("Body"):
+            account_label = html.unescape(section_id[len("tblNAV_"):-len("Body")]).strip()
+            nav_sections[account_label] = rows
+
+    primary_nav_rows = []
+    if primary_account and primary_account in nav_sections:
+        primary_nav_rows = nav_sections[primary_account]
+    elif nav_sections:
+        primary_nav_rows = max(nav_sections.values(), key=lambda rows: len(rows or []))
+
+    nav_breakdown = {
+        "cash_total": 0.0,
+        "stock_total": 0.0,
+        "crypto_total": 0.0,
+        "account_combined_assets": {},
+    }
+    for account_label, rows in nav_sections.items():
+        for row in rows:
+            if len(row) < 5:
+                continue
+            label = (row[0] or "").strip().upper()
+            current_total = parse_portfolio_numeric(row[4] if len(row) > 4 else None)
+            if current_total is None:
+                continue
+            if "TOTAL (COMBINED ASSETS)" in label:
+                nav_breakdown["account_combined_assets"][account_label] = current_total
+
+    for row in primary_nav_rows:
+        if len(row) < 5:
+            continue
+        label = (row[0] or "").strip().upper()
+        current_total = parse_portfolio_numeric(row[4] if len(row) > 4 else None)
+        if current_total is None:
+            continue
+        if label == "CASH":
+            nav_breakdown["cash_total"] += current_total
+        elif label == "STOCK":
+            nav_breakdown["stock_total"] += current_total
+        elif label == "CRYPTO":
+            nav_breakdown["crypto_total"] += current_total
+
+    if total_nav is None:
+        if nav_breakdown["account_combined_assets"]:
+            total_nav = sum(nav_breakdown["account_combined_assets"].values())
+        elif account_navs:
+            total_nav = sum(account_navs.values())
+
+    pos_sections = {}
+    for section_id, rows in sections.items():
+        if section_id.startswith("tblPosAndMTM_") and section_id.endswith("Body"):
+            account_label = html.unescape(section_id[len("tblPosAndMTM_"):-len("Body")]).strip()
+            pos_sections[account_label] = rows
+
+    primary_pos_rows = []
+    if primary_account and primary_account in pos_sections:
+        primary_pos_rows = pos_sections[primary_account]
+    elif pos_sections:
+        primary_pos_rows = max(
+            pos_sections.values(),
+            key=lambda rows: sum(1 for row in rows if is_probable_position_row(row)),
+        )
+
+    aggregated = {}
+    for row in primary_pos_rows:
+        if not is_probable_position_row(row):
+            continue
+        symbol = (row[0] or "").strip().upper()
+        description = row[1] if len(row) > 1 else ""
+        current_qty = parse_portfolio_numeric(row[3] if len(row) > 3 else None)
+        current_market_value = parse_portfolio_numeric(row[7] if len(row) > 7 else None)
+        if current_qty is None and current_market_value is None:
+            continue
+
+        key = symbol
+        if key not in aggregated:
+            aggregated[key] = {
+                "symbol": symbol,
+                "shares": 0.0,
+                "market_value": 0.0,
+                "description": description,
+                "is_etf": classify_is_etf(symbol, description),
+            }
+        item = aggregated[key]
+        if description and not item.get("description"):
+            item["description"] = description
+        if current_qty is not None:
+            item["shares"] += current_qty
+        if current_market_value is not None:
+            item["market_value"] += current_market_value
+
+    holdings = []
+    for item in aggregated.values():
+        market_value = item.get("market_value")
+        pct_net_liq = None
+        if total_nav and total_nav > 0 and market_value is not None:
+            pct_net_liq = (market_value / total_nav) * 100.0
+        holdings.append({
+            "symbol": item["symbol"],
+            "shares": item["shares"],
+            "market_value": market_value,
+            "pct_net_liq": pct_net_liq,
+            "is_etf": bool(item.get("is_etf")),
+        })
+
+    holdings.sort(key=lambda x: (-(x.get("market_value") or 0.0), x.get("symbol") or ""))
+
+    summary = {
+        "statement_date": statement_date,
+        "net_liq_total": total_nav,
+        "cash_total": nav_breakdown["cash_total"],
+        "stock_total": nav_breakdown["stock_total"],
+        "crypto_total": nav_breakdown["crypto_total"],
+        "account_navs": account_navs,
+        "account_combined_assets": nav_breakdown["account_combined_assets"],
+        "primary_account": primary_account,
+        "position_count": len(holdings),
+    }
+    return holdings, summary
+
+
+def find_latest_trusted_ibkr_statement(days_window=14, max_results=10):
+    service, account_email = get_gmail_service()
+    if not service:
+        return {"ok": False, "reason": "gmail_not_connected"}
+
+    query = (
+        "from:interactivebrokers OR from:interactivebrokers.com "
+        "subject:(\"Customized Activity Statement\") has:attachment "
+        f"newer_than:{max(1, min(30, int(days_window)))}d"
+    )
+    try:
+        response = service.users().messages().list(
+            userId="me",
+            maxResults=max_results,
+            q=query,
+        ).execute()
+        messages = response.get("messages") or []
+        if not messages:
+            return {"ok": False, "reason": "no_messages", "query": query, "account_email": account_email}
+
+        for item in messages:
+            message_id = item.get("id")
+            if not message_id:
+                continue
+            message = service.users().messages().get(
+                userId="me",
+                id=message_id,
+                format="full",
+            ).execute()
+            headers = extract_gmail_headers(message)
+            attachments = extract_gmail_attachments(message)
+            trusted = [a for a in attachments if IBKR_TRUSTED_PORTFOLIO_FILENAME_RE.match(a.get("filename") or "")]
+            if not trusted:
+                continue
+            trusted.sort(key=lambda a: (a.get("filename") or "").lower(), reverse=True)
+            chosen = trusted[0]
+            raw_bytes = fetch_gmail_attachment_bytes(service, message_id, chosen)
+            if not raw_bytes:
+                continue
+            text = raw_bytes.decode("utf-8", errors="ignore")
+            if "Positions and Mark-to-Market Profit and Loss" not in text:
+                continue
+            return {
+                "ok": True,
+                "account_email": account_email,
+                "query": query,
+                "message_id": message_id,
+                "subject": headers.get("subject", ""),
+                "from": headers.get("from", ""),
+                "date": headers.get("date", ""),
+                "date_local": (parse_email_datetime(headers.get("date")) or datetime.now(LOCAL_TZ)).isoformat(),
+                "filename": chosen.get("filename"),
+                "html_text": text,
+                "attachment_count": len(attachments),
+            }
+        return {"ok": False, "reason": "no_trusted_attachment_found", "query": query, "account_email": account_email}
+    except:
+        return {"ok": False, "reason": "gmail_error"}
+
+
+def sync_trusted_portfolio_from_gmail(days_window=14):
+    found = find_latest_trusted_ibkr_statement(days_window=days_window, max_results=10)
+    if not found.get("ok"):
+        return found
+
+    holdings, summary = parse_ibkr_activity_statement_html(found.get("html_text") or "")
+    if not holdings:
+        return {
+            "ok": False,
+            "reason": "parse_no_holdings",
+            "filename": found.get("filename"),
+            "subject": found.get("subject"),
+            "date": found.get("date"),
+        }
+
+    effective_date = summary.get("statement_date")
+    replace_trusted_portfolio_snapshot(
+        holdings,
+        effective_date=effective_date,
+        summary=summary,
+        source_type="gmail_trusted_html",
+    )
+
+    return {
+        "ok": True,
+        "filename": found.get("filename"),
+        "subject": found.get("subject"),
+        "message_id": found.get("message_id"),
+        "statement_date": effective_date,
+        "parsed_positions": len(holdings),
+        "net_liq_total": summary.get("net_liq_total"),
+        "cash_total": summary.get("cash_total"),
+        "stock_total": summary.get("stock_total"),
+        "crypto_total": summary.get("crypto_total"),
+    }
+
+
 def get_latest_email_message(query=None):
     service, account_email = get_gmail_service()
     if not service:
@@ -1644,6 +2095,23 @@ def get_latest_trusted_portfolio_snapshot():
     row = cur.fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def build_portfolio_truth_payload():
+    snapshot = get_latest_trusted_portfolio_snapshot() or {}
+    holdings = get_portfolio_holdings(limit=200, trusted_only=True)
+    summary = {}
+    try:
+        summary = json.loads(snapshot.get("summary_json") or "{}")
+    except:
+        summary = {}
+    return {
+        "as_of_local": get_local_now().isoformat(),
+        "trusted_snapshot": snapshot,
+        "trusted_holdings_count": len(holdings),
+        "trusted_holdings": holdings,
+        "summary": summary,
+    }
 
 # ---------------- MEMORY ----------------
 
@@ -8217,6 +8685,83 @@ def debug_gmail():
     )
 
 
+@app.route("/debug/portfolio/truth", methods=["GET"])
+def debug_portfolio_truth():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
+    payload = build_portfolio_truth_payload()
+    return app.response_class(
+        response=json.dumps(payload, indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/debug/portfolio/truth/view", methods=["GET"])
+def debug_portfolio_truth_view():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
+    payload = build_portfolio_truth_payload()
+    summary = payload.get("summary") or {}
+    holdings = payload.get("trusted_holdings") or []
+
+    rows = []
+    for item in holdings:
+        symbol = html.escape(str(item.get("symbol") or ""))
+        mv = item.get("market_value")
+        pct = item.get("pct_net_liq")
+        shares = item.get("shares")
+        is_etf = "yes" if item.get("is_etf") else "no"
+        rows.append(
+            f"<tr><td>{symbol}</td>"
+            f"<td style='text-align:right'>{'' if shares is None else f'{shares:,.6f}'.rstrip('0').rstrip('.')}</td>"
+            f"<td style='text-align:right'>{'' if mv is None else f'{mv:,.2f}'}</td>"
+            f"<td style='text-align:right'>{'' if pct is None else f'{pct:.2f}%'}</td>"
+            f"<td>{is_etf}</td></tr>"
+        )
+
+    html_page = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Portfolio Truth</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; color: #111; }}
+    .grid {{ display:grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin-bottom:20px; }}
+    .card {{ border:1px solid #e4e4e7; border-radius:10px; padding:12px; background:#fafafa; }}
+    .k {{ color:#666; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }}
+    .v {{ font-size:20px; font-weight:600; margin-top:4px; }}
+    table {{ width:100%; border-collapse: collapse; }}
+    th, td {{ border-bottom:1px solid #ececec; padding:8px; font-size:13px; }}
+    th {{ text-align:left; background:#f5f5f5; position: sticky; top: 0; }}
+  </style>
+</head>
+<body>
+  <h2>Jeeves Portfolio Truth</h2>
+  <div class="grid">
+    <div class="card"><div class="k">Statement Date</div><div class="v">{html.escape(str(summary.get("statement_date") or ""))}</div></div>
+    <div class="card"><div class="k">Net Liq Total</div><div class="v">{"" if summary.get("net_liq_total") is None else f"{summary.get('net_liq_total'):,.2f}"}</div></div>
+    <div class="card"><div class="k">Cash Total</div><div class="v">{"" if summary.get("cash_total") is None else f"{summary.get('cash_total'):,.2f}"}</div></div>
+    <div class="card"><div class="k">Stock Total</div><div class="v">{"" if summary.get("stock_total") is None else f"{summary.get('stock_total'):,.2f}"}</div></div>
+    <div class="card"><div class="k">Crypto Total</div><div class="v">{"" if summary.get("crypto_total") is None else f"{summary.get('crypto_total'):,.2f}"}</div></div>
+    <div class="card"><div class="k">Holdings</div><div class="v">{len(holdings)}</div></div>
+  </div>
+  <table>
+    <thead>
+      <tr><th>Symbol</th><th style="text-align:right">Shares</th><th style="text-align:right">Market Value</th><th style="text-align:right">% Net Liq</th><th>ETF</th></tr>
+    </thead>
+    <tbody>
+      {"".join(rows) or "<tr><td colspan='5'>No trusted holdings loaded yet.</td></tr>"}
+    </tbody>
+  </table>
+</body>
+</html>"""
+    return app.response_class(response=html_page, status=200, mimetype="text/html")
+
+
 @app.route("/debug/daily-brief", methods=["GET"])
 def debug_daily_brief():
     denied = require_internal_api_key()
@@ -8225,6 +8770,20 @@ def debug_daily_brief():
     return app.response_class(
         response=json.dumps({"brief": compose_daily_brief(include_debug=True)}, indent=2),
         status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/debug/portfolio/sync", methods=["POST"])
+def debug_portfolio_sync():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
+    days_window = int((request.args.get("days") or request.form.get("days") or "14").strip() or "14")
+    result = sync_trusted_portfolio_from_gmail(days_window=days_window)
+    return app.response_class(
+        response=json.dumps(result, indent=2),
+        status=200 if result.get("ok") else 400,
         mimetype="application/json",
     )
 
@@ -8325,6 +8884,20 @@ def task_poll():
     return app.response_class(
         response=json.dumps(payload, indent=2),
         status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/tasks/portfolio-sync", methods=["GET", "POST"])
+def task_portfolio_sync():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
+    days_window = int((request.args.get("days") or request.form.get("days") or "14").strip() or "14")
+    result = sync_trusted_portfolio_from_gmail(days_window=days_window)
+    return app.response_class(
+        response=json.dumps(result, indent=2),
+        status=200 if result.get("ok") else 400,
         mimetype="application/json",
     )
 
