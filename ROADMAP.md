@@ -48,6 +48,10 @@ Last updated: 2026-04-10
 - 🧪 Scheduled-task delivery safeguard deployed to branch:
   - `/tasks/scheduled-check` now marks daily brief/gratitude as sent only after successful WhatsApp delivery
   - prevents false "already sent" skips when send attempts fail
+- 🧪 Portfolio truth integrity safeguards deployed to branch:
+  - atomic trusted snapshot replacement (`BEGIN IMMEDIATE` + rollback on failure)
+  - trusted payload validation guardrails before replace
+  - integrity report endpoint: `/debug/portfolio/integrity`
 
 1. **Stabilize Messaging Cost + Alert Discipline (Now)**
 - ✅ Keep `Tier 1 only` live-alert behavior hard-enforced (Tier 2 never pushed).
@@ -69,7 +73,7 @@ Last updated: 2026-04-10
 - ✅ Keep contradiction handling as a recorded human-like signal, without automatically decreasing old-memory confidence.
 - ✅ Remove/deprecate inferred `portfolio_profile` memory signals from decision-critical logic.
 - ✅ Keep portfolio truth sourced from `portfolio_holdings` + `portfolio_snapshots`.
-- Add health/integrity checks and safeguards for `portfolio_holdings` + `portfolio_snapshots` update/replace flow.
+- 🧪 Add health/integrity checks and safeguards for `portfolio_holdings` + `portfolio_snapshots` update/replace flow.
 
 3. **A2P Go-Live and SMS Production Validation (Now)**
 - Finish campaign approval flow.

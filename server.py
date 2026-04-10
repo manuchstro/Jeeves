@@ -904,16 +904,7 @@ def normalize_portfolio_positions(symbols):
     return positions
 
 
-def upsert_portfolio_symbols(symbols, source_text=None, source_type="manual", trusted=False, effective_date=None):
-    if not symbols:
-        return
-
-    positions = normalize_portfolio_positions(symbols)
-    if not positions:
-        return
-
-    conn = get_conn()
-    cur = conn.cursor()
+def _upsert_portfolio_symbols_with_cursor(cur, positions, source_text=None, source_type="manual", trusted=False, effective_date=None):
     for position in positions:
         symbol = position["symbol"]
         cur.execute(
@@ -957,15 +948,31 @@ def upsert_portfolio_symbols(symbols, source_text=None, source_type="manual", tr
                 position.get("is_etf"),
             ),
         )
+
+
+def upsert_portfolio_symbols(symbols, source_text=None, source_type="manual", trusted=False, effective_date=None):
+    if not symbols:
+        return
+
+    positions = normalize_portfolio_positions(symbols)
+    if not positions:
+        return
+
+    conn = get_conn()
+    cur = conn.cursor()
+    _upsert_portfolio_symbols_with_cursor(
+        cur,
+        positions,
+        source_text=source_text,
+        source_type=source_type,
+        trusted=trusted,
+        effective_date=effective_date,
+    )
     conn.commit()
     conn.close()
 
 
-def record_portfolio_snapshot(symbols, source_type="manual", trusted=False, effective_date=None, summary=None):
-    if not symbols:
-        return
-    conn = get_conn()
-    cur = conn.cursor()
+def _record_portfolio_snapshot_with_cursor(cur, symbols, source_type="manual", trusted=False, effective_date=None, summary=None):
     cur.execute(
         """
         INSERT INTO portfolio_snapshots (source_type, trusted, effective_date, holdings_json, summary_json)
@@ -979,31 +986,100 @@ def record_portfolio_snapshot(symbols, source_type="manual", trusted=False, effe
             json.dumps(summary or {}),
         ),
     )
-    conn.commit()
-    conn.close()
 
 
-def replace_trusted_portfolio_snapshot(symbols, effective_date=None, summary=None, source_type="gmail"):
+def record_portfolio_snapshot(symbols, source_type="manual", trusted=False, effective_date=None, summary=None):
+    if not symbols:
+        return
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("DELETE FROM portfolio_holdings WHERE trusted = 1")
-    conn.commit()
-    conn.close()
-
-    upsert_portfolio_symbols(
-        symbols,
-        source_text=json.dumps(summary or {}),
-        source_type=source_type,
-        trusted=True,
-        effective_date=effective_date,
-    )
-    record_portfolio_snapshot(
+    _record_portfolio_snapshot_with_cursor(
+        cur,
         symbols,
         source_type=source_type,
-        trusted=True,
+        trusted=trusted,
         effective_date=effective_date,
         summary=summary,
     )
+    conn.commit()
+    conn.close()
+
+
+def validate_trusted_portfolio_payload(symbols, summary=None):
+    positions = normalize_portfolio_positions(symbols or [])
+    if not positions:
+        return {"ok": False, "reason": "empty_positions"}
+
+    symbols_seen = set()
+    for item in positions:
+        symbol = (item.get("symbol") or "").upper().strip()
+        if not symbol:
+            return {"ok": False, "reason": "invalid_symbol"}
+        if symbol in symbols_seen:
+            return {"ok": False, "reason": "duplicate_symbol", "symbol": symbol}
+        symbols_seen.add(symbol)
+        mv = item.get("market_value")
+        pct = item.get("pct_net_liq")
+        if mv is not None and mv < 0:
+            return {"ok": False, "reason": "negative_market_value", "symbol": symbol}
+        if pct is not None and pct < 0:
+            return {"ok": False, "reason": "negative_pct_net_liq", "symbol": symbol}
+
+    summary = summary or {}
+    net_liq = parse_portfolio_numeric(summary.get("net_liq_total"))
+    sum_market_value = sum((item.get("market_value") or 0.0) for item in positions)
+    if net_liq is not None and net_liq > 0:
+        # Holdings exclude cash/dividend accruals, so allow headroom.
+        if sum_market_value > (net_liq * 1.35):
+            return {
+                "ok": False,
+                "reason": "market_value_exceeds_net_liq_guardrail",
+                "sum_market_value": round(sum_market_value, 2),
+                "net_liq_total": round(net_liq, 2),
+            }
+
+    return {
+        "ok": True,
+        "positions": positions,
+        "position_count": len(positions),
+        "sum_market_value": round(sum_market_value, 2),
+        "net_liq_total": None if net_liq is None else round(net_liq, 2),
+    }
+
+
+def replace_trusted_portfolio_snapshot(symbols, effective_date=None, summary=None, source_type="gmail"):
+    validation = validate_trusted_portfolio_payload(symbols, summary=summary)
+    if not validation.get("ok"):
+        raise ValueError(f"trusted_portfolio_validation_failed:{validation.get('reason')}")
+
+    positions = validation.get("positions") or []
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute("DELETE FROM portfolio_holdings WHERE trusted = 1")
+        _upsert_portfolio_symbols_with_cursor(
+            cur,
+            positions,
+            source_text=json.dumps(summary or {}),
+            source_type=source_type,
+            trusted=True,
+            effective_date=effective_date,
+        )
+        _record_portfolio_snapshot_with_cursor(
+            cur,
+            positions,
+            source_type=source_type,
+            trusted=True,
+            effective_date=effective_date,
+            summary=summary,
+        )
+        conn.commit()
+    except:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def get_portfolio_holdings(limit=8, trusted_only=False):
@@ -1598,12 +1674,21 @@ def sync_trusted_portfolio_from_gmail(days_window=14):
         }
 
     effective_date = summary.get("statement_date")
-    replace_trusted_portfolio_snapshot(
-        holdings,
-        effective_date=effective_date,
-        summary=summary,
-        source_type="gmail_trusted_html",
-    )
+    try:
+        replace_trusted_portfolio_snapshot(
+            holdings,
+            effective_date=effective_date,
+            summary=summary,
+            source_type="gmail_trusted_html",
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": "trusted_snapshot_replace_failed",
+            "error": str(exc),
+            "filename": found.get("filename"),
+            "statement_date": effective_date,
+        }
 
     return {
         "ok": True,
@@ -2096,6 +2181,47 @@ def build_portfolio_truth_payload():
         "trusted_holdings_count": len(holdings),
         "trusted_holdings": holdings,
         "summary": summary,
+    }
+
+
+def build_portfolio_integrity_report():
+    payload = build_portfolio_truth_payload()
+    snapshot = payload.get("trusted_snapshot") or {}
+    holdings = payload.get("trusted_holdings") or []
+    summary = payload.get("summary") or {}
+    issues = []
+
+    if not snapshot:
+        issues.append("missing_trusted_snapshot")
+    if not holdings:
+        issues.append("missing_trusted_holdings")
+
+    symbols = [str(item.get("symbol") or "").upper().strip() for item in holdings]
+    if any(not s for s in symbols):
+        issues.append("blank_symbol_in_holdings")
+    if len(set(symbols)) != len(symbols):
+        issues.append("duplicate_symbols_in_holdings")
+
+    ranks = [int(item.get("conviction_rank") or 0) for item in holdings if item.get("conviction_rank") is not None]
+    if ranks:
+        expected = list(range(1, len(ranks) + 1))
+        if sorted(ranks) != expected:
+            issues.append("conviction_rank_gap_or_duplicate")
+
+    net_liq = parse_portfolio_numeric(summary.get("net_liq_total"))
+    total_mv = sum((parse_portfolio_numeric(item.get("market_value")) or 0.0) for item in holdings)
+    if net_liq is not None and net_liq > 0 and total_mv > (net_liq * 1.35):
+        issues.append("sum_market_value_exceeds_guardrail")
+
+    return {
+        "ok": len(issues) == 0,
+        "checked_at": get_local_now().isoformat(),
+        "issues": issues,
+        "trusted_holdings_count": len(holdings),
+        "sum_market_value": round(total_mv, 2),
+        "net_liq_total": net_liq,
+        "effective_date": snapshot.get("effective_date"),
+        "source_type": snapshot.get("source_type"),
     }
 
 # ---------------- MEMORY ----------------
@@ -8755,6 +8881,19 @@ def debug_portfolio_truth_view():
 </body>
 </html>"""
     return app.response_class(response=html_page, status=200, mimetype="text/html")
+
+
+@app.route("/debug/portfolio/integrity", methods=["GET"])
+def debug_portfolio_integrity():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
+    report = build_portfolio_integrity_report()
+    return app.response_class(
+        response=json.dumps(report, indent=2),
+        status=200 if report.get("ok") else 400,
+        mimetype="application/json",
+    )
 
 
 @app.route("/debug/daily-brief", methods=["GET"])
