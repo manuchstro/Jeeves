@@ -8743,6 +8743,100 @@ def interpret_market_data_question(text):
         "tickers": tickers,
     }
 
+
+def interpret_calendar_request(text):
+    t = (text or "").strip().lower()
+    if not t:
+        return {"intent": "none"}
+
+    calendar_signals = [
+        "calendar",
+        "schedule",
+        "event",
+        "events",
+        "lecture",
+        "lectures",
+        "class",
+        "classes",
+        "meeting",
+        "meetings",
+    ]
+    has_calendar_context = any(signal in t for signal in calendar_signals)
+    if not has_calendar_context:
+        return {"intent": "none"}
+
+    window = "today"
+    if "tomorrow" in t:
+        window = "tomorrow"
+    elif "this week" in t or "next 7" in t or "next week" in t:
+        window = "week"
+
+    lecture_only = any(signal in t for signal in ["lecture", "lectures", "class", "classes", "seminar"])
+    return {
+        "intent": "calendar_query",
+        "window": window,
+        "lecture_only": lecture_only,
+    }
+
+
+def build_calendar_query_reply(request_info):
+    context = get_calendar_context_snapshot()
+    events = context.get("events") or []
+    if not events:
+        return "I don't see any calendar events in the current context window."
+
+    now_local = get_local_now()
+    today = now_local.date()
+
+    window = (request_info or {}).get("window") or "today"
+    if window == "tomorrow":
+        target_days = {str(today + timedelta(days=1))}
+        label = "tomorrow"
+    elif window == "week":
+        target_days = {str(today + timedelta(days=offset)) for offset in range(0, 7)}
+        label = "the next 7 days"
+    else:
+        target_days = {str(today)}
+        label = "today"
+
+    lecture_only = bool((request_info or {}).get("lecture_only"))
+    lecture_terms = ("lecture", "class", "seminar")
+
+    filtered = []
+    for event in events:
+        start_local = str(event.get("start_local") or "").strip()
+        event_day = start_local[:10] if len(start_local) >= 10 else ""
+        if event_day not in target_days:
+            continue
+        title = str(event.get("title") or "(untitled)")
+        if lecture_only and not any(term in title.lower() for term in lecture_terms):
+            continue
+        filtered.append(event)
+
+    filtered.sort(key=lambda item: str(item.get("start_local") or ""))
+
+    if lecture_only:
+        if not filtered:
+            return f"I don't see any lecture/class events in your calendar for {label}."
+        lines = []
+        for event in filtered[:8]:
+            lines.append(f"{event.get('start_local','')} {event.get('title','(untitled)')}")
+        return f"I found {len(filtered)} lecture/class event(s) for {label}: " + " | ".join(lines)
+
+    if not filtered:
+        return f"I don't see any calendar events for {label}."
+
+    lines = []
+    for event in filtered[:10]:
+        start_local = str(event.get("start_local") or "").strip()
+        end_local = str(event.get("end_local") or "").strip()
+        title = str(event.get("title") or "(untitled)").strip()
+        if start_local or end_local:
+            lines.append(f"{start_local} to {end_local}: {title}")
+        else:
+            lines.append(title)
+    return f"You have {len(filtered)} event(s) for {label}: " + " | ".join(lines)
+
 # ---------------- MASSIVE ----------------
 
 def get_massive_watchlist_snapshot(tickers):
@@ -8907,6 +9001,7 @@ def format_ticker_quote_reply(tickers, snapshots):
 def route(text):
     t = text.lower()
     market_question = interpret_market_data_question(text)
+    calendar_request = interpret_calendar_request(text)
     expand_references = interpret_event_references(text)
     expand_reference = interpret_event_reference(text)
     email_request = {"intent": "none", "query_hint": "", "days_window": 7}
@@ -8952,6 +9047,9 @@ def route(text):
 
     if is_full_article_request(text):
         return ("full_article_request", None)
+
+    if calendar_request["intent"] != "none":
+        return ("calendar_query", calendar_request)
 
     if len(expand_references) >= 2:
         return ("event_expand_multi", expand_references)
@@ -9154,6 +9252,9 @@ def build_reply_for_intent(intent, value, msg, memory_result=None):
     if intent == "news":
         out = get_news(value)
         return out if out else "N/A"
+
+    if intent == "calendar_query":
+        return build_calendar_query_reply(value)
 
     if intent == "email_request":
         query_hint = value.get("query_hint") or ""
