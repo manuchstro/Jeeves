@@ -8913,12 +8913,11 @@ def route(text):
     email_gate_patterns = [
         r"\bemail(s)?\b",
         r"\binbox\b",
-        r"\bmail\b",
-        r"\bmessage(s)?\b",
-        r"\bdid\b.+\bsend\b",
-        r"\bfrom\s+[a-z0-9._%+\-@ ]+",
+        r"\bgmail\b",
         r"\bibkr\b",
-        r"\binteractive brokers\b",
+        r"\binteractive ?brokers\b",
+        r"\binteractivebrokers\b",
+        r"\b(mailbox|mail)\b",
     ]
     watchlist_gate_patterns = [
         r"\bwatchlist\b",
