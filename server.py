@@ -74,6 +74,11 @@ GRATITUDE_MINUTE = 15
 JOURNAL_RESPONSE_WINDOW_HOURS = 12
 OPEN_METEO_LAT = os.environ.get("OPEN_METEO_LAT", "").strip()
 OPEN_METEO_LON = os.environ.get("OPEN_METEO_LON", "").strip()
+LOCATION_LABEL = os.environ.get("LOCATION_LABEL", "").strip()
+CALENDAR_CONTEXT_URL = os.environ.get("CALENDAR_CONTEXT_URL", "").strip()
+CALENDAR_CONTEXT_BEARER = os.environ.get("CALENDAR_CONTEXT_BEARER", "").strip()
+SLEEP_CONTEXT_URL = os.environ.get("SLEEP_CONTEXT_URL", "").strip()
+SLEEP_CONTEXT_BEARER = os.environ.get("SLEEP_CONTEXT_BEARER", "").strip()
 MEMORY_CONFIDENCE_MAX = 0.99
 MEMORY_CORRELATION_THRESHOLD = 0.8
 MEMORY_DELETE_THRESHOLD = 0.10
@@ -544,6 +549,21 @@ def init_db():
         summary_text TEXT,
         source TEXT NOT NULL DEFAULT 'health',
         confidence REAL NOT NULL DEFAULT 0.6,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS inbox_daily_context (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        local_date TEXT NOT NULL UNIQUE,
+        inbox_count INTEGER NOT NULL DEFAULT 0,
+        unread_count INTEGER NOT NULL DEFAULT 0,
+        busy_score REAL NOT NULL DEFAULT 0.0,
+        summary_text TEXT,
+        source TEXT NOT NULL DEFAULT 'gmail',
+        confidence REAL NOT NULL DEFAULT 0.7,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
@@ -3140,6 +3160,160 @@ def get_sleep_daily_context(local_date=None):
     return dict(row) if row else None
 
 
+def upsert_inbox_daily_context(local_date, payload):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO inbox_daily_context (
+            local_date, inbox_count, unread_count, busy_score, summary_text, source, confidence, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(local_date) DO UPDATE SET
+            inbox_count = excluded.inbox_count,
+            unread_count = excluded.unread_count,
+            busy_score = excluded.busy_score,
+            summary_text = excluded.summary_text,
+            source = excluded.source,
+            confidence = excluded.confidence,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            local_date,
+            int(payload.get("inbox_count") or 0),
+            int(payload.get("unread_count") or 0),
+            float(payload.get("busy_score") or 0.0),
+            (payload.get("summary_text") or "").strip(),
+            payload.get("source", "gmail"),
+            float(payload.get("confidence") or 0.7),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_inbox_daily_context(local_date=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT *
+        FROM inbox_daily_context
+        WHERE local_date = ?
+        LIMIT 1
+        """,
+        (local_date or get_local_date_string(),),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def compute_relative_inbox_busy_score(inbox_count, unread_count, lookback_days=14):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT inbox_count, unread_count
+        FROM inbox_daily_context
+        WHERE local_date >= date('now', ?)
+        ORDER BY local_date DESC
+        """,
+        (f"-{max(3, int(lookback_days))} days",),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+
+    samples = [int((item.get("inbox_count") or 0) + (item.get("unread_count") or 0) * 1.5) for item in rows]
+    current = int(inbox_count or 0) + int((unread_count or 0) * 1.5)
+    if not samples:
+        # cold start heuristic
+        return clamp01(current / 30.0)
+    less_or_equal = sum(1 for value in samples if value <= current)
+    percentile = less_or_equal / max(1, len(samples))
+    return clamp01(percentile)
+
+
+def fetch_gmail_inbox_daily_context(local_date=None):
+    service, account_email = get_gmail_service()
+    if not service:
+        return None
+    try:
+        day = local_date or get_local_date_string()
+        inbox_query = "in:inbox newer_than:1d"
+        unread_query = "in:inbox is:unread newer_than:1d"
+        inbox_resp = service.users().messages().list(userId="me", maxResults=100, q=inbox_query).execute()
+        unread_resp = service.users().messages().list(userId="me", maxResults=100, q=unread_query).execute()
+        inbox_count = len(inbox_resp.get("messages") or [])
+        unread_count = len(unread_resp.get("messages") or [])
+        busy_score = compute_relative_inbox_busy_score(inbox_count, unread_count, lookback_days=14)
+        payload = {
+            "inbox_count": inbox_count,
+            "unread_count": unread_count,
+            "busy_score": busy_score,
+            "summary_text": f"inbox {inbox_count}, unread {unread_count}, relative load {round(busy_score, 2)}",
+            "source": f"gmail:{account_email or 'me'}",
+            "confidence": 0.72,
+        }
+        upsert_inbox_daily_context(day, payload)
+        return payload
+    except:
+        return None
+
+
+def fetch_external_context_payload(url, bearer=""):
+    if not url:
+        return None
+    try:
+        headers = {}
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
+        response = requests.get(url, headers=headers, timeout=8)
+        if response.status_code != 200:
+            return None
+        payload = response.json()
+        return payload if isinstance(payload, dict) else None
+    except:
+        return None
+
+
+def refresh_calendar_context_from_provider(local_date=None):
+    payload = fetch_external_context_payload(CALENDAR_CONTEXT_URL, CALENDAR_CONTEXT_BEARER)
+    if not payload:
+        return None
+    day = (payload.get("local_date") or local_date or get_local_date_string()).strip()
+    normalized = {
+        "busy_score": payload.get("busy_score"),
+        "event_count": payload.get("event_count"),
+        "deep_work_blocks": payload.get("deep_work_blocks"),
+        "stress_windows": payload.get("stress_windows"),
+        "summary_text": payload.get("summary_text") or "",
+        "source": payload.get("source") or "calendar_provider",
+        "confidence": payload.get("confidence") or 0.7,
+    }
+    upsert_calendar_daily_context(day, normalized)
+    return normalized
+
+
+def refresh_sleep_context_from_provider(local_date=None):
+    payload = fetch_external_context_payload(SLEEP_CONTEXT_URL, SLEEP_CONTEXT_BEARER)
+    if not payload:
+        return None
+    day = (payload.get("local_date") or local_date or get_local_date_string()).strip()
+    normalized = {
+        "sleep_hours": payload.get("sleep_hours"),
+        "sleep_quality": payload.get("sleep_quality"),
+        "steps": payload.get("steps"),
+        "resting_hr": payload.get("resting_hr"),
+        "fatigue_score": payload.get("fatigue_score"),
+        "summary_text": payload.get("summary_text") or "",
+        "source": payload.get("source") or "sleep_provider",
+        "confidence": payload.get("confidence") or 0.7,
+    }
+    upsert_sleep_daily_context(day, normalized)
+    return normalized
+
+
 def mark_scheduled_task_run(task_key, local_date=None):
     conn = get_conn()
     cur = conn.cursor()
@@ -4906,13 +5080,14 @@ def get_weather_context_snapshot():
     return {
         "available": True,
         "status": "connected",
-        "summary": f"{label}, {stored.get('temperature_c')}C, precip {stored.get('precipitation_mm')}mm",
+        "summary": f"{(LOCATION_LABEL + ': ') if LOCATION_LABEL else ''}{label}, {stored.get('temperature_c')}C, precip {stored.get('precipitation_mm')}mm",
         "features": {
             "temperature_c": stored.get("temperature_c"),
             "precipitation_mm": stored.get("precipitation_mm"),
             "cloud_cover_pct": stored.get("cloud_cover_pct"),
             "humidity_pct": stored.get("humidity_pct"),
             "weather_label": stored.get("weather_label"),
+            "location_label": LOCATION_LABEL or None,
             "confidence": stored.get("confidence"),
         },
     }
@@ -4963,11 +5138,47 @@ def get_calendar_context_snapshot():
     }
 
 
+def get_inbox_context_snapshot():
+    local_date = get_local_date_string()
+    stored = get_inbox_daily_context(local_date=local_date)
+    if not stored:
+        fetched = fetch_gmail_inbox_daily_context(local_date=local_date)
+        if fetched:
+            stored = get_inbox_daily_context(local_date=local_date)
+    if not stored:
+        return {
+            "available": False,
+            "status": "not_connected",
+            "summary": "",
+        }
+    return {
+        "available": True,
+        "status": "connected",
+        "summary": stored.get("summary_text") or f"inbox {stored.get('inbox_count')}, unread {stored.get('unread_count')}",
+        "features": {
+            "inbox_count": stored.get("inbox_count"),
+            "unread_count": stored.get("unread_count"),
+            "busy_score": stored.get("busy_score"),
+            "confidence": stored.get("confidence"),
+        },
+    }
+
+
+def get_location_context_snapshot():
+    if LOCATION_LABEL:
+        return {"available": True, "status": "configured", "summary": LOCATION_LABEL}
+    if OPEN_METEO_LAT and OPEN_METEO_LON:
+        return {"available": True, "status": "configured", "summary": f"{OPEN_METEO_LAT},{OPEN_METEO_LON}"}
+    return {"available": False, "status": "not_connected", "summary": ""}
+
+
 def build_journal_context_snapshot():
     return {
         "weather": get_weather_context_snapshot(),
         "sleep": get_sleep_context_snapshot(),
         "calendar": get_calendar_context_snapshot(),
+        "inbox": get_inbox_context_snapshot(),
+        "location": get_location_context_snapshot(),
     }
 
 
@@ -5055,10 +5266,12 @@ def build_tone_vector(journal_analysis, context_snapshot):
     weather = (context_snapshot or {}).get("weather", {})
     sleep = (context_snapshot or {}).get("sleep", {})
     calendar = (context_snapshot or {}).get("calendar", {})
+    inbox = (context_snapshot or {}).get("inbox", {})
 
     weather_features = weather.get("features") or {}
     sleep_features = sleep.get("features") or {}
     calendar_features = calendar.get("features") or {}
+    inbox_features = inbox.get("features") or {}
 
     stress_level = (journal_analysis or {}).get("stress", "normal").lower()
     friction = (journal_analysis or {}).get("friction", "low").lower()
@@ -5087,7 +5300,9 @@ def build_tone_vector(journal_analysis, context_snapshot):
     energy_signal = ((1.0 - memory_profile["energy"]["confidence"]) * energy_signal) + (memory_profile["energy"]["confidence"] * memory_energy)
     outlook_signal = ((1.0 - memory_profile["outlook"]["confidence"]) * outlook_signal) + (memory_profile["outlook"]["confidence"] * memory_outlook)
 
-    busy_score = clamp01((calendar_features.get("busy_score") or 0.0))
+    calendar_busy = clamp01((calendar_features.get("busy_score") or 0.0))
+    inbox_busy = clamp01((inbox_features.get("busy_score") or 0.0))
+    busy_score = clamp01(max(calendar_busy, inbox_busy))
     fatigue_score = clamp01((sleep_features.get("fatigue_score") or 0.5))
     market_stress = compute_market_stress_signal()
 
@@ -5134,6 +5349,8 @@ def build_tone_vector(journal_analysis, context_snapshot):
         "style": style,
         "signals": {
             "busy_score": round(busy_score, 3),
+            "calendar_busy": round(calendar_busy, 3),
+            "inbox_busy": round(inbox_busy, 3),
             "fatigue_score": round(fatigue_score, 3),
             "market_stress": round(market_stress, 3),
             "stress_signal": round(stress_signal, 3),
@@ -9349,6 +9566,105 @@ def debug_context_weather_refresh():
     row = get_weather_daily_context(local_date=local_date)
     return app.response_class(
         response=json.dumps({"ok": bool(payload or row), "local_date": local_date, "row": row}, indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/debug/context/inbox/refresh", methods=["POST"])
+def debug_context_inbox_refresh():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
+    local_date = get_local_date_string()
+    payload = fetch_gmail_inbox_daily_context(local_date=local_date)
+    row = get_inbox_daily_context(local_date=local_date)
+    return app.response_class(
+        response=json.dumps({"ok": bool(payload or row), "local_date": local_date, "row": row}, indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/debug/context/calendar/refresh", methods=["POST"])
+def debug_context_calendar_refresh():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
+    local_date = get_local_date_string()
+    payload = refresh_calendar_context_from_provider(local_date=local_date)
+    row = get_calendar_daily_context(local_date=local_date)
+    status = 200 if (payload or row) else 400
+    return app.response_class(
+        response=json.dumps(
+            {
+                "ok": bool(payload or row),
+                "local_date": local_date,
+                "configured": bool(CALENDAR_CONTEXT_URL),
+                "row": row,
+            },
+            indent=2,
+        ),
+        status=status,
+        mimetype="application/json",
+    )
+
+
+@app.route("/debug/context/sleep/refresh", methods=["POST"])
+def debug_context_sleep_refresh():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
+    local_date = get_local_date_string()
+    payload = refresh_sleep_context_from_provider(local_date=local_date)
+    row = get_sleep_daily_context(local_date=local_date)
+    status = 200 if (payload or row) else 400
+    return app.response_class(
+        response=json.dumps(
+            {
+                "ok": bool(payload or row),
+                "local_date": local_date,
+                "configured": bool(SLEEP_CONTEXT_URL),
+                "row": row,
+            },
+            indent=2,
+        ),
+        status=status,
+        mimetype="application/json",
+    )
+
+
+@app.route("/tasks/context-refresh", methods=["GET", "POST"])
+def task_context_refresh():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
+    local_date = get_local_date_string()
+    weather_payload = fetch_open_meteo_daily_context(local_date=local_date)
+    inbox_payload = fetch_gmail_inbox_daily_context(local_date=local_date)
+    calendar_payload = refresh_calendar_context_from_provider(local_date=local_date)
+    sleep_payload = refresh_sleep_context_from_provider(local_date=local_date)
+    snapshot = build_journal_context_snapshot()
+    return app.response_class(
+        response=json.dumps(
+            {
+                "ok": True,
+                "local_date": local_date,
+                "weather_refreshed": bool(weather_payload),
+                "inbox_refreshed": bool(inbox_payload),
+                "calendar_refreshed": bool(calendar_payload),
+                "sleep_refreshed": bool(sleep_payload),
+                "configured": {
+                    "open_meteo": bool(OPEN_METEO_LAT and OPEN_METEO_LON),
+                    "calendar_provider": bool(CALENDAR_CONTEXT_URL),
+                    "sleep_provider": bool(SLEEP_CONTEXT_URL),
+                    "gmail_connected": bool(get_gmail_service()[0]),
+                },
+                "context_snapshot": snapshot,
+                "tone_vector": build_tone_vector({}, snapshot),
+            },
+            indent=2,
+        ),
         status=200,
         mimetype="application/json",
     )
