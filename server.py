@@ -5182,6 +5182,17 @@ def build_journal_context_snapshot():
     }
 
 
+def build_tone_context_snapshot(context_snapshot):
+    ctx = context_snapshot or {}
+    # Location is intentionally excluded from tone-driving context.
+    return {
+        "weather": ctx.get("weather", {}),
+        "sleep": ctx.get("sleep", {}),
+        "calendar": ctx.get("calendar", {}),
+        "inbox": ctx.get("inbox", {}),
+    }
+
+
 def clamp01(value):
     return max(0.0, min(1.0, float(value)))
 
@@ -5389,7 +5400,8 @@ def fallback_journal_response_decision(journal_analysis):
 
 
 def decide_journal_response(text, journal_analysis, context_snapshot):
-    tone_vector = build_tone_vector(journal_analysis, context_snapshot)
+    tone_context = build_tone_context_snapshot(context_snapshot)
+    tone_vector = build_tone_vector(journal_analysis, tone_context)
     tone_guardrail = build_tone_guardrail_text(tone_vector)
     prompt = f"""
 Decide whether Jeeves should reply to this journal/gratitude response.
@@ -5416,7 +5428,7 @@ Journal analysis:
 {json.dumps(journal_analysis, ensure_ascii=True)}
 
 Context:
-{json.dumps(context_snapshot, ensure_ascii=True)}
+{json.dumps(tone_context, ensure_ascii=True)}
 
 Tone vector:
 {json.dumps(tone_vector, ensure_ascii=True)}
