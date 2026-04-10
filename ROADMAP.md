@@ -77,6 +77,16 @@ Last updated: 2026-04-09
 - Use that trusted portfolio everywhere `P` scoring and portfolio logic are used.
 - ✅ Parser + trusted-source gate deployed and verified live on Railway (`/tasks/portfolio-sync`, `/debug/portfolio/truth`, `/debug/portfolio/truth/view`).
 
+4.1 **P Query Expansion Mode (Future / Optional)**
+- Add optional `P` query mode switch:
+  - default: `top10` trusted holdings (current behavior)
+  - optional: `all` trusted holdings (for broader scan)
+- Keep `top10` as default for live polling quality; evaluate `all` mode after API refresh cycle and query-quality benchmarking.
+- Add explicit debug fields to preview:
+  - `p_symbols_used`
+  - `p_symbols_count`
+  - `p_query_mode`
+
 5. **Locked Decisions and Behavior Guards (Immediate After IBKR)**
 - Keep both market providers (`Massive` + `TwelveData`) in place.
 - Journal-lock behavior must remain unlimited until your first reply, even if alerts are sent meanwhile.
