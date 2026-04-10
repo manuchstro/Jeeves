@@ -4161,7 +4161,9 @@ def format_memory_context(user_text):
             lines.append(f"- {item['category']}: {item['value']}")
 
     calendar_ctx = get_calendar_context_snapshot()
-    calendar_events = (calendar_ctx.get("events") or [])[:10]
+    # Keep a larger window in prompt context so Jeeves can answer
+    # near-history and next-week calendar questions.
+    calendar_events = (calendar_ctx.get("events") or [])[:40]
     if calendar_events:
         lines.append("Calendar events:")
         for event in calendar_events:
@@ -5098,7 +5100,7 @@ def get_calendar_context_snapshot():
             "stress_windows": stored.get("stress_windows"),
             "confidence": stored.get("confidence"),
         },
-        "events": events[:20],
+        "events": events[:100],
     }
 
 
