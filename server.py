@@ -80,6 +80,7 @@ CALENDAR_CONTEXT_URL = os.environ.get("CALENDAR_CONTEXT_URL", "").strip()
 CALENDAR_CONTEXT_BEARER = os.environ.get("CALENDAR_CONTEXT_BEARER", "").strip()
 SLEEP_CONTEXT_URL = os.environ.get("SLEEP_CONTEXT_URL", "").strip()
 SLEEP_CONTEXT_BEARER = os.environ.get("SLEEP_CONTEXT_BEARER", "").strip()
+LOCATION_CONTEXT_STALE_MINUTES = max(10, int(os.environ.get("LOCATION_CONTEXT_STALE_MINUTES", "180")))
 MEMORY_CONFIDENCE_MAX = 0.99
 MEMORY_CORRELATION_THRESHOLD = 0.8
 MEMORY_DELETE_THRESHOLD = 0.10
@@ -565,6 +566,20 @@ def init_db():
         summary_text TEXT,
         source TEXT NOT NULL DEFAULT 'gmail',
         confidence REAL NOT NULL DEFAULT 0.7,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS latest_location_context (
+        singleton_key INTEGER PRIMARY KEY CHECK (singleton_key = 1),
+        latitude REAL NOT NULL,
+        longitude REAL NOT NULL,
+        accuracy_m REAL,
+        label TEXT,
+        source TEXT NOT NULL DEFAULT 'ingest',
+        captured_at TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
@@ -2930,6 +2945,77 @@ def get_local_date_string(dt=None):
     return (dt or get_local_now()).strftime("%Y-%m-%d")
 
 
+def upsert_latest_location_context(latitude, longitude, accuracy_m=None, label=None, source="ingest", captured_at=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO latest_location_context (
+            singleton_key, latitude, longitude, accuracy_m, label, source, captured_at, updated_at
+        )
+        VALUES (1, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(singleton_key) DO UPDATE SET
+            latitude = excluded.latitude,
+            longitude = excluded.longitude,
+            accuracy_m = excluded.accuracy_m,
+            label = excluded.label,
+            source = excluded.source,
+            captured_at = excluded.captured_at,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (float(latitude), float(longitude), accuracy_m, (label or "").strip() or None, (source or "ingest").strip(), captured_at),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_latest_location_context():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM latest_location_context WHERE singleton_key = 1 LIMIT 1")
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def is_location_context_fresh(row, max_age_minutes=LOCATION_CONTEXT_STALE_MINUTES):
+    if not row:
+        return False
+    stamp = row.get("updated_at") or row.get("created_at")
+    if not stamp:
+        return True
+    try:
+        updated = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")
+        age = datetime.utcnow() - updated
+        return age.total_seconds() <= float(max_age_minutes) * 60.0
+    except:
+        return True
+
+
+def get_weather_coordinates():
+    latest = get_latest_location_context()
+    if latest and is_location_context_fresh(latest):
+        try:
+            lat = float(latest.get("latitude"))
+            lon = float(latest.get("longitude"))
+            label = (latest.get("label") or LOCATION_LABEL or "").strip() or None
+            return {"latitude": lat, "longitude": lon, "label": label, "source": "ingested_location"}
+        except:
+            pass
+
+    if OPEN_METEO_LAT and OPEN_METEO_LON:
+        try:
+            return {
+                "latitude": float(OPEN_METEO_LAT),
+                "longitude": float(OPEN_METEO_LON),
+                "label": LOCATION_LABEL or None,
+                "source": "env_location",
+            }
+        except:
+            return None
+    return None
+
+
 def weather_code_to_label(code):
     mapping = {
         0: "clear",
@@ -3010,12 +3096,13 @@ def get_weather_daily_context(local_date=None):
 
 
 def fetch_open_meteo_daily_context(local_date=None):
-    if not OPEN_METEO_LAT or not OPEN_METEO_LON:
+    coords = get_weather_coordinates()
+    if not coords:
         return None
     try:
         params = {
-            "latitude": OPEN_METEO_LAT,
-            "longitude": OPEN_METEO_LON,
+            "latitude": coords["latitude"],
+            "longitude": coords["longitude"],
             "hourly": "temperature_2m,precipitation,cloud_cover,relative_humidity_2m,weather_code",
             "timezone": "America/Los_Angeles",
             "forecast_days": 1,
@@ -3048,6 +3135,8 @@ def fetch_open_meteo_daily_context(local_date=None):
             "weather_label": weather_code_to_label(dominant_code),
             "source": "open-meteo",
             "confidence": 0.78,
+            "location_label": coords.get("label"),
+            "location_source": coords.get("source"),
         }
         upsert_weather_daily_context(local_date or get_local_date_string(), payload)
         return payload
@@ -5176,6 +5265,14 @@ def get_inbox_context_snapshot():
 
 
 def get_location_context_snapshot():
+    latest = get_latest_location_context()
+    if latest:
+        lat = latest.get("latitude")
+        lon = latest.get("longitude")
+        label = (latest.get("label") or LOCATION_LABEL or "").strip()
+        summary = label if label else f"{lat},{lon}"
+        status = "connected" if is_location_context_fresh(latest) else "stale"
+        return {"available": True, "status": status, "summary": summary}
     if LOCATION_LABEL:
         return {"available": True, "status": "configured", "summary": LOCATION_LABEL}
     if OPEN_METEO_LAT and OPEN_METEO_LON:
@@ -9674,6 +9771,83 @@ def debug_context_sleep_refresh():
     )
 
 
+@app.route("/tasks/context-ingest/location", methods=["POST"])
+def task_context_ingest_location():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
+
+    payload = request.get_json(silent=True) or {}
+    coords = payload.get("coords") if isinstance(payload.get("coords"), dict) else {}
+    latitude = payload.get("latitude")
+    if latitude is None:
+        latitude = payload.get("lat")
+    if latitude is None:
+        latitude = payload.get("y")
+    if latitude is None:
+        latitude = coords.get("latitude")
+    if latitude is None:
+        latitude = coords.get("lat")
+
+    longitude = payload.get("longitude")
+    if longitude is None:
+        longitude = payload.get("lon")
+    if longitude is None:
+        longitude = payload.get("lng")
+    if longitude is None:
+        longitude = payload.get("x")
+    if longitude is None:
+        longitude = coords.get("longitude")
+    if longitude is None:
+        longitude = coords.get("lon")
+    if longitude is None:
+        longitude = coords.get("lng")
+
+    try:
+        lat_f = float(latitude)
+        lon_f = float(longitude)
+    except:
+        return app.response_class(
+            response=json.dumps({"ok": False, "reason": "invalid_coordinates"}, indent=2),
+            status=400,
+            mimetype="application/json",
+        )
+
+    if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
+        return app.response_class(
+            response=json.dumps({"ok": False, "reason": "coordinates_out_of_range"}, indent=2),
+            status=400,
+            mimetype="application/json",
+        )
+
+    accuracy_m = payload.get("accuracy_m")
+    if accuracy_m is None:
+        accuracy_m = payload.get("accuracy")
+    try:
+        accuracy_f = float(accuracy_m) if accuracy_m is not None else None
+    except:
+        accuracy_f = None
+
+    label = payload.get("label") or payload.get("name") or payload.get("city")
+    source = payload.get("source") or "context_ingest"
+    captured_at = payload.get("captured_at") or payload.get("timestamp")
+
+    upsert_latest_location_context(
+        latitude=lat_f,
+        longitude=lon_f,
+        accuracy_m=accuracy_f,
+        label=label,
+        source=source,
+        captured_at=captured_at,
+    )
+    latest = get_latest_location_context()
+    return app.response_class(
+        response=json.dumps({"ok": True, "location": latest, "fresh": is_location_context_fresh(latest)}, indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
 @app.route("/tasks/context-refresh", methods=["GET", "POST"])
 def task_context_refresh():
     denied = require_internal_api_key()
@@ -9696,6 +9870,7 @@ def task_context_refresh():
                 "sleep_refreshed": bool(sleep_payload),
                 "configured": {
                     "open_meteo": bool(OPEN_METEO_LAT and OPEN_METEO_LON),
+                    "location_ingest": bool(get_latest_location_context()),
                     "calendar_provider": bool(CALENDAR_CONTEXT_URL),
                     "sleep_provider": bool(SLEEP_CONTEXT_URL),
                     "gmail_connected": bool(get_gmail_service()[0]),
