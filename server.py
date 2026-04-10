@@ -103,6 +103,16 @@ LOW_QUALITY_CURRENTS_DOMAINS = {
     "sott.net",
 }
 IBKR_TRUSTED_PORTFOLIO_FILENAME_RE = re.compile(r"^Jeeves_#1\..+\.html$", re.IGNORECASE)
+WHATSAPP_REPLY_CHUNK_MAX = 1200
+
+# ---------------- FILE NAVIGATION QUICK GUIDE ----------------
+# 1) Config/constants
+# 2) DB schema + helpers
+# 3) Portfolio truth ingestion/validation (Gmail + trusted IBKR HTML)
+# 4) Memory + tone + journaling
+# 5) Polling/scoring/alerts
+# 6) Routing + reply builders
+# 7) Flask debug/task endpoints + /sms webhook
 
 # ---------------- DB ----------------
 
@@ -1246,6 +1256,8 @@ def extract_gmail_body(message):
     snippet = message.get("snippet") or ""
     return snippet.strip()
 
+
+# ---------------- TRUSTED PORTFOLIO INGESTION (GMAIL + IBKR HTML) ----------------
 
 def iter_gmail_parts(payload):
     if not payload:
@@ -3280,6 +3292,8 @@ def append_internal_key(url):
     return f"{url}{separator}key={quote_plus(INTERNAL_API_KEY)}"
 
 
+# ---------------- OPERATOR LINK HUB (`key` RESPONSE) ----------------
+
 def build_command_key_reply():
     base = get_public_base_url()
     privacy_link = f"{base}/privacy" if base else "/privacy"
@@ -3512,6 +3526,50 @@ def should_send_no_reply(text):
         return True
 
     return False
+
+
+# ---------------- OUTBOUND REPLY FORMATTING ----------------
+
+def split_reply_chunks(text, max_chars=WHATSAPP_REPLY_CHUNK_MAX):
+    body = (text or "").strip()
+    if not body:
+        return []
+    if len(body) <= max_chars:
+        return [body]
+
+    lines = body.split("\n")
+    chunks = []
+    current = []
+    current_len = 0
+
+    def flush():
+        nonlocal current, current_len
+        if current:
+            chunks.append("\n".join(current).strip())
+            current = []
+            current_len = 0
+
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        line_len = len(line) + (1 if current else 0)
+
+        if len(line) > max_chars:
+            flush()
+            start = 0
+            while start < len(line):
+                chunks.append(line[start:start + max_chars].strip())
+                start += max_chars
+            continue
+
+        if current_len + line_len > max_chars:
+            flush()
+
+        if line or current:
+            current.append(line)
+            current_len += line_len
+
+    flush()
+    return [chunk for chunk in chunks if chunk]
 
 
 def get_memory_items(scope, limit=20):
@@ -9213,7 +9271,8 @@ def sms():
 
             if task_replies:
                 combined_reply = "\n".join(task_replies)
-                resp.message(combined_reply)
+                for chunk in split_reply_chunks(combined_reply):
+                    resp.message(chunk)
                 return str(resp)
 
     intent, value = route(msg)
@@ -9222,7 +9281,8 @@ def sms():
     reply = build_reply_for_intent(intent, value, msg, memory_result=memory_result)
     if reply is None:
         return ""
-    resp.message(reply)
+    for chunk in split_reply_chunks(reply):
+        resp.message(chunk)
     return str(resp)
 
 if __name__ == "__main__":
