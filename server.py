@@ -8825,7 +8825,7 @@ Output schema:
         if window not in {"today", "tomorrow", "week", "past_week", "past"}:
             window = "today"
         focus_text = str(payload.get("focus_text") or "").strip()
-        return {"intent": "calendar_query", "window": window, "focus_text": focus_text}
+        return {"intent": "calendar_query", "window": window, "focus_text": focus_text, "query_text": text}
     except:
         window = "today"
         if "tomorrow" in t:
@@ -8834,7 +8834,7 @@ Output schema:
             window = "week"
         elif "previous" in t or "earlier" in t or "before" in t or "past" in t:
             window = "past_week"
-        return {"intent": "calendar_query", "window": window, "focus_text": ""}
+        return {"intent": "calendar_query", "window": window, "focus_text": "", "query_text": text}
 
 
 def build_calendar_query_reply(request_info):
@@ -8864,10 +8864,20 @@ def build_calendar_query_reply(request_info):
         label = "today"
 
     focus_text = str((request_info or {}).get("focus_text") or "").strip().lower()
+    query_text = str((request_info or {}).get("query_text") or "").strip().lower()
+    # If IL does not emit explicit focus text, derive lightweight focus terms
+    # from the query itself (for prompts like "did I have any lectures today?").
+    focus_basis = focus_text or query_text
     focus_terms = [
         token
-        for token in re.split(r"[^a-z0-9]+", focus_text)
-        if len(token) >= 3 and token not in {"the", "and", "for", "with", "from", "that", "this"}
+        for token in re.split(r"[^a-z0-9]+", focus_basis)
+        if len(token) >= 3
+        and token not in {
+            "the", "and", "for", "with", "from", "that", "this",
+            "calendar", "schedule", "event", "events", "today", "tomorrow",
+            "week", "next", "past", "previously", "earlier", "mean", "have", "had",
+            "did", "what", "which", "any", "check",
+        }
     ]
 
     filtered = []
