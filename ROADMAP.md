@@ -42,6 +42,9 @@ Last updated: 2026-04-10
   - force `FRED` category to remain `E` after AI decision layer
   - replace misleading `portfolio:awaiting_trusted_data` with `portfolio:no_direct_match` when trusted holdings exist
   - preserve full `P` query strings to prevent 3 `P` variants from collapsing into 1 during normalization
+- 🧪 Journal-context capture hardening deployed to branch:
+  - gratitude journal response window constant set to `12` hours
+  - journal-context capture no longer breaks when alerts/daily brief are sent after gratitude prompt
 
 1. **Stabilize Messaging Cost + Alert Discipline (Now)**
 - ✅ Keep `Tier 1 only` live-alert behavior hard-enforced (Tier 2 never pushed).
@@ -77,22 +80,12 @@ Last updated: 2026-04-10
 - ✅ Use trusted portfolio truth in `P` scoring/query logic paths.
 - ✅ Parser + trusted-source gate deployed and verified live on Railway (`/tasks/portfolio-sync`, `/debug/portfolio/truth`, `/debug/portfolio/truth/view`).
 
-4.1 **P Query Expansion Mode (Future / Optional)**
-- Add optional `P` query mode switch:
-  - default: `top10` trusted holdings (current behavior)
-  - optional: `all` trusted holdings (for broader scan)
-- Keep `top10` as default for live polling quality; evaluate `all` mode after API refresh cycle and query-quality benchmarking.
-- Add explicit debug fields to preview:
-  - `p_symbols_used`
-  - `p_symbols_count`
-  - `p_query_mode`
-
 5. **Locked Decisions and Behavior Guards (Immediate After IBKR)**
 - Keep both market providers (`Massive` + `TwelveData`) in place.
 - Journal-lock behavior must remain unlimited until your first reply, even if alerts are sent meanwhile.
-- Journal prompt response window: use `12 hours` (not `8 hours`).
+- 🧪 Journal prompt response window: use `12 hours` (not `8 hours`).
 - Pile-up handling: no backlog queue; only one journal response is expected even if prompts pile up.
-- Alert messages must not break journal-context capture.
+- 🧪 Alert messages must not break journal-context capture.
 - First inbound message within the active `12-hour` journal window is treated as the journal response.
 - ✅ Keep unauthorized warning behavior with full verbatim transcript included (and protect against regressions).
 - Portfolio state logic: if no new IBKR activity statement is received, assume holdings, position sizes, and cash are unchanged.
@@ -147,3 +140,13 @@ Last updated: 2026-04-10
 12. **PDF Read-to-You Capability (Post-Whitepaper / Late-Late)**
 - Add document ingestion + chunking + narration/summarization path.
 - Keep this explicitly after whitepaper completion.
+
+13. **P Query Expansion Mode (Future / Optional, Late Stage)**
+- Add optional `P` query mode switch:
+  - default: `top10` trusted holdings (current behavior)
+  - optional: `all` trusted holdings (for broader scan)
+- Keep `top10` as default for live polling quality; evaluate `all` mode after API refresh cycle and query-quality benchmarking.
+- Add explicit debug fields to preview:
+  - `p_symbols_used`
+  - `p_symbols_count`
+  - `p_query_mode`

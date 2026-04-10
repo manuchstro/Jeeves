@@ -71,6 +71,7 @@ DAILY_BRIEF_HOUR = 20
 DAILY_BRIEF_MINUTE = 0
 GRATITUDE_HOUR = 22
 GRATITUDE_MINUTE = 15
+JOURNAL_RESPONSE_WINDOW_HOURS = 12
 OPEN_METEO_LAT = os.environ.get("OPEN_METEO_LAT", "").strip()
 OPEN_METEO_LON = os.environ.get("OPEN_METEO_LON", "").strip()
 MEMORY_CONFIDENCE_MAX = 0.99
@@ -3310,12 +3311,12 @@ def count_interactions_since(timestamp):
 
 
 def in_gratitude_journal_context():
-    latest = get_latest_outbound_message("gratitude", hours=8)
+    latest = get_latest_outbound_message("gratitude", hours=JOURNAL_RESPONSE_WINDOW_HOURS)
     if not latest:
         return False
-    latest_any = get_latest_outbound_message(hours=8)
-    if not latest_any or latest_any.get("message_type") != "gratitude":
-        return False
+    # Do not require gratitude to be the latest outbound message.
+    # Alerts/daily briefs may be sent after gratitude prompt and must not break
+    # journal-context capture for the first inbound user response.
     return count_interactions_since(latest.get("created_at")) == 0
 
 
