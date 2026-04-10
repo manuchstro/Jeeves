@@ -104,6 +104,10 @@ LOW_QUALITY_CURRENTS_DOMAINS = {
 }
 IBKR_TRUSTED_PORTFOLIO_FILENAME_RE = re.compile(r"^Jeeves_#1\..+\.html$", re.IGNORECASE)
 WHATSAPP_REPLY_CHUNK_MAX = 1200
+ALERT_CODE_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
+ALERT_CODE_SUFFIX_LEN = 3
+ALERT_CODE_SPACE_SIZE = len(ALERT_CODE_ALPHABET) ** ALERT_CODE_SUFFIX_LEN
+EVENT_REFERENCE_PATTERN = r"([A-Za-z]\d-[A-Za-z0-9]{3}|[A-Za-z]\d(?:\.\d+|-\d+)?)"
 
 # ---------------- FILE NAVIGATION QUICK GUIDE ----------------
 # 1) Config/constants
@@ -6101,9 +6105,24 @@ def find_semantic_duplicate(category, candidate, threshold=0.90):
     }
 
 
+def to_base36_suffix(value, width=3):
+    value = max(0, int(value))
+    chars = []
+    while value > 0:
+        value, rem = divmod(value, 36)
+        chars.append(ALERT_CODE_ALPHABET[rem])
+    suffix = "".join(reversed(chars)) or "0"
+    return suffix[-width:].rjust(width, "0")
+
+
+def random_alert_suffix(width=3):
+    return "".join(random.choice(ALERT_CODE_ALPHABET) for _ in range(width))
+
+
 def build_alert_id(category, tier):
     existing_count = count_tier_alerts_today(category, tier)
-    return f"{category.upper()}{tier}-{existing_count + 1}"
+    suffix = to_base36_suffix(existing_count % ALERT_CODE_SPACE_SIZE, width=ALERT_CODE_SUFFIX_LEN)
+    return f"{category.upper()}{tier}-{suffix}"
 
 
 def can_send_alert(category, tier, event_hash, candidate=None):
@@ -6195,15 +6214,20 @@ def log_alert(category, tier, headline, sent_to_user=1, candidate=None):
         time.sleep(0.03 * (attempt + 1))
 
     if not inserted or not alert_id:
-        alert_id = f"{category.upper()}{tier}-{int(time.time())}-{random.randint(100, 999)}"
-        fallback_result = execute_write_with_retry(
-            """
-            INSERT OR IGNORE INTO alert_log (alert_id, category, tier, headline, event_hash, sent_to_user)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (alert_id, category.upper(), tier, headline, event_hash, sent_to_user),
-        )
-        if fallback_result.get("rowcount", 0) <= 0:
+        for _ in range(30):
+            fallback_id = f"{category.upper()}{tier}-{random_alert_suffix(ALERT_CODE_SUFFIX_LEN)}"
+            fallback_result = execute_write_with_retry(
+                """
+                INSERT OR IGNORE INTO alert_log (alert_id, category, tier, headline, event_hash, sent_to_user)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (fallback_id, category.upper(), tier, headline, event_hash, sent_to_user),
+            )
+            if fallback_result.get("rowcount", 0) > 0:
+                alert_id = fallback_id
+                inserted = True
+                break
+        if not inserted or not alert_id:
             raise RuntimeError("failed_to_insert_alert_log")
 
     record_event_hash(event_hash, category.upper(), headline)
@@ -7943,20 +7967,20 @@ def is_command_key_request(text):
 def interpret_event_reference(text):
     t = text.strip()
 
-    direct_match = re.match(r"^\s*([A-Za-z]\d(?:\.\d+|-\d+)?)\s*$", t, re.IGNORECASE)
+    direct_match = re.match(rf"^\s*{EVENT_REFERENCE_PATTERN}\s*$", t, re.IGNORECASE)
     if direct_match:
         return direct_match.group(1).upper()
 
     followup_patterns = [
-        r"^\s*(?:please\s+)?(?:expand(?:\s+on)?|follow up on|follow-up on|tell me more about|more on|what about|talk about)\s+([A-Za-z]\d(?:\.\d+|-\d+)?)\s*(?:please)?\s*[.!?]*\s*$",
-        r"^\s*([A-Za-z]\d(?:\.\d+|-\d+)?)\s+(?:please|details|context|more)\s*[.!?]*\s*$",
+        rf"^\s*(?:please\s+)?(?:expand(?:\s+on)?|follow up on|follow-up on|tell me more about|more on|what about|talk about)\s+{EVENT_REFERENCE_PATTERN}\s*(?:please)?\s*[.!?]*\s*$",
+        rf"^\s*{EVENT_REFERENCE_PATTERN}\s+(?:please|details|context|more)\s*[.!?]*\s*$",
     ]
     for pattern in followup_patterns:
         match = re.match(pattern, t, re.IGNORECASE)
         if match:
             return match.group(1).upper()
 
-    loose_match = re.search(r"\b([A-Za-z]\d(?:\.\d+|-\d+)?)\b", t, re.IGNORECASE)
+    loose_match = re.search(rf"\b{EVENT_REFERENCE_PATTERN}\b", t, re.IGNORECASE)
     if loose_match:
         return loose_match.group(1).upper()
 
@@ -7964,7 +7988,7 @@ def interpret_event_reference(text):
 
 
 def interpret_event_references(text):
-    matches = re.findall(r"\b([A-Za-z]\d(?:\.\d+|-\d+)?)\b", text or "", re.IGNORECASE)
+    matches = re.findall(rf"\b{EVENT_REFERENCE_PATTERN}\b", text or "", re.IGNORECASE)
     refs = []
     for item in matches:
         ref = (item or "").upper().strip()
