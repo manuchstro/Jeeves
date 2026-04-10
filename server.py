@@ -8979,25 +8979,25 @@ def task_scheduled_check():
 
     if scheduled_task_due("daily_brief", DAILY_BRIEF_HOUR, DAILY_BRIEF_MINUTE, now_local=now_local):
         results["daily_brief"]["due"] = True
-        if mark_scheduled_task_run("daily_brief", local_date=local_date):
-            run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False, include_local=True)
-            brief = compose_daily_brief(include_debug=False)
-            send_result = send_whatsapp_message(brief)
-            results["daily_brief"]["send_result"] = send_result
-            if send_result.get("ok"):
-                log_outbound_message("daily_brief", brief)
-                results["daily_brief"]["sent"] = True
+        run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False, include_local=True)
+        brief = compose_daily_brief(include_debug=False)
+        send_result = send_whatsapp_message(brief)
+        results["daily_brief"]["send_result"] = send_result
+        if send_result.get("ok"):
+            mark_scheduled_task_run("daily_brief", local_date=local_date)
+            log_outbound_message("daily_brief", brief)
+            results["daily_brief"]["sent"] = True
 
     if scheduled_task_due("gratitude", GRATITUDE_HOUR, GRATITUDE_MINUTE, now_local=now_local):
         results["gratitude"]["due"] = True
-        if mark_scheduled_task_run("gratitude", local_date=local_date):
-            run_nightly_memory_consolidation()
-            prompt = "What is one thing you were grateful for today?"
-            send_result = send_whatsapp_message(prompt)
-            results["gratitude"]["send_result"] = send_result
-            if send_result.get("ok"):
-                log_outbound_message("gratitude", prompt)
-                results["gratitude"]["sent"] = True
+        run_nightly_memory_consolidation()
+        prompt = "What is one thing you were grateful for today?"
+        send_result = send_whatsapp_message(prompt)
+        results["gratitude"]["send_result"] = send_result
+        if send_result.get("ok"):
+            mark_scheduled_task_run("gratitude", local_date=local_date)
+            log_outbound_message("gratitude", prompt)
+            results["gratitude"]["sent"] = True
 
     return app.response_class(
         response=json.dumps(results, indent=2),

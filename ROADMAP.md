@@ -45,6 +45,9 @@ Last updated: 2026-04-10
 - 🧪 Journal-context capture hardening deployed to branch:
   - gratitude journal response window constant set to `12` hours
   - journal-context capture no longer breaks when alerts/daily brief are sent after gratitude prompt
+- 🧪 Scheduled-task delivery safeguard deployed to branch:
+  - `/tasks/scheduled-check` now marks daily brief/gratitude as sent only after successful WhatsApp delivery
+  - prevents false "already sent" skips when send attempts fail
 
 1. **Stabilize Messaging Cost + Alert Discipline (Now)**
 - ✅ Keep `Tier 1 only` live-alert behavior hard-enforced (Tier 2 never pushed).
