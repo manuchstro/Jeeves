@@ -8762,21 +8762,79 @@ def interpret_calendar_request(text):
         "meetings",
     ]
     has_calendar_context = any(signal in t for signal in calendar_signals)
-    if not has_calendar_context:
+    followup_signals = [
+        "previously",
+        "earlier",
+        "before",
+        "what about before",
+        "same question",
+        "i mean before",
+        "past",
+        "prior",
+    ]
+    looks_like_followup = any(signal in t for signal in followup_signals)
+    recent = get_recent_messages(limit=6)
+    recent_calendar_context = any(
+        (
+            "calendar" in (item.get("content") or "").lower()
+            or "event(s)" in (item.get("content") or "").lower()
+            or "lecture/class" in (item.get("content") or "").lower()
+        )
+        for item in recent[-4:]
+    )
+    if not has_calendar_context and not (looks_like_followup and recent_calendar_context):
         return {"intent": "none"}
 
-    window = "today"
-    if "tomorrow" in t:
-        window = "tomorrow"
-    elif "this week" in t or "next 7" in t or "next week" in t:
-        window = "week"
+    prior_user = ""
+    for item in reversed(recent):
+        if item.get("role") == "user":
+            prior_user = item.get("content") or ""
+            break
 
-    lecture_only = any(signal in t for signal in ["lecture", "lectures", "class", "classes", "seminar"])
-    return {
-        "intent": "calendar_query",
-        "window": window,
-        "lecture_only": lecture_only,
-    }
+    try:
+        prompt = f"""
+Interpret this calendar/schedule request.
+Return strict JSON only.
+
+Current message:
+\"\"\"{text}\"\"\"
+
+Previous user message (for follow-up context):
+\"\"\"{prior_user}\"\"\"
+
+Output schema:
+{{
+  "intent": "calendar_query|none",
+  "window": "today|tomorrow|week|past_week|past",
+  "focus_text": "optional semantic focus phrase or empty"
+}}
+"""
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Return JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+        )
+        payload = json.loads(completion.choices[0].message.content)
+        intent = str(payload.get("intent") or "none").strip().lower()
+        if intent != "calendar_query":
+            return {"intent": "none"}
+        window = str(payload.get("window") or "today").strip().lower()
+        if window not in {"today", "tomorrow", "week", "past_week", "past"}:
+            window = "today"
+        focus_text = str(payload.get("focus_text") or "").strip()
+        return {"intent": "calendar_query", "window": window, "focus_text": focus_text}
+    except:
+        window = "today"
+        if "tomorrow" in t:
+            window = "tomorrow"
+        elif "this week" in t or "next 7" in t or "next week" in t:
+            window = "week"
+        elif "previous" in t or "earlier" in t or "before" in t or "past" in t:
+            window = "past_week"
+        return {"intent": "calendar_query", "window": window, "focus_text": ""}
 
 
 def build_calendar_query_reply(request_info):
@@ -8795,12 +8853,22 @@ def build_calendar_query_reply(request_info):
     elif window == "week":
         target_days = {str(today + timedelta(days=offset)) for offset in range(0, 7)}
         label = "the next 7 days"
+    elif window == "past_week":
+        target_days = {str(today - timedelta(days=offset)) for offset in range(1, 8)}
+        label = "the previous 7 days"
+    elif window == "past":
+        target_days = {str(today - timedelta(days=offset)) for offset in range(1, 31)}
+        label = "the recent past"
     else:
         target_days = {str(today)}
         label = "today"
 
-    lecture_only = bool((request_info or {}).get("lecture_only"))
-    lecture_terms = ("lecture", "class", "seminar")
+    focus_text = str((request_info or {}).get("focus_text") or "").strip().lower()
+    focus_terms = [
+        token
+        for token in re.split(r"[^a-z0-9]+", focus_text)
+        if len(token) >= 3 and token not in {"the", "and", "for", "with", "from", "that", "this"}
+    ]
 
     filtered = []
     for event in events:
@@ -8809,37 +8877,27 @@ def build_calendar_query_reply(request_info):
         if event_day not in target_days:
             continue
         title = str(event.get("title") or "(untitled)")
-        if lecture_only and not any(term in title.lower() for term in lecture_terms):
+        if focus_terms and not any(term in title.lower() for term in focus_terms):
             continue
         filtered.append(event)
 
     filtered.sort(key=lambda item: str(item.get("start_local") or ""))
 
-    if lecture_only:
-        if not filtered:
-            # Be explicit when non-lecture events exist so this doesn't read like
-            # a full calendar miss.
-            non_lecture = []
+    if not filtered:
+        if focus_terms:
+            any_in_window = []
             for event in events:
                 start_local = str(event.get("start_local") or "").strip()
                 event_day = start_local[:10] if len(start_local) >= 10 else ""
-                if event_day not in target_days:
-                    continue
-                non_lecture.append(event)
-            if non_lecture:
-                sample = non_lecture[0]
+                if event_day in target_days:
+                    any_in_window.append(event)
+            if any_in_window:
+                sample = any_in_window[0]
                 return (
-                    f"I don't see any lecture/class events in your calendar for {label}. "
-                    f"I do see {len(non_lecture)} other event(s), for example: "
+                    f"I don't see calendar events matching \"{focus_text}\" for {label}. "
+                    f"I do see {len(any_in_window)} other event(s), for example: "
                     f"\"{sample.get('title','(untitled)')}\"."
                 )
-            return f"I don't see any lecture/class events in your calendar for {label}."
-        lines = []
-        for event in filtered[:8]:
-            lines.append(f"{event.get('start_local','')} {event.get('title','(untitled)')}")
-        return f"I found {len(filtered)} lecture/class event(s) for {label}: " + " | ".join(lines)
-
-    if not filtered:
         return f"I don't see any calendar events for {label}."
 
     lines = []
