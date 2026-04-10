@@ -61,6 +61,7 @@ Last updated: 2026-04-10
   - interprets query window (`today`, `tomorrow`, `week`, `past_week`, `past`)
   - supports follow-up carryover (e.g., “previously i mean”)
   - executes deterministically against stored calendar events
+- ✅ Hardened calendar IL focus handling so prompts like “did I have any lectures today?” keep focus terms from the user prompt even when model-emitted focus text is empty.
 - 🧪 Expanded calendar event context window in prompt assembly (larger event set available to response generation).
 - 🧪 Calendar provider payload upgraded/tested to include event-level fields (`title`, `start_local`, `end_local`, `all_day`) and verified in live context debug.
 
