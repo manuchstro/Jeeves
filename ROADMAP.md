@@ -52,6 +52,17 @@ Last updated: 2026-04-10
   - atomic trusted snapshot replacement (`BEGIN IMMEDIATE` + rollback on failure)
   - trusted payload validation guardrails before replace
   - integrity report endpoint: `/debug/portfolio/integrity`
+- ✅ Tightened email intent gate to explicit email-context terms only, preventing normal conversation from being misrouted into email lookup.
+- ✅ Added calendar event persistence and ingest path from external calendar provider payloads (`events` array).
+- ✅ Added calendar event visibility in context outputs:
+  - `/tasks/context-refresh` now returns calendar events in `context_snapshot`
+  - `/debug/context` now returns calendar events in `context.calendar.events`
+- ✅ Added calendar interpretation layer (IL) for natural calendar questions (no static `lecture_only` switch):
+  - interprets query window (`today`, `tomorrow`, `week`, `past_week`, `past`)
+  - supports follow-up carryover (e.g., “previously i mean”)
+  - executes deterministically against stored calendar events
+- 🧪 Expanded calendar event context window in prompt assembly (larger event set available to response generation).
+- 🧪 Calendar provider payload upgraded/tested to include event-level fields (`title`, `start_local`, `end_local`, `all_day`) and verified in live context debug.
 
 1. **Stabilize Messaging Cost + Alert Discipline (Now)**
 - ✅ Keep `Tier 1 only` live-alert behavior hard-enforced (Tier 2 never pushed).
@@ -107,12 +118,16 @@ Last updated: 2026-04-10
 - Enforce tone rules that avoid default praise/validation and prefer respectful disagreement when needed.
 - Preserve purpose-aware behavior: clear understanding of role, direct usefulness, and accountable correction when wrong.
 - 🧪 Add transparent debug output so you can see why a tone was chosen.
+- ✅ Calendar + inbox context are now feeding live tone-vector signals in production debug output.
 
 7. **API Attachments for Context Engine (Near-Term)**
 - Add Weather API (fully configured, not scaffold-only).
-- Add Calendar API.
+- ✅ Add Calendar API.
 - Add Health API (sleep, steps, recovery-style signals from Apple sources if feasible).
-- Verify each context source is visible in debug and actually influencing behavior.
+- 🧪 Verify each context source is visible in debug and actually influencing behavior.
+  - ✅ Calendar context visible and influencing tone (`calendar_busy` present in tone signals).
+  - ✅ Inbox context visible and influencing tone (`inbox_busy` present in tone signals).
+  - ⏳ Sleep context pending provider connection.
 
 8. **Voice Input to Text Thread (Mid-Term)**
 - Implement voice intake where your speech is transcribed.
