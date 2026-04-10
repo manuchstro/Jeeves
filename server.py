@@ -7277,6 +7277,64 @@ def classify_news_category(query, headline, snippet, section, watchlist=None):
     return "G"
 
 
+def classify_news_category_scored(query, headline, snippet, section, watchlist=None):
+    text = " ".join([query or "", headline or "", snippet or "", section or ""]).lower()
+    section_l = (section or "").lower()
+    query_hint = infer_category_hint_from_text(query or "")
+
+    scores = {"E": 0.0, "G": 0.0, "L": 0.0}
+
+    if query_hint in scores:
+        scores[query_hint] += 1.8
+
+    # Section priors are strong non-keyword signals.
+    if any(term in section_l for term in ["business", "economy", "markets", "finance"]):
+        scores["E"] += 2.2
+    if any(term in section_l for term in ["world", "international", "global affairs", "foreign"]):
+        scores["G"] += 1.8
+    if any(term in section_l for term in ["u.s.", "california", "bay area", "metro", "local"]):
+        scores["L"] += 1.2
+
+    local_terms = {
+        "bay area", "san francisco", "berkeley", "oakland", "san jose",
+        "sacramento", "california", "earthquake", "wildfire",
+    }
+    macro_terms = {
+        "fed", "inflation", "cpi", "rates", "rate cut", "jobs", "employment", "treasury",
+        "stock", "stocks", "shares", "earnings", "guidance", "nasdaq", "nyse",
+        "dow", "s&p", "market", "gdp", "imf", "bond", "bonds", "yield", "yields",
+        "finance", "business", "prices", "cost of living", "consumer prices", "price pressure",
+    }
+    geo_terms = {
+        "iran", "russia", "china", "taiwan", "ukraine", "israel", "gaza",
+        "sanction", "war", "shipping", "strait", "conflict", "ceasefire",
+        "nato", "missile", "drone", "military", "embassy", "diplomatic", "geopolitics",
+    }
+
+    local_hits = sum(1 for term in local_terms if term in text)
+    macro_hits = sum(1 for term in macro_terms if term in text)
+    geo_hits = sum(1 for term in geo_terms if term in text)
+
+    scores["L"] += min(3.0, 0.7 * local_hits)
+    scores["E"] += min(3.4, 0.65 * macro_hits)
+    scores["G"] += min(3.4, 0.65 * geo_hits)
+
+    if re.search(r"\b(?:nasdaq|nyse|arca)\s*:\s*[a-z]{1,6}\b", text):
+        scores["E"] += 2.0
+
+    ordered = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    top_cat, top_score = ordered[0]
+    second_score = ordered[1][1]
+    margin = float(top_score - second_score)
+
+    return {
+        "category": top_cat,
+        "scores": scores,
+        "margin": margin,
+        "query_hint": query_hint,
+    }
+
+
 def _query_terms(text):
     return set(re.findall(r"[a-z0-9]{3,}", (text or "").lower()))
 
@@ -7300,15 +7358,29 @@ def normalize_candidate_category(candidate, watchlist=None):
         return "E", "source_fred"
     if original == "P":
         return "P", None
-    normalized = classify_news_category(
-        "",
+    scored = classify_news_category_scored(
+        candidate.get("origin_query") or "",
         candidate.get("headline") or "",
         candidate.get("snippet") or "",
         candidate.get("section") or "",
         watchlist=watchlist,
     )
+    normalized = scored.get("category") or original
     if normalized not in {"P", "E", "G", "L"}:
-        normalized = "G"
+        normalized = original
+
+    # Ambiguity guard: if the score margin is small, keep original category.
+    if normalized != original and float(scored.get("margin") or 0.0) < 1.2:
+        return original, None
+
+    # Downgrade guard: do not reclassify E/P-like intent into G unless confidence is strong.
+    if normalized == "G" and original in {"E", "P"} and float(scored.get("margin") or 0.0) < 2.3:
+        return original, None
+
+    # Query-origin inertia: if origin query strongly hinted E, require extra confidence to move to G.
+    if normalized == "G" and original == "E" and (scored.get("query_hint") == "E") and float(scored.get("margin") or 0.0) < 2.8:
+        return original, None
+
     if normalized != original:
         return normalized, "content_classifier"
     return original, None
