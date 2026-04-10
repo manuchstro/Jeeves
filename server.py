@@ -62,6 +62,7 @@ RAILWAY_GIT_COMMIT_SHA = os.environ.get("RAILWAY_GIT_COMMIT_SHA") or os.environ.
 RAILWAY_DEPLOYMENT_ID = os.environ.get("RAILWAY_DEPLOYMENT_ID")
 LOCAL_TZ = ZoneInfo("America/Los_Angeles")
 ALERT_DECISION_MODEL = os.environ.get("ALERT_DECISION_MODEL", "gpt-4o")
+ALERT_AI_GATE_ENABLED = (os.environ.get("ALERT_AI_GATE_ENABLED", "0").strip() == "1")
 ALERT_PUSH_TIER_MAX = max(1, min(3, int(os.environ.get("ALERT_PUSH_TIER_MAX", "2"))))
 CURR_BURST_QUERIES_PER_CYCLE = max(1, min(4, int(os.environ.get("CURR_BURST_QUERIES_PER_CYCLE", "3"))))
 PROVENANCE_SKIP_DEDUPE_SECONDS = max(30, int(os.environ.get("PROVENANCE_SKIP_DEDUPE_SECONDS", "180")))
@@ -3502,6 +3503,11 @@ def build_command_key_reply():
     daily_brief_force = link("/tasks/daily-brief?force=1")
     scheduled_check = link("/tasks/scheduled-check")
     context_debug = link("/debug/context")
+    context_refresh = link("/tasks/context-refresh")
+    weather_refresh = link("/debug/context/weather/refresh")
+    inbox_refresh = link("/debug/context/inbox/refresh")
+    calendar_refresh = link("/debug/context/calendar/refresh")
+    sleep_refresh = link("/debug/context/sleep/refresh")
 
     return "\n".join([
         COMMAND_KEY_REPLY,
@@ -3526,6 +3532,11 @@ def build_command_key_reply():
         f"memory debug compact: {memory_compact}",
         f"memory debug view: {memory_view}",
         f"context debug: {context_debug}",
+        f"context refresh (all): {context_refresh}",
+        f"weather refresh: {weather_refresh}",
+        f"inbox refresh: {inbox_refresh}",
+        f"calendar refresh: {calendar_refresh}",
+        f"sleep refresh: {sleep_refresh}",
     ])
 
 
@@ -5399,9 +5410,52 @@ def fallback_journal_response_decision(journal_analysis):
     }
 
 
+def should_use_model_for_journal_decision(text, journal_analysis, tone_vector):
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    # Explicit uncertainty/questions deserve nuanced handling.
+    if "?" in t:
+        return True
+
+    stress = (journal_analysis or {}).get("stress", "").lower()
+    friction = (journal_analysis or {}).get("friction", "").lower()
+    notable_shift = bool((journal_analysis or {}).get("notable_shift"))
+    durable_signal = bool((journal_analysis or {}).get("durable_signal"))
+    signals = (tone_vector or {}).get("signals") or {}
+    anti = float(signals.get("anti_sycophancy") or 0.0)
+
+    if stress in {"elevated", "high"}:
+        return True
+    if friction == "present":
+        return True
+    if notable_shift or durable_signal:
+        return True
+    if anti >= 0.78:
+        return True
+
+    trigger_terms = {
+        "anxious", "overwhelmed", "stressed", "upset", "angry", "sad",
+        "confused", "panic", "worried", "fear", "depressed", "lonely",
+        "grateful", "thankful", "proud", "excited", "relieved",
+    }
+    tokens = set(re.findall(r"[a-z']{3,}", t))
+    if tokens & trigger_terms:
+        return True
+
+    return False
+
+
 def decide_journal_response(text, journal_analysis, context_snapshot):
     tone_context = build_tone_context_snapshot(context_snapshot)
     tone_vector = build_tone_vector(journal_analysis, tone_context)
+    if not should_use_model_for_journal_decision(text, journal_analysis, tone_vector):
+        return {
+            "mode": "silent",
+            "reply": "",
+            "why": "heuristic_gate_silent",
+            "tone_vector": tone_vector,
+        }
     tone_guardrail = build_tone_guardrail_text(tone_vector)
     prompt = f"""
 Decide whether Jeeves should reply to this journal/gratitude response.
@@ -8065,6 +8119,18 @@ Return this exact shape:
 def ai_decide_alert_candidates(candidates):
     if not candidates:
         return {}
+    if not ALERT_AI_GATE_ENABLED:
+        decision_map = {}
+        for idx, candidate in enumerate(candidates, start=1):
+            candidate_id = f"C{idx}"
+            tier = int(candidate.get("assigned_tier") or 3)
+            decision_map[candidate_id] = {
+                "send": tier <= 1,
+                "category": ((candidate.get("category") or "G").upper()[:1]) or "G",
+                "tier": tier,
+                "why": "rule_gate:tier1_only",
+            }
+        return decision_map
 
     memory_context = build_alert_memory_context(candidates)
     prompt = build_alert_decision_prompt(candidates, memory_context)
@@ -8875,45 +8941,7 @@ def fallback_split_tasks(text):
 
 
 def split_multi_tasks(text):
-    prompt = f"""
-Split this message into separate actionable tasks in order.
-
-Rules:
-- Return JSON only.
-- Preserve order.
-- Keep each task concise and self-contained.
-- If there is only one real task, return a single-item list.
-- Maximum 6 tasks.
-
-Message:
-\"\"\"{text}\"\"\"
-
-Return:
-{{
-  "tasks": ["task 1", "task 2"]
-}}
-"""
-    try:
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Return JSON only."},
-                {"role": "user", "content": prompt},
-            ],
-            response_format={"type": "json_object"},
-        )
-        payload = json.loads(completion.choices[0].message.content)
-        tasks = payload.get("tasks") or []
-        if not isinstance(tasks, list):
-            return fallback_split_tasks(text)
-        cleaned = []
-        for task in tasks[:6]:
-            task_text = re.sub(r"\s+", " ", str(task or "")).strip(" .")
-            if task_text:
-                cleaned.append(task_text)
-        return cleaned or fallback_split_tasks(text)
-    except:
-        return fallback_split_tasks(text)
+    return fallback_split_tasks(text)
 
 
 def run_generic_reply(user_text):
