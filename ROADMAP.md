@@ -34,7 +34,7 @@ Last updated: 2026-04-10
   - Daily Trade Report and monthly statements are ignored for truth ingestion
   - sync endpoint added: `/tasks/portfolio-sync`
   - debug endpoint added: `/debug/portfolio/sync`
-- ✅ Deployed and tested portfolio-truth inspection links (for dashboard-forward visibility):
+- ✅ Deployed and tested portfolio-truth inspection links (for Brainstem-forward visibility):
   - `/debug/portfolio/truth` (JSON)
   - `/debug/portfolio/truth/view` (readable)
 - 🧪 Updated `P` query symbol selection to use top 10 trusted holdings (ETF-inclusive) instead of non-ETF-only.
@@ -64,6 +64,7 @@ Last updated: 2026-04-10
 - ✅ Hardened calendar IL focus handling so prompts like “did I have any lectures today?” keep focus terms from the user prompt even when model-emitted focus text is empty.
 - 🧪 Expanded calendar event context window in prompt assembly (larger event set available to response generation).
 - 🧪 Calendar provider payload upgraded/tested to include event-level fields (`title`, `start_local`, `end_local`, `all_day`) and verified in live context debug.
+- ✅ Added and validated recurring context refresh automation via Railway Cron (15-minute cadence) using `/tasks/context-refresh` to keep calendar/inbox context fresh without manual refresh calls.
 
 1. **Stabilize Messaging Cost + Alert Discipline (Now)**
 - ✅ Keep `Tier 1 only` live-alert behavior hard-enforced (Tier 2 never pushed).
@@ -108,7 +109,7 @@ Last updated: 2026-04-10
 - First inbound message within the active `12-hour` journal window is treated as the journal response.
 - ✅ Keep unauthorized warning behavior with full verbatim transcript included (and protect against regressions).
 - Portfolio state logic: if no new IBKR activity statement is received, assume holdings, position sizes, and cash are unchanged.
-- Dashboard access must be restricted to only your Google account.
+- Brainstem access must be restricted to only your Google account.
 
 6. **Tone Matrix Expansion (Near-Term / Moved Up)**
 - Confirm current tone engine deployment status.
@@ -135,7 +136,7 @@ Last updated: 2026-04-10
 - Jeeves replies back as text in the same message thread (not voice-to-voice).
 - Add fallback handling for low-confidence transcription.
 
-9. **Dashboard (Mid/Late-Term, Major Build)**
+9. **Brainstem (Mid/Late-Term, Major Build)**
 - Google sign-in auth.
 - API spend metrics, usage graphs, and cost totals.
 - “Calls used / remaining” visibility where provider data allows it.

@@ -109,7 +109,7 @@ COMMAND_KEY_REPLY = """Command key:
 - too much noise
 - more like this
 - late
-- dashboard"""
+- brainstem"""
 
 BASELINE_NEWS_QUERIES = [
     ("federal reserve inflation jobs", "E"),
