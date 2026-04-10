@@ -1,6 +1,6 @@
 # Jeeves Roadmap
 
-Last updated: 2026-04-09
+Last updated: 2026-04-10
 
 ## Recently Deployed (Completed)
 - ✅ Removed `portfolio_profile` from active logic paths and removed manual `portfolio_update` intent path; portfolio truth now stays with `portfolio_holdings` + `portfolio_snapshots` flow.
@@ -71,10 +71,10 @@ Last updated: 2026-04-09
 - Run end-to-end SMS tests on key flows (`key`, daily brief, alerts, feedback).
 
 4. **IBKR Statement Hard-Parser (Tomorrow/Immediate Next)**
-- You share one real daily statement sample.
-- Hardcode recognition to that exact statement format (not generic IBKR email).
-- Parse holdings into trusted portfolio snapshot.
-- Use that trusted portfolio everywhere `P` scoring and portfolio logic are used.
+- ✅ You shared real daily statement samples.
+- ✅ Hardcoded recognition to the trusted statement format (`Jeeves_#1*.html`, not generic IBKR email parsing).
+- ✅ Parse holdings into trusted portfolio snapshot.
+- ✅ Use trusted portfolio truth in `P` scoring/query logic paths.
 - ✅ Parser + trusted-source gate deployed and verified live on Railway (`/tasks/portfolio-sync`, `/debug/portfolio/truth`, `/debug/portfolio/truth/view`).
 
 4.1 **P Query Expansion Mode (Future / Optional)**
