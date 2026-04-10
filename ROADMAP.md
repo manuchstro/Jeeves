@@ -38,6 +38,10 @@ Last updated: 2026-04-09
   - `/debug/portfolio/truth` (JSON)
   - `/debug/portfolio/truth/view` (readable)
 - 🧪 Updated `P` query symbol selection to use top 10 trusted holdings (ETF-inclusive) instead of non-ETF-only.
+- 🧪 Poll quality hotfix deployed to branch:
+  - force `FRED` category to remain `E` after AI decision layer
+  - replace misleading `portfolio:awaiting_trusted_data` with `portfolio:no_direct_match` when trusted holdings exist
+  - preserve full `P` query strings to prevent 3 `P` variants from collapsing into 1 during normalization
 
 1. **Stabilize Messaging Cost + Alert Discipline (Now)**
 - ✅ Keep `Tier 1 only` live-alert behavior hard-enforced (Tier 2 never pushed).

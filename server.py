@@ -6668,7 +6668,10 @@ def score_candidate(candidate, watchlist, memory_vector_bundle=None, baseline_co
 
     if candidate["category"] == "P" and not has_trusted_portfolio_match:
         tier = max(tier, 3)
-        reasons.append("portfolio:awaiting_trusted_data")
+        if trusted_portfolio_symbols:
+            reasons.append("portfolio:no_direct_match")
+        else:
+            reasons.append("portfolio:awaiting_trusted_data")
 
     return {
         "score": score,
@@ -7087,7 +7090,12 @@ def build_dynamic_news_queries(limit=10, include_local=False):
 
     def add_query(query, category_hint=None):
         query_debug["input_total"] += 1
-        query = normalize_candidate_query_text(query)
+        if (category_hint or "").upper() == "P":
+            query = re.sub(r"\s+", " ", str(query or "").strip().lower())
+            query = query.replace("\n", " ").replace("\r", " ")
+            query = re.sub(r"[\"'`]", "", query)
+        else:
+            query = normalize_candidate_query_text(query)
         if not query or len(query) < 8:
             return
         if not is_news_query_signal(query, watchlist=watchlist, trusted_portfolio=trusted_portfolio):
@@ -7411,6 +7419,8 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False
         effective_tier = ai_decision.get("tier") if shortlist_item else candidate["assigned_tier"]
         if effective_tier is None:
             effective_tier = candidate["assigned_tier"]
+        if candidate.get("source") == "FRED":
+            effective_category = "E"
 
         result = {
             "category": effective_category,
