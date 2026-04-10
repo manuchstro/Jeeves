@@ -6694,7 +6694,7 @@ def ensure_whatsapp_prefix(number):
     return number if number.startswith("whatsapp:") else f"whatsapp:{number}"
 
 
-def send_whatsapp_message(body):
+def send_whatsapp_single_message(body):
     if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM, MY_NUMBER]):
         return {"ok": False, "reason": "missing_twilio_config"}
 
@@ -6718,6 +6718,36 @@ def send_whatsapp_message(body):
         return {"ok": True, "sid": data.get("sid")}
     except Exception as exc:
         return {"ok": False, "reason": "exception", "error": str(exc)}
+
+
+def send_whatsapp_message(body):
+    chunks = split_reply_chunks(body, max_chars=WHATSAPP_REPLY_CHUNK_MAX)
+    if not chunks:
+        return {"ok": False, "reason": "empty_body"}
+
+    chunk_results = []
+    first_sid = None
+    for chunk in chunks:
+        result = send_whatsapp_single_message(chunk)
+        chunk_results.append(result)
+        if result.get("ok") and not first_sid:
+            first_sid = result.get("sid")
+        if not result.get("ok"):
+            return {
+                "ok": False,
+                "reason": "chunk_send_failed",
+                "failed_chunk_index": len(chunk_results) - 1,
+                "chunk_count": len(chunks),
+                "chunks_sent": sum(1 for item in chunk_results if item.get("ok")),
+                "chunk_results": chunk_results,
+            }
+
+    return {
+        "ok": True,
+        "sid": first_sid,
+        "chunk_count": len(chunks),
+        "chunk_results": chunk_results,
+    }
 
 
 def announce_current_deploy_once():
