@@ -6186,6 +6186,23 @@ def resolve_alert_reference(reference_code):
     return {"status": "ok", "match": dict(row)}
 
 
+def get_latest_sent_alert_reference():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT alert_id, event_hash, headline
+        FROM alert_log
+        WHERE sent_to_user = 1
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    )
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def get_source_poll_state(source_name):
     conn = get_conn()
     cur = conn.cursor()
@@ -8493,6 +8510,19 @@ def is_full_article_request(text):
     return any(re.search(pattern, t, re.IGNORECASE) for pattern in patterns)
 
 
+def is_expand_request_without_reference(text):
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    patterns = [
+        r"^\s*(?:please\s+)?expand(?:\s+on)?\s*(?:this|that|it)?\s*[.!?]*\s*$",
+        r"^\s*(?:please\s+)?tell me more(?:\s+about)?\s*(?:this|that|it)?\s*[.!?]*\s*$",
+        r"^\s*(?:please\s+)?more on (?:this|that|it)\s*[.!?]*\s*$",
+        r"^\s*(?:please\s+)?(?:details|context)\s*(?:on\s+)?(?:this|that|it)?\s*[.!?]*\s*$",
+    ]
+    return any(re.search(pattern, t, re.IGNORECASE) for pattern in patterns)
+
+
 def format_full_article_unavailable_reply():
     return (
         "I do not store the full article body from this source. "
@@ -8828,6 +8858,8 @@ def route(text):
 
     if expand_reference:
         return ("event_expand", expand_reference)
+    if is_expand_request_without_reference(text):
+        return ("event_expand_latest", None)
 
     if is_portfolio_show_question(text):
         return ("portfolio_show", None)
@@ -9004,6 +9036,12 @@ def build_reply_for_intent(intent, value, msg, memory_result=None):
 
     if intent == "event_expand":
         return expand_brief_event(value)
+
+    if intent == "event_expand_latest":
+        latest = get_latest_sent_alert_reference()
+        if not latest or not latest.get("alert_id"):
+            return "I don't know which alert you mean."
+        return expand_brief_event(latest["alert_id"])
 
     if intent == "event_expand_multi":
         sent = send_multi_expand_messages(value or [])
