@@ -6050,7 +6050,7 @@ def get_event_context(event_hash=None, alert_id=None):
             """
             SELECT *
             FROM event_contexts
-            WHERE alert_id = ?
+            WHERE alert_id = ? COLLATE NOCASE
             ORDER BY id DESC
             LIMIT 1
             """,
@@ -6798,7 +6798,20 @@ def backfill_event_context_for_reference(match):
 def expand_brief_event(reference_code):
     resolved = resolve_brief_reference(reference_code)
     if resolved["status"] == "missing":
-        return "I don't know which brief item that is."
+        # Fallback: allow direct expansion from live alert IDs
+        # (e.g., E1-00f) even when they are not in the latest brief map.
+        direct_context = get_event_context(alert_id=(reference_code or "").strip())
+        if direct_context:
+            resolved = {
+                "status": "ok",
+                "match": {
+                    "alert_id": direct_context.get("alert_id"),
+                    "event_hash": direct_context.get("event_hash"),
+                    "headline": direct_context.get("headline"),
+                },
+            }
+        else:
+            return "I don't know which alert or brief item that is."
     if resolved["status"] == "ambiguous":
         headlines = [item["headline"] for item in resolved["matches"][:2]]
         return "That code is ambiguous. Be more specific."
