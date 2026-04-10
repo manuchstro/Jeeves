@@ -108,6 +108,15 @@ ALERT_CODE_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
 ALERT_CODE_SUFFIX_LEN = 3
 ALERT_CODE_SPACE_SIZE = len(ALERT_CODE_ALPHABET) ** ALERT_CODE_SUFFIX_LEN
 EVENT_REFERENCE_PATTERN = r"([A-Za-z]\d-[A-Za-z0-9]{3}|[A-Za-z]\d(?:\.\d+|-\d+)?)"
+G_QUERY_GENERIC_TERMS = {
+    "news", "new", "latest", "today", "update", "updates", "any", "more", "about",
+    "please", "tell", "me", "on", "the",
+}
+G_QUERY_CORE_TERMS = {
+    "iran", "israel", "gaza", "ukraine", "russia", "china", "taiwan", "hormuz",
+    "sanctions", "shipping", "strait", "ceasefire", "conflict", "war", "oil", "energy",
+    "diplomatic", "military", "geopolitics",
+}
 
 # ---------------- FILE NAVIGATION QUICK GUIDE ----------------
 # 1) Config/constants
@@ -7274,6 +7283,35 @@ def normalize_candidate_query_text(text, max_terms=7):
     return " ".join(cleaned)
 
 
+def tighten_g_query_text(text):
+    raw = (text or "").strip().lower()
+    if not raw:
+        return None
+
+    compact = re.sub(r"\s+", " ", raw)
+    compact = compact.replace("\n", " ").replace("\r", " ")
+    compact = re.sub(r"[\"'`]", "", compact)
+    tokens = re.findall(r"[a-z0-9]{2,}", compact)
+    if not tokens:
+        return None
+
+    cleaned = []
+    for token in tokens:
+        if token in STORY_STOPWORDS or token in G_QUERY_GENERIC_TERMS:
+            continue
+        if token not in cleaned:
+            cleaned.append(token)
+
+    # Keep G queries compact and content-focused.
+    if len(cleaned) == 1 and cleaned[0] in G_QUERY_CORE_TERMS:
+        cleaned.append("geopolitics")
+
+    if len(cleaned) < 2:
+        return None
+
+    return " ".join(cleaned[:6])
+
+
 def is_news_query_signal(query_text, watchlist=None, trusted_portfolio=None):
     t = (query_text or "").lower()
     if not t:
@@ -7322,6 +7360,8 @@ def build_dynamic_news_queries(limit=10, include_local=False):
         "exact_deduped": 0,
         "near_deduped_non_p": 0,
         "category_limited": 0,
+        "g_tightened": 0,
+        "g_dropped": 0,
         "p_query_count": 0,
         "p_query_reason": None,
         "category_counts": {},
@@ -7329,17 +7369,26 @@ def build_dynamic_news_queries(limit=10, include_local=False):
 
     def add_query(query, category_hint=None):
         query_debug["input_total"] += 1
-        if (category_hint or "").upper() == "P":
+        resolved_hint = (category_hint or infer_category_hint_from_text(query))
+        if (resolved_hint or "").upper() == "P":
             query = re.sub(r"\s+", " ", str(query or "").strip().lower())
             query = query.replace("\n", " ").replace("\r", " ")
             query = re.sub(r"[\"'`]", "", query)
+        elif (resolved_hint or "").upper() == "G":
+            tightened = tighten_g_query_text(query)
+            if not tightened:
+                query_debug["g_dropped"] += 1
+                return
+            if normalize_candidate_query_text(query) != tightened:
+                query_debug["g_tightened"] += 1
+            query = tightened
         else:
             query = normalize_candidate_query_text(query)
         if not query or len(query) < 8:
             return
         if not is_news_query_signal(query, watchlist=watchlist, trusted_portfolio=trusted_portfolio):
             return
-        resolved_hint = (category_hint or infer_category_hint_from_text(query))
+        resolved_hint = (resolved_hint or infer_category_hint_from_text(query))
         if not include_local and resolved_hint == "L":
             return
         if query in seen:
