@@ -3201,67 +3201,6 @@ def refresh_sleep_context_from_provider(local_date=None):
     return normalized
 
 
-CONTEXT_PROVIDER_SPECS = {
-    "inbox": {
-        "refresh": fetch_gmail_inbox_daily_context,
-        "get_row": get_inbox_daily_context,
-        "configured": lambda: bool(get_gmail_service()[0]),
-        "upsert": upsert_inbox_daily_context,
-    },
-    "calendar": {
-        "refresh": refresh_calendar_context_from_provider,
-        "get_row": get_calendar_daily_context,
-        "configured": lambda: bool(CALENDAR_CONTEXT_URL),
-        "upsert": upsert_calendar_daily_context,
-    },
-    "sleep": {
-        "refresh": refresh_sleep_context_from_provider,
-        "get_row": get_sleep_daily_context,
-        "configured": lambda: bool(SLEEP_CONTEXT_URL),
-        "upsert": upsert_sleep_daily_context,
-    },
-}
-
-
-def get_context_provider_spec(provider_name):
-    return CONTEXT_PROVIDER_SPECS.get((provider_name or "").strip().lower())
-
-
-def refresh_context_provider(provider_name, local_date=None):
-    spec = get_context_provider_spec(provider_name)
-    if not spec:
-        return None
-    return spec["refresh"](local_date=local_date)
-
-
-def get_context_provider_row(provider_name, local_date=None):
-    spec = get_context_provider_spec(provider_name)
-    if not spec:
-        return None
-    return spec["get_row"](local_date=local_date)
-
-
-def upsert_context_provider(provider_name, local_date, payload):
-    spec = get_context_provider_spec(provider_name)
-    if not spec:
-        return False
-    upsert_fn = spec.get("upsert")
-    if not upsert_fn:
-        return False
-    upsert_fn(local_date, payload or {})
-    return True
-
-
-def context_provider_configured(provider_name):
-    spec = get_context_provider_spec(provider_name)
-    if not spec:
-        return False
-    try:
-        return bool(spec["configured"]())
-    except:
-        return False
-
-
 def mark_scheduled_task_run(task_key, local_date=None):
     conn = get_conn()
     cur = conn.cursor()
@@ -9466,9 +9405,9 @@ def debug_context_calendar_upsert():
         return denied
     payload = request.get_json(silent=True) or {}
     local_date = (payload.get("local_date") or get_local_date_string()).strip()
-    upsert_context_provider("calendar", local_date, payload)
+    upsert_calendar_daily_context(local_date, payload)
     return app.response_class(
-        response=json.dumps({"ok": True, "local_date": local_date, "row": get_context_provider_row("calendar", local_date)}, indent=2),
+        response=json.dumps({"ok": True, "local_date": local_date, "row": get_calendar_daily_context(local_date)}, indent=2),
         status=200,
         mimetype="application/json",
     )
@@ -9481,9 +9420,9 @@ def debug_context_sleep_upsert():
         return denied
     payload = request.get_json(silent=True) or {}
     local_date = (payload.get("local_date") or get_local_date_string()).strip()
-    upsert_context_provider("sleep", local_date, payload)
+    upsert_sleep_daily_context(local_date, payload)
     return app.response_class(
-        response=json.dumps({"ok": True, "local_date": local_date, "row": get_context_provider_row("sleep", local_date)}, indent=2),
+        response=json.dumps({"ok": True, "local_date": local_date, "row": get_sleep_daily_context(local_date)}, indent=2),
         status=200,
         mimetype="application/json",
     )
@@ -9495,8 +9434,8 @@ def debug_context_inbox_refresh():
     if denied:
         return denied
     local_date = get_local_date_string()
-    payload = refresh_context_provider("inbox", local_date=local_date)
-    row = get_context_provider_row("inbox", local_date=local_date)
+    payload = fetch_gmail_inbox_daily_context(local_date=local_date)
+    row = get_inbox_daily_context(local_date=local_date)
     return app.response_class(
         response=json.dumps({"ok": bool(payload or row), "local_date": local_date, "row": row}, indent=2),
         status=200,
@@ -9510,15 +9449,15 @@ def debug_context_calendar_refresh():
     if denied:
         return denied
     local_date = get_local_date_string()
-    payload = refresh_context_provider("calendar", local_date=local_date)
-    row = get_context_provider_row("calendar", local_date=local_date)
+    payload = refresh_calendar_context_from_provider(local_date=local_date)
+    row = get_calendar_daily_context(local_date=local_date)
     status = 200 if (payload or row) else 400
     return app.response_class(
         response=json.dumps(
             {
                 "ok": bool(payload or row),
                 "local_date": local_date,
-                "configured": context_provider_configured("calendar"),
+                "configured": bool(CALENDAR_CONTEXT_URL),
                 "row": row,
             },
             indent=2,
@@ -9534,15 +9473,15 @@ def debug_context_sleep_refresh():
     if denied:
         return denied
     local_date = get_local_date_string()
-    payload = refresh_context_provider("sleep", local_date=local_date)
-    row = get_context_provider_row("sleep", local_date=local_date)
+    payload = refresh_sleep_context_from_provider(local_date=local_date)
+    row = get_sleep_daily_context(local_date=local_date)
     status = 200 if (payload or row) else 400
     return app.response_class(
         response=json.dumps(
             {
                 "ok": bool(payload or row),
                 "local_date": local_date,
-                "configured": context_provider_configured("sleep"),
+                "configured": bool(SLEEP_CONTEXT_URL),
                 "row": row,
             },
             indent=2,
@@ -9558,9 +9497,9 @@ def task_context_refresh():
     if denied:
         return denied
     local_date = get_local_date_string()
-    inbox_payload = refresh_context_provider("inbox", local_date=local_date)
-    calendar_payload = refresh_context_provider("calendar", local_date=local_date)
-    sleep_payload = refresh_context_provider("sleep", local_date=local_date)
+    inbox_payload = fetch_gmail_inbox_daily_context(local_date=local_date)
+    calendar_payload = refresh_calendar_context_from_provider(local_date=local_date)
+    sleep_payload = refresh_sleep_context_from_provider(local_date=local_date)
     snapshot = build_journal_context_snapshot()
     return app.response_class(
         response=json.dumps(
@@ -9571,9 +9510,9 @@ def task_context_refresh():
                 "calendar_refreshed": bool(calendar_payload),
                 "sleep_refreshed": bool(sleep_payload),
                 "configured": {
-                    "calendar_provider": context_provider_configured("calendar"),
-                    "sleep_provider": context_provider_configured("sleep"),
-                    "gmail_connected": context_provider_configured("inbox"),
+                    "calendar_provider": bool(CALENDAR_CONTEXT_URL),
+                    "sleep_provider": bool(SLEEP_CONTEXT_URL),
+                    "gmail_connected": bool(get_gmail_service()[0]),
                 },
                 "context_snapshot": snapshot,
                 "tone_vector": build_tone_vector({}, snapshot),
