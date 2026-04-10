@@ -29,14 +29,15 @@ Last updated: 2026-04-09
 - ✅ Adjusted live poll vs brief split:
   - live polls exclude `L` and reallocate capacity to `P`
   - daily brief path performs a local-inclusive poll pass (`include_local=true`)
-- 🧪 Deployed trusted IBKR HTML portfolio sync:
+- ✅ Deployed and tested trusted IBKR HTML portfolio sync:
   - only `Jeeves_#1*.html` attachments are trusted for portfolio truth
   - Daily Trade Report and monthly statements are ignored for truth ingestion
   - sync endpoint added: `/tasks/portfolio-sync`
   - debug endpoint added: `/debug/portfolio/sync`
-- 🧪 Deployed portfolio-truth inspection links (for dashboard-forward visibility):
+- ✅ Deployed and tested portfolio-truth inspection links (for dashboard-forward visibility):
   - `/debug/portfolio/truth` (JSON)
   - `/debug/portfolio/truth/view` (readable)
+- 🧪 Updated `P` query symbol selection to use top 10 trusted holdings (ETF-inclusive) instead of non-ETF-only.
 
 1. **Stabilize Messaging Cost + Alert Discipline (Now)**
 - ✅ Keep `Tier 1 only` live-alert behavior hard-enforced (Tier 2 never pushed).
@@ -70,7 +71,7 @@ Last updated: 2026-04-09
 - Hardcode recognition to that exact statement format (not generic IBKR email).
 - Parse holdings into trusted portfolio snapshot.
 - Use that trusted portfolio everywhere `P` scoring and portfolio logic are used.
-- 🧪 Parser + trusted-source gate deployed to production branch (`main`), pending live endpoint verification on Railway.
+- ✅ Parser + trusted-source gate deployed and verified live on Railway (`/tasks/portfolio-sync`, `/debug/portfolio/truth`, `/debug/portfolio/truth/view`).
 
 5. **Locked Decisions and Behavior Guards (Immediate After IBKR)**
 - Keep both market providers (`Massive` + `TwelveData`) in place.

@@ -1046,22 +1046,6 @@ def get_trusted_portfolio_symbols(limit=10):
     return [item["symbol"] for item in get_portfolio_holdings(limit=limit, trusted_only=True)]
 
 
-def get_top_non_etf_trusted_portfolio_symbols(limit=10):
-    items = get_portfolio_holdings(limit=max(12, limit * 3), trusted_only=True)
-    picked = []
-    for item in items:
-        symbol = (item.get("symbol") or "").upper().strip()
-        if not symbol:
-            continue
-        if int(item.get("is_etf") or 0) == 1 or symbol in KNOWN_ETF_SYMBOLS:
-            continue
-        if symbol not in picked:
-            picked.append(symbol)
-        if len(picked) >= limit:
-            break
-    return picked
-
-
 def upsert_gmail_account(email, token_payload, scopes):
     conn = get_conn()
     cur = conn.cursor()
@@ -7089,8 +7073,8 @@ def build_dynamic_news_queries(limit=10, include_local=False):
     query_items = []
     seen = set()
     watchlist = get_watchlist()
-    trusted_portfolio = get_trusted_portfolio_symbols(limit=8)
-    trusted_non_etf = get_top_non_etf_trusted_portfolio_symbols(limit=10)
+    trusted_portfolio = get_trusted_portfolio_symbols(limit=10)
+    trusted_top_holdings = get_trusted_portfolio_symbols(limit=10)
     query_debug = {
         "input_total": 0,
         "exact_deduped": 0,
@@ -7120,15 +7104,15 @@ def build_dynamic_news_queries(limit=10, include_local=False):
     for query, category_hint in BASELINE_NEWS_QUERIES:
         add_query(query, category_hint)
 
-    # P-query symbols: use up to 10 non-ETF trusted portfolio symbols only.
+    # P-query symbols: use up to top 10 trusted portfolio symbols (ETF-inclusive).
     # If trusted portfolio is not available yet, leave P-symbol expansion empty.
-    p_query_symbols = trusted_non_etf
+    p_query_symbols = trusted_top_holdings
     if p_query_symbols:
         add_query(" ".join(p_query_symbols) + " stock market performance", "P")
         add_query(" ".join(p_query_symbols) + " company news", "P")
         add_query(" ".join(p_query_symbols) + " earnings guidance risk", "P")
     else:
-        query_debug["p_query_reason"] = "no_trusted_non_etf_symbols"
+        query_debug["p_query_reason"] = "no_trusted_symbols"
 
     relevant = get_relevant_memories("current interests recurring focus active concerns", limit=12)
     for item in relevant.get("working", []) + relevant.get("long_term", []):
