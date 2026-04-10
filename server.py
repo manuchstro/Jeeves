@@ -73,14 +73,10 @@ DAILY_BRIEF_MINUTE = 0
 GRATITUDE_HOUR = 22
 GRATITUDE_MINUTE = 15
 JOURNAL_RESPONSE_WINDOW_HOURS = 12
-OPEN_METEO_LAT = os.environ.get("OPEN_METEO_LAT", "").strip()
-OPEN_METEO_LON = os.environ.get("OPEN_METEO_LON", "").strip()
-LOCATION_LABEL = os.environ.get("LOCATION_LABEL", "").strip()
 CALENDAR_CONTEXT_URL = os.environ.get("CALENDAR_CONTEXT_URL", "").strip()
 CALENDAR_CONTEXT_BEARER = os.environ.get("CALENDAR_CONTEXT_BEARER", "").strip()
 SLEEP_CONTEXT_URL = os.environ.get("SLEEP_CONTEXT_URL", "").strip()
 SLEEP_CONTEXT_BEARER = os.environ.get("SLEEP_CONTEXT_BEARER", "").strip()
-LOCATION_CONTEXT_STALE_MINUTES = max(10, int(os.environ.get("LOCATION_CONTEXT_STALE_MINUTES", "180")))
 MEMORY_CONFIDENCE_MAX = 0.99
 MEMORY_CORRELATION_THRESHOLD = 0.8
 MEMORY_DELETE_THRESHOLD = 0.10
@@ -3593,7 +3589,6 @@ def build_command_key_reply():
     scheduled_check = link("/tasks/scheduled-check")
     context_debug = link("/debug/context")
     context_refresh = link("/tasks/context-refresh")
-    weather_refresh = link("/debug/context/weather/refresh")
     inbox_refresh = link("/debug/context/inbox/refresh")
     calendar_refresh = link("/debug/context/calendar/refresh")
     sleep_refresh = link("/debug/context/sleep/refresh")
@@ -3622,7 +3617,6 @@ def build_command_key_reply():
         f"memory debug view: {memory_view}",
         f"context debug: {context_debug}",
         f"context refresh (all): {context_refresh}",
-        f"weather refresh: {weather_refresh}",
         f"inbox refresh: {inbox_refresh}",
         f"calendar refresh: {calendar_refresh}",
         f"sleep refresh: {sleep_refresh}",
@@ -5163,36 +5157,6 @@ def store_journal_analysis(text):
     }
 
 
-def get_weather_context_snapshot():
-    local_date = get_local_date_string()
-    stored = get_weather_daily_context(local_date=local_date)
-    if not stored:
-        fetched = fetch_open_meteo_daily_context(local_date=local_date)
-        if fetched:
-            stored = get_weather_daily_context(local_date=local_date)
-    if not stored:
-        return {
-            "available": False,
-            "status": "not_connected",
-            "summary": "",
-        }
-    label = (stored.get("weather_label") or "unknown").replace("_", " ")
-    return {
-        "available": True,
-        "status": "connected",
-        "summary": f"{(LOCATION_LABEL + ': ') if LOCATION_LABEL else ''}{label}, {stored.get('temperature_c')}C, precip {stored.get('precipitation_mm')}mm",
-        "features": {
-            "temperature_c": stored.get("temperature_c"),
-            "precipitation_mm": stored.get("precipitation_mm"),
-            "cloud_cover_pct": stored.get("cloud_cover_pct"),
-            "humidity_pct": stored.get("humidity_pct"),
-            "weather_label": stored.get("weather_label"),
-            "location_label": LOCATION_LABEL or None,
-            "confidence": stored.get("confidence"),
-        },
-    }
-
-
 def get_sleep_context_snapshot():
     stored = get_sleep_daily_context(local_date=get_local_date_string())
     if not stored:
@@ -5264,37 +5228,17 @@ def get_inbox_context_snapshot():
     }
 
 
-def get_location_context_snapshot():
-    latest = get_latest_location_context()
-    if latest:
-        lat = latest.get("latitude")
-        lon = latest.get("longitude")
-        label = (latest.get("label") or LOCATION_LABEL or "").strip()
-        summary = label if label else f"{lat},{lon}"
-        status = "connected" if is_location_context_fresh(latest) else "stale"
-        return {"available": True, "status": status, "summary": summary}
-    if LOCATION_LABEL:
-        return {"available": True, "status": "configured", "summary": LOCATION_LABEL}
-    if OPEN_METEO_LAT and OPEN_METEO_LON:
-        return {"available": True, "status": "configured", "summary": f"{OPEN_METEO_LAT},{OPEN_METEO_LON}"}
-    return {"available": False, "status": "not_connected", "summary": ""}
-
-
 def build_journal_context_snapshot():
     return {
-        "weather": get_weather_context_snapshot(),
         "sleep": get_sleep_context_snapshot(),
         "calendar": get_calendar_context_snapshot(),
         "inbox": get_inbox_context_snapshot(),
-        "location": get_location_context_snapshot(),
     }
 
 
 def build_tone_context_snapshot(context_snapshot):
     ctx = context_snapshot or {}
-    # Location is intentionally excluded from tone-driving context.
     return {
-        "weather": ctx.get("weather", {}),
         "sleep": ctx.get("sleep", {}),
         "calendar": ctx.get("calendar", {}),
         "inbox": ctx.get("inbox", {}),
@@ -5382,12 +5326,10 @@ def get_memory_state_confidence_profile():
 
 
 def build_tone_vector(journal_analysis, context_snapshot):
-    weather = (context_snapshot or {}).get("weather", {})
     sleep = (context_snapshot or {}).get("sleep", {})
     calendar = (context_snapshot or {}).get("calendar", {})
     inbox = (context_snapshot or {}).get("inbox", {})
 
-    weather_features = weather.get("features") or {}
     sleep_features = sleep.get("features") or {}
     calendar_features = calendar.get("features") or {}
     inbox_features = inbox.get("features") or {}
@@ -5425,17 +5367,10 @@ def build_tone_vector(journal_analysis, context_snapshot):
     fatigue_score = clamp01((sleep_features.get("fatigue_score") or 0.5))
     market_stress = compute_market_stress_signal()
 
-    weather_label = (weather_features.get("weather_label") or "").lower()
-    weather_drag = 0.0
-    if any(word in weather_label for word in ["rain", "storm", "overcast", "fog"]):
-        weather_drag = 0.2
-    if weather_label in {"clear", "mostly_clear"}:
-        weather_drag = -0.1
-
     brevity = clamp01(0.22 + (0.35 * busy_score) + (0.22 * fatigue_score) + (0.18 * stress_signal))
     directness = clamp01(0.3 + (0.28 * busy_score) + (0.2 * stress_signal) + (0.12 * friction_signal))
-    seriousness = clamp01(0.22 + (0.2 * market_stress) + (0.2 * stress_signal) + (0.2 * outlook_signal) + max(0.0, weather_drag))
-    warmth = clamp01(0.58 + (0.12 * energy_signal) - (0.18 * stress_signal) - (0.16 * fatigue_score) - (0.14 * busy_score) - weather_drag)
+    seriousness = clamp01(0.22 + (0.2 * market_stress) + (0.2 * stress_signal) + (0.2 * outlook_signal))
+    warmth = clamp01(0.58 + (0.12 * energy_signal) - (0.18 * stress_signal) - (0.16 * fatigue_score) - (0.14 * busy_score))
     # High confidence in memory-state signals should influence tone behavior,
     # not only debug visibility. This keeps style stable and deliberate.
     directness = clamp01(directness + (0.08 * memory_confidence))
@@ -5474,7 +5409,6 @@ def build_tone_vector(journal_analysis, context_snapshot):
             "market_stress": round(market_stress, 3),
             "stress_signal": round(stress_signal, 3),
             "friction_signal": round(friction_signal, 3),
-            "weather_drag": round(weather_drag, 3),
             "memory_confidence": round(memory_confidence, 3),
             "anti_sycophancy": round(anti_sycophancy, 3),
         },
@@ -9693,21 +9627,6 @@ def debug_context_sleep_upsert():
     )
 
 
-@app.route("/debug/context/weather/refresh", methods=["POST"])
-def debug_context_weather_refresh():
-    denied = require_internal_api_key()
-    if denied:
-        return denied
-    local_date = get_local_date_string()
-    payload = fetch_open_meteo_daily_context(local_date=local_date)
-    row = get_weather_daily_context(local_date=local_date)
-    return app.response_class(
-        response=json.dumps({"ok": bool(payload or row), "local_date": local_date, "row": row}, indent=2),
-        status=200,
-        mimetype="application/json",
-    )
-
-
 @app.route("/debug/context/inbox/refresh", methods=["POST"])
 def debug_context_inbox_refresh():
     denied = require_internal_api_key()
@@ -9771,90 +9690,12 @@ def debug_context_sleep_refresh():
     )
 
 
-@app.route("/tasks/context-ingest/location", methods=["POST"])
-def task_context_ingest_location():
-    denied = require_internal_api_key()
-    if denied:
-        return denied
-
-    payload = request.get_json(silent=True) or {}
-    coords = payload.get("coords") if isinstance(payload.get("coords"), dict) else {}
-    latitude = payload.get("latitude")
-    if latitude is None:
-        latitude = payload.get("lat")
-    if latitude is None:
-        latitude = payload.get("y")
-    if latitude is None:
-        latitude = coords.get("latitude")
-    if latitude is None:
-        latitude = coords.get("lat")
-
-    longitude = payload.get("longitude")
-    if longitude is None:
-        longitude = payload.get("lon")
-    if longitude is None:
-        longitude = payload.get("lng")
-    if longitude is None:
-        longitude = payload.get("x")
-    if longitude is None:
-        longitude = coords.get("longitude")
-    if longitude is None:
-        longitude = coords.get("lon")
-    if longitude is None:
-        longitude = coords.get("lng")
-
-    try:
-        lat_f = float(latitude)
-        lon_f = float(longitude)
-    except:
-        return app.response_class(
-            response=json.dumps({"ok": False, "reason": "invalid_coordinates"}, indent=2),
-            status=400,
-            mimetype="application/json",
-        )
-
-    if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
-        return app.response_class(
-            response=json.dumps({"ok": False, "reason": "coordinates_out_of_range"}, indent=2),
-            status=400,
-            mimetype="application/json",
-        )
-
-    accuracy_m = payload.get("accuracy_m")
-    if accuracy_m is None:
-        accuracy_m = payload.get("accuracy")
-    try:
-        accuracy_f = float(accuracy_m) if accuracy_m is not None else None
-    except:
-        accuracy_f = None
-
-    label = payload.get("label") or payload.get("name") or payload.get("city")
-    source = payload.get("source") or "context_ingest"
-    captured_at = payload.get("captured_at") or payload.get("timestamp")
-
-    upsert_latest_location_context(
-        latitude=lat_f,
-        longitude=lon_f,
-        accuracy_m=accuracy_f,
-        label=label,
-        source=source,
-        captured_at=captured_at,
-    )
-    latest = get_latest_location_context()
-    return app.response_class(
-        response=json.dumps({"ok": True, "location": latest, "fresh": is_location_context_fresh(latest)}, indent=2),
-        status=200,
-        mimetype="application/json",
-    )
-
-
 @app.route("/tasks/context-refresh", methods=["GET", "POST"])
 def task_context_refresh():
     denied = require_internal_api_key()
     if denied:
         return denied
     local_date = get_local_date_string()
-    weather_payload = fetch_open_meteo_daily_context(local_date=local_date)
     inbox_payload = fetch_gmail_inbox_daily_context(local_date=local_date)
     calendar_payload = refresh_calendar_context_from_provider(local_date=local_date)
     sleep_payload = refresh_sleep_context_from_provider(local_date=local_date)
@@ -9864,13 +9705,10 @@ def task_context_refresh():
             {
                 "ok": True,
                 "local_date": local_date,
-                "weather_refreshed": bool(weather_payload),
                 "inbox_refreshed": bool(inbox_payload),
                 "calendar_refreshed": bool(calendar_payload),
                 "sleep_refreshed": bool(sleep_payload),
                 "configured": {
-                    "open_meteo": bool(OPEN_METEO_LAT and OPEN_METEO_LON),
-                    "location_ingest": bool(get_latest_location_context()),
                     "calendar_provider": bool(CALENDAR_CONTEXT_URL),
                     "sleep_provider": bool(SLEEP_CONTEXT_URL),
                     "gmail_connected": bool(get_gmail_service()[0]),
