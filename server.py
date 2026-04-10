@@ -8817,6 +8817,22 @@ def build_calendar_query_reply(request_info):
 
     if lecture_only:
         if not filtered:
+            # Be explicit when non-lecture events exist so this doesn't read like
+            # a full calendar miss.
+            non_lecture = []
+            for event in events:
+                start_local = str(event.get("start_local") or "").strip()
+                event_day = start_local[:10] if len(start_local) >= 10 else ""
+                if event_day not in target_days:
+                    continue
+                non_lecture.append(event)
+            if non_lecture:
+                sample = non_lecture[0]
+                return (
+                    f"I don't see any lecture/class events in your calendar for {label}. "
+                    f"I do see {len(non_lecture)} other event(s), for example: "
+                    f"\"{sample.get('title','(untitled)')}\"."
+                )
             return f"I don't see any lecture/class events in your calendar for {label}."
         lines = []
         for event in filtered[:8]:
