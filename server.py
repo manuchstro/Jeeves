@@ -7712,15 +7712,17 @@ def build_dynamic_news_queries(limit=10, include_local=False):
     for query, category_hint in BASELINE_NEWS_QUERIES:
         add_query(query, category_hint)
 
-    # P-query symbols: use up to top 10 trusted portfolio symbols (ETF-inclusive).
-    # If trusted portfolio is not available yet, leave P-symbol expansion empty.
+    # P queries are intentionally broad and simple:
+    # 1) full top holdings symbol list
+    # 2) broad market performance
+    # 3) forward-looking market performance
     p_query_symbols = trusted_top_holdings
     if p_query_symbols:
-        add_query(" ".join(p_query_symbols) + " stock market performance", "P")
-        add_query(" ".join(p_query_symbols) + " company news", "P")
-        add_query(" ".join(p_query_symbols) + " earnings guidance risk", "P")
+        add_query(" ".join(p_query_symbols), "P")
     else:
         query_debug["p_query_reason"] = "no_trusted_symbols"
+    add_query("broad market performance", "P")
+    add_query("forward looking market performance", "P")
 
     relevant = get_relevant_memories("current interests recurring focus active concerns", limit=12)
     for item in relevant.get("working", []) + relevant.get("long_term", []):
