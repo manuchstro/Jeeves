@@ -6455,9 +6455,10 @@ def format_source_refs_list(refs, limit=3):
 
 def format_alert_message(candidate, alert_result):
     code = alert_result.get("alert_id") or f"{candidate['category']}{candidate.get('assigned_tier', candidate.get('tier', 2))}"
+    prefix = code.split("-", 1)[0] if "-" in code else code
     source_text = format_source_refs_list(candidate.get("source_refs"), limit=3)
     suffix = f" [{source_text}]" if source_text else ""
-    return f"{code}: {candidate['headline']}{suffix}"
+    return f"{prefix}: {candidate['headline']}{suffix} ({code})"
 
 
 def build_daily_brief_insight_lines(selected_alerts, portfolio_section=None, watchlist_section=None):
