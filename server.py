@@ -6163,6 +6163,29 @@ def resolve_brief_reference(reference_code):
     return {"status": "ok", "match": matches[0]}
 
 
+def resolve_alert_reference(reference_code):
+    ref = (reference_code or "").strip()
+    if not ref:
+        return {"status": "missing"}
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT alert_id, event_hash, headline
+        FROM alert_log
+        WHERE alert_id = ? COLLATE NOCASE
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (ref,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return {"status": "missing"}
+    return {"status": "ok", "match": dict(row)}
+
+
 def get_source_poll_state(source_name):
     conn = get_conn()
     cur = conn.cursor()
@@ -6800,7 +6823,15 @@ def expand_brief_event(reference_code):
     if resolved["status"] == "missing":
         # Fallback: allow direct expansion from live alert IDs
         # (e.g., E1-00f) even when they are not in the latest brief map.
-        direct_context = get_event_context(alert_id=(reference_code or "").strip())
+        ref = (reference_code or "").strip()
+        direct_context = get_event_context(alert_id=ref)
+        if not direct_context:
+            resolved_alert = resolve_alert_reference(ref)
+            if resolved_alert.get("status") == "ok":
+                match = resolved_alert["match"]
+                direct_context = get_event_context(event_hash=match.get("event_hash"))
+                if not direct_context:
+                    direct_context = backfill_event_context_for_reference(match)
         if direct_context:
             resolved = {
                 "status": "ok",
