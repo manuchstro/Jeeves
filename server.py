@@ -3284,17 +3284,47 @@ def build_command_key_reply():
     base = get_public_base_url()
     privacy_link = f"{base}/privacy" if base else "/privacy"
     terms_link = f"{base}/terms" if base else "/terms"
+
+    def link(path):
+        target = f"{base}{path}" if base else path
+        return append_internal_key(target)
+
     memory_raw = append_internal_key(f"{base}/debug/memory" if base else "/debug/memory")
     memory_compact = append_internal_key(f"{base}/debug/memory?compact=1" if base else "/debug/memory?compact=1")
     memory_view = append_internal_key(f"{base}/debug/memory/view" if base else "/debug/memory/view")
+    poll_preview = link("/debug/poll/preview")
+    poll_run = link("/debug/poll/run")
+    portfolio_sync = link("/tasks/portfolio-sync?days=14")
+    portfolio_truth_json = link("/debug/portfolio/truth")
+    portfolio_truth_view = link("/debug/portfolio/truth/view")
+    portfolio_integrity = link("/debug/portfolio/integrity")
+    daily_brief_force = link("/tasks/daily-brief?force=1")
+    scheduled_check = link("/tasks/scheduled-check")
+    context_debug = link("/debug/context")
+
     return "\n".join([
         COMMAND_KEY_REPLY,
         "",
         f"privacy: {privacy_link}",
         f"terms: {terms_link}",
+        "",
+        "Core task links:",
+        f"- poll run: {poll_run}",
+        f"- poll preview: {poll_preview}",
+        f"- daily brief (force): {daily_brief_force}",
+        f"- scheduled check: {scheduled_check}",
+        "",
+        "Portfolio truth links:",
+        f"- sync trusted portfolio: {portfolio_sync}",
+        f"- portfolio truth (json): {portfolio_truth_json}",
+        f"- portfolio truth (readable): {portfolio_truth_view}",
+        f"- portfolio integrity: {portfolio_integrity}",
+        "",
+        "Memory and context links:",
         f"memory debug raw: {memory_raw}",
         f"memory debug compact: {memory_compact}",
         f"memory debug view: {memory_view}",
+        f"context debug: {context_debug}",
     ])
 
 
