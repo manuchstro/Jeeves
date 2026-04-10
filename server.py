@@ -7057,6 +7057,59 @@ def normalize_candidate_category(candidate, watchlist=None):
     return original, None
 
 
+def candidate_topic_terms(candidate):
+    text = " ".join([
+        candidate.get("headline", "") or "",
+        candidate.get("snippet", "") or "",
+        candidate.get("section", "") or "",
+    ]).lower()
+    return {
+        token for token in re.findall(r"[a-z0-9]{3,}", text)
+        if token not in STORY_STOPWORDS
+    }
+
+
+def g_integrity_guard(candidate):
+    terms = candidate_topic_terms(candidate)
+    query_terms = _query_terms(candidate.get("origin_query") or "")
+    query_terms = {
+        token for token in query_terms
+        if token not in STORY_STOPWORDS and token not in G_QUERY_GENERIC_TERMS
+    }
+
+    geo_hits = len(terms & G_QUERY_CORE_TERMS)
+    query_overlap = len(terms & query_terms) if query_terms else 0
+
+    local_like = any(token in terms for token in {
+        "weather", "rain", "flood", "storm", "snow", "wildfire",
+        "california", "bay", "area", "san", "francisco", "oakland", "berkeley",
+    })
+    finance_like = any(token in terms for token in {
+        "fed", "inflation", "rates", "yield", "market", "stocks", "earnings", "gdp", "imf",
+    })
+
+    # Topic coherence score for G: must be tied to geopolitical terms and/or
+    # closely overlap the originating query intent.
+    coherence = 0
+    if geo_hits >= 2:
+        coherence += 2
+    elif geo_hits == 1:
+        coherence += 1
+    if query_overlap >= 2:
+        coherence += 2
+    elif query_overlap == 1:
+        coherence += 1
+
+    if coherence >= 2:
+        return {"ok": True, "action": "keep_g", "reason": "coherent_g"}
+
+    if local_like and geo_hits == 0:
+        return {"ok": False, "action": "reclassify_L", "reason": "g_integrity_local_mismatch"}
+    if finance_like and geo_hits == 0:
+        return {"ok": False, "action": "reclassify_E", "reason": "g_integrity_macro_mismatch"}
+    return {"ok": False, "action": "drop", "reason": "g_integrity_low_coherence"}
+
+
 def _normalize_domain(web_url):
     domain = (urlparse(web_url or "").netloc or "").lower().strip()
     if domain.startswith("www."):
@@ -7136,6 +7189,7 @@ def get_currents_candidates(query, category_hint=None, watchlist=None):
                 "source_refs": [source_label],
                 "published_at": published_at,
                 "web_url": web_url,
+                "origin_query": query,
                 "raw_payload": article,
             })
 
@@ -7184,6 +7238,7 @@ def get_nyt_headline_candidates(query, category_hint=None, watchlist=None):
                     "source_refs": ["NYT"],
                     "published_at": pub_date,
                     "web_url": web_url,
+                    "origin_query": query,
                     "raw_payload": doc,
                 })
 
@@ -7481,6 +7536,9 @@ def build_poll_candidates(force_currents=False, include_local=False):
         "currents_added": 0,
         "currents_filtered": 0,
         "currents_filter_reasons": {},
+        "g_integrity_reclass_count": 0,
+        "g_integrity_drop_count": 0,
+        "g_integrity_examples": [],
     }
 
     for category, tier, series in POLL_SERIES:
@@ -7542,7 +7600,41 @@ def build_poll_candidates(force_currents=False, include_local=False):
                     "source": candidate.get("source"),
                     "reason": reason,
                 })
-        normalized_candidates.append({**candidate, "category": normalized_category})
+        normalized = {**candidate, "category": normalized_category}
+        if normalized.get("category") == "G":
+            integrity = g_integrity_guard(normalized)
+            if integrity.get("action") == "reclassify_L":
+                normalized["category"] = "L"
+                source_debug["g_integrity_reclass_count"] += 1
+                if len(source_debug["g_integrity_examples"]) < 6:
+                    source_debug["g_integrity_examples"].append({
+                        "headline": normalized.get("headline"),
+                        "from": "G",
+                        "to": "L",
+                        "reason": integrity.get("reason"),
+                    })
+            elif integrity.get("action") == "reclassify_E":
+                normalized["category"] = "E"
+                source_debug["g_integrity_reclass_count"] += 1
+                if len(source_debug["g_integrity_examples"]) < 6:
+                    source_debug["g_integrity_examples"].append({
+                        "headline": normalized.get("headline"),
+                        "from": "G",
+                        "to": "E",
+                        "reason": integrity.get("reason"),
+                    })
+            elif integrity.get("action") == "drop":
+                source_debug["g_integrity_drop_count"] += 1
+                if len(source_debug["g_integrity_examples"]) < 6:
+                    source_debug["g_integrity_examples"].append({
+                        "headline": normalized.get("headline"),
+                        "from": "G",
+                        "to": "drop",
+                        "reason": integrity.get("reason"),
+                    })
+                continue
+
+        normalized_candidates.append(normalized)
 
     source_debug["category_reassigned_count"] = category_reassigned_count
     source_debug["category_reassigned_examples"] = category_reassigned_examples
