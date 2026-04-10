@@ -6343,7 +6343,8 @@ def get_recent_alerts_for_brief(limit=12, include_debug=False):
                 e.web_url,
                 e.source_label,
                 e.source_refs_json,
-                e.selection_reasons_json
+                e.selection_reasons_json,
+                e.score
             FROM alert_log a
             LEFT JOIN event_contexts e
               ON e.event_hash = a.event_hash
@@ -6372,7 +6373,8 @@ def get_recent_alerts_for_brief(limit=12, include_debug=False):
                 e.web_url,
                 e.source_label,
                 e.source_refs_json,
-                e.selection_reasons_json
+                e.selection_reasons_json,
+                e.score
             FROM alert_log a
             LEFT JOIN event_contexts e
               ON e.event_hash = a.event_hash
@@ -6524,23 +6526,45 @@ Watchlist line:
 def compose_daily_brief(include_debug=False):
     alerts = get_recent_alerts_for_brief(limit=80, include_debug=True)
     section_order = ["P", "E", "G", "L"]
-    by_section = {code: [] for code in section_order}
+    scored_alerts = []
     for item in alerts:
         code = (item.get("category") or "").upper()
-        if code in by_section:
-            by_section[code].append(item)
+        if code not in section_order:
+            continue
+        scored_alerts.append({**item, "category": code})
+
+    def relevance_sort_key(item):
+        try:
+            score = float(item.get("score") or 0.0)
+        except:
+            score = 0.0
+        published_at = str(item.get("published_at") or "")
+        created_at = str(item.get("created_at") or "")
+        return (score, published_at, created_at)
+
+    tier_1 = sorted(
+        [item for item in scored_alerts if int(item.get("tier") or 3) == 1],
+        key=relevance_sort_key,
+        reverse=True,
+    )
+    tier_2 = sorted(
+        [item for item in scored_alerts if int(item.get("tier") or 3) == 2],
+        key=relevance_sort_key,
+        reverse=True,
+    )
+    tier_3 = sorted(
+        [item for item in scored_alerts if int(item.get("tier") or 3) == 3],
+        key=relevance_sort_key,
+        reverse=True,
+    )
 
     selected_alerts = []
-    for code in section_order:
-        section_items = by_section[code]
-        tier_1 = [item for item in section_items if int(item.get("tier") or 3) == 1]
-        tier_2 = [item for item in section_items if int(item.get("tier") or 3) == 2]
-        if tier_1 or tier_2:
-            selected_alerts.extend(tier_1 + tier_2)
-        else:
-            tier_3 = [item for item in section_items if int(item.get("tier") or 3) == 3]
-            if tier_3:
-                selected_alerts.append(tier_3[0])
+    if tier_1:
+        selected_alerts = tier_1[:5]
+    elif tier_2:
+        selected_alerts = tier_2[:1]
+    elif tier_3:
+        selected_alerts = tier_3[:1]
 
     selected_alerts = build_brief_display_codes(selected_alerts)
 
