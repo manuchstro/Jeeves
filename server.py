@@ -3297,6 +3297,9 @@ def refresh_sleep_context_from_provider(local_date=None):
             num = num / 3600.0
         elif num > 48:
             num = num / 60.0
+        # Apply a small calibration haircut for "time in bed"-style overcounting.
+        if num > 0:
+            num = num * 0.9
         return round(num, 3)
 
     def norm_01(value, fallback=None):
