@@ -73,6 +73,8 @@ Last updated: 2026-04-10
   - converts incoming `sleep_hours` from seconds or minutes to hours when needed
   - prevents inflated values like `53100h` from Health sample aggregation payloads
 - ✅ Added server-side 10% sleep-duration calibration haircut after normalization to account for time-in-bed style overcounting.
+- ✅ Added server-side double-count correction for inflated nightly totals:
+  - if normalized `sleep_hours` is implausibly high (`>=12h`), apply one-time divide-by-2 before calibration.
 - ✅ Updated tone matrix sleep logic:
   - fatigue influence now uses only `sleep_hours`
   - sub-8-hour sleep increases fatigue effect
