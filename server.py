@@ -5091,6 +5091,16 @@ def get_sleep_context_snapshot():
             "status": "not_connected",
             "summary": "",
         }
+    has_sleep_signal = any(
+        stored.get(key) not in (None, "")
+        for key in ("sleep_hours", "sleep_quality", "steps", "resting_hr", "fatigue_score")
+    )
+    if not has_sleep_signal:
+        return {
+            "available": False,
+            "status": "not_connected",
+            "summary": "",
+        }
     return {
         "available": True,
         "status": "connected",
