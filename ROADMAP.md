@@ -93,6 +93,8 @@ Last updated: 2026-04-10
 - ✅ Hardened gratitude task consolidation path:
   - `/tasks/gratitude` and scheduled-check gratitude path now use retry-protected nightly consolidation
   - returns structured JSON error payload on failure instead of raw HTML 500 page
+- ✅ Fixed gratitude consolidation regression:
+  - corrected nightly material builder argument name (`journal_limit`, not `gratitude_limit`) that caused `TypeError` in journal cron.
 
 1. **Stabilize Messaging Cost + Alert Discipline (Now)**
 - ✅ Keep `Tier 1 only` live-alert behavior hard-enforced (Tier 2 never pushed).
