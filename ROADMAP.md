@@ -72,6 +72,10 @@ Last updated: 2026-04-10
 - ✅ Added sleep duration unit normalization in ingest path:
   - converts incoming `sleep_hours` from seconds or minutes to hours when needed
   - prevents inflated values like `53100h` from Health sample aggregation payloads
+- ✅ Updated tone matrix sleep logic:
+  - fatigue influence now uses only `sleep_hours`
+  - sub-8-hour sleep increases fatigue effect
+  - 8+ hours are treated as the same rested baseline (no additional differentiation)
 
 1. **Stabilize Messaging Cost + Alert Discipline (Now)**
 - ✅ Keep `Tier 1 only` live-alert behavior hard-enforced (Tier 2 never pushed).
