@@ -8939,10 +8939,20 @@ def build_calendar_query_reply(request_info):
 
     focus_text = str((request_info or {}).get("focus_text") or "").strip().lower()
     query_text = str((request_info or {}).get("query_text") or "").strip().lower()
-    # If IL does not emit explicit focus text, derive lightweight focus terms
-    # from the query itself (for prompts like "did I have any lectures today?").
-    focus_basis = focus_text or query_text
-    focus_terms = [
+    # Only apply topic filtering when the user clearly requested a topic.
+    # Generic planning prompts should return all events for the window.
+    explicit_focus_patterns = [
+        r"\blecture(s)?\b",
+        r"\bclass(es)?\b",
+        r"\bseminar(s)?\b",
+        r"\bexam(s)?\b",
+        r"\bmidterm(s)?\b",
+        r"\boffice hours?\b",
+        r"\bmeeting(s)?\b",
+    ]
+    has_explicit_focus = any(re.search(pattern, query_text) for pattern in explicit_focus_patterns)
+    focus_basis = focus_text if focus_text else (query_text if has_explicit_focus else "")
+    raw_focus_terms = [
         token
         for token in re.split(r"[^a-z0-9]+", focus_basis)
         if len(token) >= 3
@@ -8950,9 +8960,17 @@ def build_calendar_query_reply(request_info):
             "the", "and", "for", "with", "from", "that", "this",
             "calendar", "schedule", "event", "events", "today", "tomorrow",
             "week", "next", "past", "previously", "earlier", "mean", "have", "had",
-            "did", "what", "which", "any", "check",
+            "did", "what", "which", "any", "check", "list", "show", "planned",
+            "plan", "please", "all",
         }
     ]
+    # Add simple singular variants so "lectures" matches "lecture", etc.
+    focus_terms = []
+    for token in raw_focus_terms:
+        focus_terms.append(token)
+        if token.endswith("s") and len(token) > 4:
+            focus_terms.append(token[:-1])
+    focus_terms = sorted(set(focus_terms))
 
     filtered = []
     for event in events:
