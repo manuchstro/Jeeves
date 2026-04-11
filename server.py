@@ -5319,7 +5319,21 @@ def build_tone_vector(journal_analysis, context_snapshot):
     calendar_busy = clamp01((calendar_features.get("busy_score") or 0.0))
     inbox_busy = clamp01((inbox_features.get("busy_score") or 0.0))
     busy_score = clamp01(max(calendar_busy, inbox_busy))
-    fatigue_score = clamp01((sleep_features.get("fatigue_score") or 0.5))
+    # Sleep-duration-driven fatigue model:
+    # - only sleep_hours influences fatigue
+    # - 8h or more is treated as fully-rested baseline (same effect)
+    # - below 8h scales fatigue impact linearly
+    sleep_hours_raw = sleep_features.get("sleep_hours")
+    try:
+        sleep_hours = float(sleep_hours_raw) if sleep_hours_raw not in (None, "") else None
+    except:
+        sleep_hours = None
+    if sleep_hours is None:
+        fatigue_score = 0.5
+    elif sleep_hours >= 8.0:
+        fatigue_score = 0.0
+    else:
+        fatigue_score = clamp01((8.0 - max(0.0, sleep_hours)) / 8.0)
     market_stress = compute_market_stress_signal()
 
     brevity = clamp01(0.22 + (0.35 * busy_score) + (0.22 * fatigue_score) + (0.18 * stress_signal))
