@@ -5649,7 +5649,7 @@ def run_nightly_memory_consolidation():
                 summary,
             )
 
-    material = build_recent_memory_material(interaction_limit=60, observation_limit=80, gratitude_limit=10)
+    material = build_recent_memory_material(interaction_limit=60, observation_limit=80, journal_limit=10)
     payload = run_ai_deep_memory_consolidation(material)
     store_deep_memory_consolidation(payload)
 
