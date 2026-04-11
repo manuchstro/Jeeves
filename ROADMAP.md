@@ -162,6 +162,7 @@ Last updated: 2026-04-10
 - Google sign-in auth.
 - API spend metrics, usage graphs, and cost totals.
 - “Calls used / remaining” visibility where provider data allows it.
+- Add historical trend graph view for tone/context signals on one unified chart (e.g., brevity, directness, warmth, seriousness, busy_score, calendar_busy, inbox_busy, fatigue_score, market_stress, stress_signal, anti_sycophancy).
 - Full readable memory explorer from foundation.
 - Per-memory accuracy feedback controls.
 - Memory visibility toggles.
