@@ -90,6 +90,9 @@ Last updated: 2026-04-10
 - ✅ Hardened `/tasks/memory-consolidation` task execution:
   - added retry wrapper for transient SQLite lock/busy failures
   - endpoint now returns structured JSON failure details instead of raw HTML 500 page
+- ✅ Hardened gratitude task consolidation path:
+  - `/tasks/gratitude` and scheduled-check gratitude path now use retry-protected nightly consolidation
+  - returns structured JSON error payload on failure instead of raw HTML 500 page
 
 1. **Stabilize Messaging Cost + Alert Discipline (Now)**
 - ✅ Keep `Tier 1 only` live-alert behavior hard-enforced (Tier 2 never pushed).
