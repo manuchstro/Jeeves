@@ -3267,16 +3267,42 @@ def refresh_sleep_context_from_provider(local_date=None):
     payload = fetch_external_context_payload(SLEEP_CONTEXT_URL, SLEEP_CONTEXT_BEARER)
     if not payload:
         return None
+    # Reject explicit provider errors (e.g., unauthorized/no_data) and avoid
+    # writing null rows that look "connected" in context snapshots.
+    if payload.get("ok") is False:
+        return None
+    # Accept wrapped payload shape if a provider returns {"ok": true, "payload": {...}}.
+    if isinstance(payload.get("payload"), dict):
+        payload = payload.get("payload") or {}
+
+    has_sleep_signal = any(
+        payload.get(key) not in (None, "")
+        for key in ("sleep_hours", "sleep_quality", "steps", "resting_hr", "fatigue_score")
+    )
+    if not has_sleep_signal:
+        return None
+
+    def norm_01(value, fallback=None):
+        if value in (None, ""):
+            return fallback
+        try:
+            num = float(value)
+        except:
+            return fallback
+        if num > 1.0:
+            num = num / 100.0
+        return clamp01(num)
+
     day = (payload.get("local_date") or local_date or get_local_date_string()).strip()
     normalized = {
         "sleep_hours": payload.get("sleep_hours"),
-        "sleep_quality": payload.get("sleep_quality"),
+        "sleep_quality": norm_01(payload.get("sleep_quality")),
         "steps": payload.get("steps"),
         "resting_hr": payload.get("resting_hr"),
-        "fatigue_score": payload.get("fatigue_score"),
+        "fatigue_score": norm_01(payload.get("fatigue_score"), fallback=0.5),
         "summary_text": payload.get("summary_text") or "",
         "source": payload.get("source") or "sleep_provider",
-        "confidence": payload.get("confidence") or 0.7,
+        "confidence": norm_01(payload.get("confidence"), fallback=0.7),
     }
     upsert_sleep_daily_context(day, normalized)
     return normalized
