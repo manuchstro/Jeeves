@@ -5656,6 +5656,21 @@ def run_nightly_memory_consolidation():
     apply_memory_decay()
 
 
+def run_nightly_memory_consolidation_with_retry(max_attempts=3, base_delay_seconds=1.0):
+    attempt = 1
+    while attempt <= max_attempts:
+        try:
+            run_nightly_memory_consolidation()
+            return {"ok": True, "attempts": attempt}
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            retryable = ("database is locked" in message) or ("database is busy" in message) or ("locked" in message)
+            if (not retryable) or attempt >= max_attempts:
+                raise
+            time.sleep(base_delay_seconds * attempt)
+            attempt += 1
+
+
 def get_memory_debug_summary():
     context_snapshot = build_journal_context_snapshot()
     tone_vector = build_tone_vector({}, context_snapshot)
@@ -10300,12 +10315,27 @@ def task_memory_consolidation():
     denied = require_internal_api_key()
     if denied:
         return denied
-    run_nightly_memory_consolidation()
-    return app.response_class(
-        response=json.dumps({"ok": True, "memory": get_memory_debug_summary()}, indent=2),
-        status=200,
-        mimetype="application/json",
-    )
+    try:
+        run_info = run_nightly_memory_consolidation_with_retry(max_attempts=3, base_delay_seconds=1.0)
+        return app.response_class(
+            response=json.dumps({"ok": True, "run": run_info, "memory": get_memory_debug_summary()}, indent=2),
+            status=200,
+            mimetype="application/json",
+        )
+    except Exception as exc:
+        return app.response_class(
+            response=json.dumps(
+                {
+                    "ok": False,
+                    "reason": "memory_consolidation_failed",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+                indent=2,
+            ),
+            status=500,
+            mimetype="application/json",
+        )
 
 
 @app.route("/tasks/scheduled-check", methods=["GET", "POST"])
