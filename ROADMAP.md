@@ -190,6 +190,11 @@ Last updated: 2026-04-10
 
 11. **Whitepaper + Full Ops Recipe (Final Major Milestone)**
 - Canonical “Jeeves whitepaper” in cloud storage.
+- Entire whitepaper must be fully readable inside Brainstem (formerly Dashboard) with a clear in-app document view.
+- Jeeves runtime should have first-class access to the full whitepaper corpus for self-reference:
+  - answer questions about architecture, limits, purpose, operating procedures, and troubleshooting
+  - answer cost/usage/ops questions grounded in the canonical doc
+  - support controlled self-awareness grounded in documented system truth (not hallucinated self-descriptions)
 - Complete technical and non-technical system description.
 - Full change/progress history.
 - Reproducible setup guide: Twilio sole-prop flow, GitHub/Railway deploy, projected costs, operating instructions.
