@@ -9030,16 +9030,30 @@ def build_calendar_query_reply(request_info):
                 )
         return f"I don't see any calendar events for {label}."
 
-    lines = []
-    for event in filtered[:10]:
-        start_local = str(event.get("start_local") or "").strip()
-        end_local = str(event.get("end_local") or "").strip()
+    def format_event_line(event):
         title = str(event.get("title") or "(untitled)").strip()
-        if start_local or end_local:
-            lines.append(f"{start_local} to {end_local}: {title}")
-        else:
-            lines.append(title)
-    return f"You have {len(filtered)} event(s) for {label}: " + " | ".join(lines)
+        start_raw = str(event.get("start_local") or "").strip()
+        end_raw = str(event.get("end_local") or "").strip()
+        if not start_raw and not end_raw:
+            return title
+        try:
+            start_dt = datetime.fromisoformat(start_raw) if start_raw else None
+            end_dt = datetime.fromisoformat(end_raw) if end_raw else None
+            day_part = start_dt.strftime("%a %m/%d") if start_dt else ""
+            if start_dt and end_dt:
+                time_part = f"{start_dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')}"
+            elif start_dt:
+                time_part = start_dt.strftime("%H:%M")
+            elif end_dt:
+                time_part = end_dt.strftime("%H:%M")
+            else:
+                time_part = ""
+            return f"{day_part} {time_part} - {title}".strip()
+        except:
+            return f"{start_raw} to {end_raw}: {title}".strip()
+
+    lines = [f"{idx}. {format_event_line(event)}" for idx, event in enumerate(filtered, start=1)]
+    return f"You have {len(filtered)} event(s) for {label}:\n" + "\n".join(lines)
 
 # ---------------- MASSIVE ----------------
 
