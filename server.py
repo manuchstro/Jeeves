@@ -10297,14 +10297,29 @@ def task_gratitude():
             status=200,
             mimetype="application/json",
         )
-    run_nightly_memory_consolidation()
+    try:
+        run_info = run_nightly_memory_consolidation_with_retry(max_attempts=3, base_delay_seconds=1.0)
+    except Exception as exc:
+        return app.response_class(
+            response=json.dumps(
+                {
+                    "ok": False,
+                    "reason": "gratitude_memory_consolidation_failed",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+                indent=2,
+            ),
+            status=500,
+            mimetype="application/json",
+        )
     prompt = "What is one thing you were grateful for today?"
     result = send_whatsapp_message(prompt)
     if result.get("ok"):
         mark_scheduled_task_run("gratitude", local_date=local_date)
         log_outbound_message("gratitude", prompt)
     return app.response_class(
-        response=json.dumps({"message": prompt, "send_result": result}, indent=2),
+        response=json.dumps({"message": prompt, "send_result": result, "memory_run": run_info}, indent=2),
         status=200,
         mimetype="application/json",
     )
@@ -10364,7 +10379,16 @@ def task_scheduled_check():
 
     if scheduled_task_due("gratitude", GRATITUDE_HOUR, GRATITUDE_MINUTE, now_local=now_local):
         results["gratitude"]["due"] = True
-        run_nightly_memory_consolidation()
+        try:
+            run_info = run_nightly_memory_consolidation_with_retry(max_attempts=3, base_delay_seconds=1.0)
+            results["gratitude"]["memory_run"] = run_info
+        except Exception as exc:
+            results["gratitude"]["memory_run"] = {
+                "ok": False,
+                "reason": "gratitude_memory_consolidation_failed",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
         prompt = "What is one thing you were grateful for today?"
         send_result = send_whatsapp_message(prompt)
         results["gratitude"]["send_result"] = send_result
