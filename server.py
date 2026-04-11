@@ -8911,6 +8911,34 @@ Output schema:
         return {"intent": "calendar_query", "window": window, "focus_text": "", "query_text": text}
 
 
+def fallback_calendar_request(text):
+    t = (text or "").strip().lower()
+    calendar_signals = [
+        "calendar", "schedule", "event", "events",
+        "lecture", "lectures", "class", "classes", "meeting", "meetings",
+        "planned", "plan",
+    ]
+    if not any(signal in t for signal in calendar_signals):
+        return {"intent": "none"}
+
+    window = "today"
+    if "tomorrow" in t:
+        window = "tomorrow"
+    elif "next week" in t:
+        window = "week"
+    elif "this week" in t or "next 7" in t:
+        window = "week"
+    elif "previous" in t or "earlier" in t or "before" in t or "past" in t:
+        window = "past_week"
+
+    return {
+        "intent": "calendar_query",
+        "window": window,
+        "focus_text": "",
+        "query_text": text,
+    }
+
+
 def build_calendar_query_reply(request_info):
     context = get_calendar_context_snapshot()
     events = context.get("events") or []
@@ -9174,10 +9202,10 @@ def format_ticker_quote_reply(tickers, snapshots):
 
 # ---------------- ROUTER ----------------
 
-def route(text):
+def route(text, allow_ai_interpretation=True):
     t = text.lower()
     market_question = interpret_market_data_question(text)
-    calendar_request = interpret_calendar_request(text)
+    calendar_request = interpret_calendar_request(text) if allow_ai_interpretation else fallback_calendar_request(text)
     expand_references = interpret_event_references(text)
     expand_reference = interpret_event_reference(text)
     email_request = {"intent": "none", "query_hint": "", "days_window": 7}
@@ -9208,9 +9236,9 @@ def route(text):
     likely_watchlist = any(re.search(pattern, t, re.IGNORECASE) for pattern in watchlist_gate_patterns)
 
     if likely_email:
-        email_request = interpret_email_request(text)
+        email_request = interpret_email_request(text) if allow_ai_interpretation else fallback_email_request(text)
     if likely_watchlist:
-        watchlist_request = interpret_watchlist_request(text)
+        watchlist_request = interpret_watchlist_request(text) if allow_ai_interpretation else fallback_watchlist_request(text)
 
     if is_command_key_request(text):
         return ("command_key", None)
@@ -9272,6 +9300,101 @@ def route(text):
         return ("news", text.replace("news",""))
 
     return ("none", None)
+
+
+def route_hardcoded_command(text):
+    t = (text or "").strip().lower()
+    if not t:
+        return ("none", None)
+
+    # Zero-AI hardcoded command bypasses.
+    if is_command_key_request(text):
+        return ("command_key", None)
+    if is_feedback_message(text):
+        return ("alert_feedback", t.strip())
+    if is_daily_brief_question(text):
+        return ("daily_brief", None)
+    if is_full_article_request(text):
+        return ("full_article_request", None)
+    if is_portfolio_show_question(text):
+        return ("portfolio_show", None)
+
+    expand_references = interpret_event_references(text)
+    expand_reference = interpret_event_reference(text)
+    if len(expand_references) >= 2:
+        return ("event_expand_multi", expand_references)
+    if expand_reference:
+        return ("event_expand", expand_reference)
+    if is_expand_request_without_reference(text):
+        return ("event_expand_latest", None)
+
+    watch = fallback_watchlist_request(text)
+    if watch["intent"] == "add":
+        return ("add", watch["symbols"])
+    if watch["intent"] == "remove":
+        return ("remove", watch["symbols"])
+    if watch["intent"] == "watchlist_stats":
+        return ("watchlist_stats", None)
+    if watch["intent"] == "show":
+        return ("show", None)
+
+    market_question = interpret_market_data_question(text)
+    if market_question:
+        return (market_question["intent"], market_question["tickers"])
+
+    if "10 year" in t or "treasury" in t:
+        return ("fred", "DGS10")
+    if "fed funds" in t or "federal funds" in t:
+        return ("fred", "FEDFUNDS")
+    if "unemployment" in t or "jobless" in t:
+        return ("fred", "UNRATE")
+    if "inflation" in t or "cpi" in t:
+        return ("fred", "CPIAUCSL")
+    return ("none", None)
+
+
+def interpret_prompt_tasks_with_ai(text):
+    prompt = f"""
+Split the user message into one or more independent task strings.
+
+Rules:
+- Return JSON only.
+- Keep each task string concise and executable.
+- If there is only one task, return one item.
+- Preserve user wording when possible.
+
+Message:
+\"\"\"{text}\"\"\"
+
+Return:
+{{
+  "tasks": ["task 1", "task 2"]
+}}
+"""
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Return JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+        )
+        payload = json.loads(completion.choices[0].message.content)
+        raw_tasks = payload.get("tasks") if isinstance(payload, dict) else []
+        tasks = []
+        if isinstance(raw_tasks, list):
+            for item in raw_tasks:
+                task_text = str(item or "").strip()
+                if task_text and task_text not in tasks:
+                    tasks.append(task_text)
+        return tasks[:6] or [text]
+    except:
+        if should_attempt_multi_task(text):
+            split = split_multi_tasks(text)
+            if split:
+                return split[:6]
+        return [text]
 
 
 def should_attempt_multi_task(text):
@@ -10236,26 +10359,40 @@ def sms():
         return ""
 
     memory_result = process_memory_updates(msg)
-    if should_attempt_multi_task(msg):
-        tasks = split_multi_tasks(msg)
-        if len(tasks) >= 2:
-            task_replies = []
-            for idx, task_text in enumerate(tasks, start=1):
-                task_intent, task_value = route(task_text)
-                log_interaction_event(task_intent, task_text)
-                upsert_daily_log(task_intent, task_text, memory_result=memory_result)
-                task_reply = build_reply_for_intent(task_intent, task_value, task_text, memory_result=memory_result)
-                if task_reply is None:
-                    continue
-                task_replies.append(f"{idx}. {task_reply}")
 
-            if task_replies:
-                combined_reply = "\n".join(task_replies)
-                for chunk in split_reply_chunks(combined_reply):
-                    resp.message(chunk)
-                return str(resp)
+    # First pass: strict hardcoded/zero-AI command routing.
+    hardcoded_intent, hardcoded_value = route_hardcoded_command(msg)
+    if hardcoded_intent != "none":
+        log_interaction_event(hardcoded_intent, msg)
+        upsert_daily_log(hardcoded_intent, msg, memory_result=memory_result)
+        reply = build_reply_for_intent(hardcoded_intent, hardcoded_value, msg, memory_result=memory_result)
+        if reply is None:
+            return ""
+        for chunk in split_reply_chunks(reply):
+            resp.message(chunk)
+        return str(resp)
 
-    intent, value = route(msg)
+    # Second pass: exactly one interpretation-layer AI call for task splitting.
+    tasks = interpret_prompt_tasks_with_ai(msg)
+    if len(tasks) >= 2:
+        task_replies = []
+        for idx, task_text in enumerate(tasks, start=1):
+            task_intent, task_value = route(task_text, allow_ai_interpretation=False)
+            log_interaction_event(task_intent, task_text)
+            upsert_daily_log(task_intent, task_text, memory_result=memory_result)
+            task_reply = build_reply_for_intent(task_intent, task_value, task_text, memory_result=memory_result)
+            if task_reply is None:
+                continue
+            task_replies.append(f"{idx}. {task_reply}")
+
+        if task_replies:
+            combined_reply = "\n".join(task_replies)
+            for chunk in split_reply_chunks(combined_reply):
+                resp.message(chunk)
+            return str(resp)
+
+    single_task_text = tasks[0] if tasks else msg
+    intent, value = route(single_task_text, allow_ai_interpretation=False)
     log_interaction_event(intent, msg)
     upsert_daily_log(intent, msg, memory_result=memory_result)
     reply = build_reply_for_intent(intent, value, msg, memory_result=memory_result)

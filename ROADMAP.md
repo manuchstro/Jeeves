@@ -62,6 +62,9 @@ Last updated: 2026-04-10
   - supports follow-up carryover (e.g., “previously i mean”)
   - executes deterministically against stored calendar events
 - ✅ Hardened calendar IL focus handling so prompts like “did I have any lectures today?” keep focus terms from the user prompt even when model-emitted focus text is empty.
+- ✅ Fixed calendar IL output quality for generic planning prompts:
+  - generic requests like “what do I have next week” / “list all events” now return full-window events (no accidental empty-focus filtering)
+  - plural/singular focus matching improved (e.g., `lectures` matches `lecture`)
 - 🧪 Expanded calendar event context window in prompt assembly (larger event set available to response generation).
 - 🧪 Calendar provider payload upgraded/tested to include event-level fields (`title`, `start_local`, `end_local`, `all_day`) and verified in live context debug.
 - ✅ Added and validated recurring context refresh automation via Railway Cron (15-minute cadence) using `/tasks/context-refresh` to keep calendar/inbox context fresh without manual refresh calls.
@@ -79,6 +82,11 @@ Last updated: 2026-04-10
   - fatigue influence now uses only `sleep_hours`
   - sub-8-hour sleep increases fatigue effect
   - 8+ hours are treated as the same rested baseline (no additional differentiation)
+- ✅ Deployed hybrid interpretation-layer policy in `/sms`:
+  - hardcoded commands now bypass AI interpretation entirely (`key`, feedback, daily brief, portfolio/show/watchlist command paths, etc.)
+  - non-hardcoded prompts now run through one interpretation-layer AI split pass before routing
+  - interpreted tasks are routed with deterministic fallback interpreters (calendar/email/watchlist) to reduce brittle keyword behavior
+  - generic reply-model fallback is used only when no deterministic intent matches
 
 1. **Stabilize Messaging Cost + Alert Discipline (Now)**
 - ✅ Keep `Tier 1 only` live-alert behavior hard-enforced (Tier 2 never pushed).
