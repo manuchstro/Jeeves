@@ -87,6 +87,9 @@ Last updated: 2026-04-10
   - non-hardcoded prompts now run through one interpretation-layer AI split pass before routing
   - interpreted tasks are routed with deterministic fallback interpreters (calendar/email/watchlist) to reduce brittle keyword behavior
   - generic reply-model fallback is used only when no deterministic intent matches
+- ✅ Hardened `/tasks/memory-consolidation` task execution:
+  - added retry wrapper for transient SQLite lock/busy failures
+  - endpoint now returns structured JSON failure details instead of raw HTML 500 page
 
 1. **Stabilize Messaging Cost + Alert Discipline (Now)**
 - ✅ Keep `Tier 1 only` live-alert behavior hard-enforced (Tier 2 never pushed).
