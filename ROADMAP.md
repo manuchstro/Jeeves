@@ -69,6 +69,9 @@ Last updated: 2026-04-10
   - reject invalid/error payload shapes (`ok:false`, missing sleep signals) so null sleep rows are not written as "connected"
   - normalize `sleep_quality`, `fatigue_score`, and `confidence` from either `0..1` or `0..100` input scales
 - ✅ Fixed sleep context visibility bug: null-only legacy sleep rows now render as `not_connected` instead of falsely showing `connected`.
+- ✅ Added sleep duration unit normalization in ingest path:
+  - converts incoming `sleep_hours` from seconds or minutes to hours when needed
+  - prevents inflated values like `53100h` from Health sample aggregation payloads
 
 1. **Stabilize Messaging Cost + Alert Discipline (Now)**
 - ✅ Keep `Tier 1 only` live-alert behavior hard-enforced (Tier 2 never pushed).
