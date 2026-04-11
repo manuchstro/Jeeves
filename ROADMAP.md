@@ -34,6 +34,8 @@ Last updated: 2026-04-10
   - Daily Trade Report and monthly statements are ignored for truth ingestion
   - sync endpoint added: `/tasks/portfolio-sync`
   - debug endpoint added: `/debug/portfolio/sync`
+- ✅ Expanded trusted IBKR filename matcher to support incrementing Jeeves IDs:
+  - now accepts `Jeeves_#<n>...html` (not only `#1`) so future statements continue syncing automatically.
 - ✅ Deployed and tested portfolio-truth inspection links (for Brainstem-forward visibility):
   - `/debug/portfolio/truth` (JSON)
   - `/debug/portfolio/truth/view` (readable)
