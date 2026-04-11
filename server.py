@@ -105,7 +105,8 @@ LOW_QUALITY_CURRENTS_DOMAINS = {
     "mirror.co.uk",
     "sott.net",
 }
-IBKR_TRUSTED_PORTFOLIO_FILENAME_RE = re.compile(r"^Jeeves_#1\..+\.html$", re.IGNORECASE)
+# Accept incrementing Jeeves attachment numbers (e.g., Jeeves_#1..., Jeeves_#2..., etc.).
+IBKR_TRUSTED_PORTFOLIO_FILENAME_RE = re.compile(r"^Jeeves_#\d+\..+\.html$", re.IGNORECASE)
 WHATSAPP_REPLY_CHUNK_MAX = 1200
 ALERT_CODE_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
 ALERT_CODE_SUFFIX_LEN = 3
