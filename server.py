@@ -3282,6 +3282,23 @@ def refresh_sleep_context_from_provider(local_date=None):
     if not has_sleep_signal:
         return None
 
+    def normalize_sleep_hours(value):
+        if value in (None, ""):
+            return None
+        try:
+            num = float(value)
+        except:
+            return None
+        # Heuristic unit normalization:
+        # - very large values are likely seconds
+        # - medium large values are likely minutes
+        # - otherwise already in hours
+        if num > 1000:
+            num = num / 3600.0
+        elif num > 48:
+            num = num / 60.0
+        return round(num, 3)
+
     def norm_01(value, fallback=None):
         if value in (None, ""):
             return fallback
@@ -3295,7 +3312,7 @@ def refresh_sleep_context_from_provider(local_date=None):
 
     day = (payload.get("local_date") or local_date or get_local_date_string()).strip()
     normalized = {
-        "sleep_hours": payload.get("sleep_hours"),
+        "sleep_hours": normalize_sleep_hours(payload.get("sleep_hours")),
         "sleep_quality": norm_01(payload.get("sleep_quality")),
         "steps": payload.get("steps"),
         "resting_hr": payload.get("resting_hr"),
