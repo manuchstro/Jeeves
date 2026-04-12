@@ -762,6 +762,14 @@ def init_db():
     )
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS memory_count_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        memory_count INTEGER NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
     conn.commit()
 
     for statement in [
@@ -4757,11 +4765,10 @@ def get_memory_growth_points(range_key="30d"):
 
     cur.execute(
         f"""
-        SELECT {expr} AS bucket, action, COUNT(*) AS c
-        FROM memory_provenance_events
+        SELECT {expr} AS bucket, MAX(memory_count) AS active_count
+        FROM memory_count_snapshots
         WHERE datetime(created_at) >= datetime('now', ?)
-          AND action IN ('insert', 'feedback_forget_delete', 'delete_low_confidence')
-        GROUP BY bucket, action
+        GROUP BY bucket
         ORDER BY bucket ASC
         """,
         (window,),
@@ -4769,45 +4776,43 @@ def get_memory_growth_points(range_key="30d"):
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
 
-    per_bucket = {}
-    total_inserts = 0
-    total_deletes = 0
-    for r in rows:
-        b = str(r.get("bucket") or "")
-        action = str(r.get("action") or "")
-        c = int(r.get("c") or 0)
-        if b not in per_bucket:
-            per_bucket[b] = {"insert": 0, "delete": 0}
-        if action == "insert":
-            per_bucket[b]["insert"] += c
-            total_inserts += c
-        else:
-            per_bucket[b]["delete"] += c
-            total_deletes += c
+    points = [
+        {
+            "t": str(r.get("bucket") or ""),
+            "active_count": int(r.get("active_count") or 0),
+        }
+        for r in rows
+        if str(r.get("bucket") or "").strip()
+    ]
 
-    baseline = max(0, current_count - (total_inserts - total_deletes))
-    running = baseline
-    points = []
-    for b in sorted(per_bucket.keys()):
-        ins = int(per_bucket[b]["insert"])
-        dele = int(per_bucket[b]["delete"])
-        running = max(0, running + ins - dele)
-        points.append(
-            {
-                "t": b,
-                "active_count": running,
-                "inserts": ins,
-                "deletes": dele,
-            }
-        )
+    if not points:
+        points = [{"t": get_local_date_string(), "active_count": current_count}]
 
     return {
         "range": range_key,
         "bucket": bucket,
         "current_count": current_count,
-        "baseline_estimate": baseline,
+        "baseline_estimate": points[0]["active_count"] if points else current_count,
         "points": points,
     }
+
+
+def record_memory_count_snapshot():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) AS c FROM memory_items")
+    row = cur.fetchone()
+    current_count = int(row["c"] if row and row["c"] is not None else 0)
+    cur.execute(
+        """
+        INSERT INTO memory_count_snapshots (memory_count)
+        VALUES (?)
+        """,
+        (current_count,),
+    )
+    conn.commit()
+    conn.close()
+    return current_count
 
 
 def get_recent_alert_feedback(limit=20):
@@ -11897,6 +11902,13 @@ def brainstem_home():
     }}
     .term-box {{ border:2px solid var(--outline); border-radius:10px; padding:8px; background:#2d3b31; }}
     .chart-wrap {{ height: 320px; border:2px solid var(--outline); border-radius:10px; background:#253128; position:relative; }}
+    .chart-tooltip {{
+      position:absolute; pointer-events:none; z-index:10;
+      background: rgba(7,10,8,0.92); color:#f6e4bf; border:1px solid #5b6c5f;
+      border-radius:8px; padding:6px 8px; font-size:11px; line-height:1.25;
+      transform: translate(10px, -10px); white-space:nowrap;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+    }}
     canvas {{ width:100%; height:100%; display:block; }}
     .card {{ overflow:hidden; }}
     .axis-legend {{ position:absolute; left:10px; bottom:8px; color:#d2c39f; font-size:11px; opacity:0.95; background:rgba(14,22,17,0.7); padding:4px 6px; border-radius:6px; border:1px solid #3a4b3c; }}
@@ -12186,6 +12198,29 @@ async function renderKeyPage() {{
   </div>`;
 }}
 
+function ensureChartTooltip(canvas) {{
+  const wrap = canvas.closest(".chart-wrap");
+  if (!wrap) return null;
+  let tip = wrap.querySelector(".chart-tooltip");
+  if (!tip) {{
+    tip = document.createElement("div");
+    tip.className = "chart-tooltip";
+    tip.style.display = "none";
+    wrap.appendChild(tip);
+  }}
+  return tip;
+}}
+
+function formatGraphX(value) {{
+  const raw = String(value || "");
+  if (!raw) return "";
+  const parsed = Date.parse(raw);
+  if (Number.isFinite(parsed)) {{
+    return new Date(parsed).toLocaleString([], {{month:"short", day:"2-digit", hour:"2-digit", minute:"2-digit"}});
+  }}
+  return raw;
+}}
+
 function drawSimpleTrend(canvas, points, series, yLabelSuffix = "") {{
   const rect = canvas.getBoundingClientRect();
   const ctx = canvas.getContext("2d");
@@ -12210,22 +12245,59 @@ function drawSimpleTrend(canvas, points, series, yLabelSuffix = "") {{
   series.forEach(s => points.forEach(p => allVals.push(Number(p[s.key] ?? 0))));
   const maxV = Math.max(1, ...allVals);
   const minV = 0;
+  const plot = [];
   series.forEach(s => {{
     ctx.strokeStyle = s.color;
     ctx.lineWidth = 2;
     ctx.beginPath();
+    const linePoints = [];
     points.forEach((p, i) => {{
       const v = Number(p[s.key] ?? 0);
       const x = pad + (i / Math.max(1, points.length - 1)) * w;
       const y = pad + (1 - ((v - minV) / (maxV - minV || 1))) * h;
       if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      linePoints.push({{x, y, v, t: p.t, line: s.key}});
     }});
     ctx.stroke();
+    plot.push(...linePoints);
   }});
   ctx.fillStyle = "#bfae86";
   ctx.font = "11px Georgia, Times New Roman, serif";
   ctx.fillText(`0${{yLabelSuffix}}`, 6, pad + h + 4);
   ctx.fillText(`${{maxV.toFixed(0)}}${{yLabelSuffix}}`, 6, pad + 8);
+  if (points.length >= 1) {{
+    const first = formatGraphX(points[0].t);
+    const mid = formatGraphX(points[Math.floor((points.length - 1) / 2)].t);
+    const last = formatGraphX(points[points.length - 1].t);
+    ctx.fillStyle = "#bfae86";
+    ctx.fillText(first, pad, pad + h + 18);
+    ctx.fillText(mid, pad + (w * 0.45), pad + h + 18);
+    const m = ctx.measureText(last).width;
+    ctx.fillText(last, pad + w - m, pad + h + 18);
+  }}
+
+  const tip = ensureChartTooltip(canvas);
+  if (!tip) return;
+  canvas.onmousemove = (ev) => {{
+    const r = canvas.getBoundingClientRect();
+    const mx = ev.clientX - r.left;
+    const my = ev.clientY - r.top;
+    let best = null;
+    let bestD = Infinity;
+    for (const pt of plot) {{
+      const d = Math.hypot(pt.x - mx, pt.y - my);
+      if (d < bestD) {{ bestD = d; best = pt; }}
+    }}
+    if (!best || bestD > 16) {{
+      tip.style.display = "none";
+      return;
+    }}
+    tip.style.left = `${{mx}}px`;
+    tip.style.top = `${{my}}px`;
+    tip.innerHTML = `<strong>${{esc(humanizeToken(best.line))}}</strong><br>x: ${{esc(formatGraphX(best.t))}}<br>y: ${{esc(Number(best.v).toFixed(3))}}`;
+    tip.style.display = "block";
+  }};
+  canvas.onmouseleave = () => {{ tip.style.display = "none"; }};
 }}
 
 async function setupMemoryGrowth(rangeKey) {{
@@ -12567,6 +12639,7 @@ function drawHistory(canvas, data, legendEl, noteEl) {{
   const pad = 28, w = rect.width - pad*2, h = rect.height - pad*2;
   ctx.strokeStyle = "#5f6e63"; ctx.strokeRect(pad, pad, w, h);
   let anyVariance = false;
+  const plot = [];
   series.forEach(([name,color]) => {{
     if (!enabled.has(name)) return;
     let minV = 1;
@@ -12579,10 +12652,22 @@ function drawHistory(canvas, data, legendEl, noteEl) {{
       const x = pad + (i/(rows.length-1||1))*w;
       const y = pad + (1-v)*h;
       if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      plot.push({{x, y, v, t: r.captured_at || r.local_date || "", line: name}});
     }});
     ctx.stroke();
     if (maxV - minV > 0.015) anyVariance = true;
   }});
+  if (rows.length >= 1) {{
+    ctx.fillStyle = "#bfae86";
+    ctx.font = "11px Georgia, Times New Roman, serif";
+    const first = formatGraphX(rows[0].captured_at || rows[0].local_date || "");
+    const mid = formatGraphX((rows[Math.floor((rows.length - 1) / 2)] || {{}}).captured_at || (rows[Math.floor((rows.length - 1) / 2)] || {{}}).local_date || "");
+    const last = formatGraphX((rows[rows.length - 1] || {{}}).captured_at || (rows[rows.length - 1] || {{}}).local_date || "");
+    ctx.fillText(first, pad, pad + h + 18);
+    ctx.fillText(mid, pad + (w * 0.45), pad + h + 18);
+    const m = ctx.measureText(last).width;
+    ctx.fillText(last, pad + w - m, pad + h + 18);
+  }}
   if (legendEl) {{
     legendEl.innerHTML = series.map(([name,color]) => {{
       const active = enabled.has(name);
@@ -12606,6 +12691,28 @@ function drawHistory(canvas, data, legendEl, noteEl) {{
       ? ""
       : "Most lines are currently flat. That usually means this feature is newly launched or inputs have been stable over the selected window.";
   }}
+  const tip = ensureChartTooltip(canvas);
+  if (!tip) return;
+  canvas.onmousemove = (ev) => {{
+    const r = canvas.getBoundingClientRect();
+    const mx = ev.clientX - r.left;
+    const my = ev.clientY - r.top;
+    let best = null;
+    let bestD = Infinity;
+    for (const pt of plot) {{
+      const d = Math.hypot(pt.x - mx, pt.y - my);
+      if (d < bestD) {{ bestD = d; best = pt; }}
+    }}
+    if (!best || bestD > 16) {{
+      tip.style.display = "none";
+      return;
+    }}
+    tip.style.left = `${{mx}}px`;
+    tip.style.top = `${{my}}px`;
+    tip.innerHTML = `<strong>${{esc(labels[best.line] || humanizeToken(best.line))}}</strong><br>x: ${{esc(formatGraphX(best.t))}}<br>y: ${{esc((Number(best.v) * 100).toFixed(1))}}%`;
+    tip.style.display = "block";
+  }};
+  canvas.onmouseleave = () => {{ tip.style.display = "none"; }};
 }}
 
 async function renderNewsPoll() {{
@@ -13309,6 +13416,7 @@ def task_context_refresh():
     snapshot = build_journal_context_snapshot()
     tone_vector = build_tone_vector({}, snapshot)
     record_tone_snapshot(snapshot, tone_vector)
+    memory_count = record_memory_count_snapshot()
     ok = len(failures) == 0
     response_payload = {
         "ok": ok,
@@ -13319,6 +13427,7 @@ def task_context_refresh():
         "configured": configured,
         "failures": failures,
         "calendar_age_minutes": round(calendar_age_minutes, 1) if calendar_age_minutes is not None else None,
+        "memory_count": memory_count,
         "context_snapshot": snapshot,
         "tone_vector": tone_vector,
     }
