@@ -4023,6 +4023,27 @@ def process_due_memory_feedback_queue(now_local=None):
 
 def queue_memory_feedback_forget(scope, category, memory_key, delay_minutes=60):
     delay_minutes = max(5, int(delay_minutes or 60))
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT execute_after
+        FROM memory_feedback_queue
+        WHERE scope = ?
+          AND category = ?
+          AND memory_key = ?
+          AND action = 'forget'
+          AND status = 'pending'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (scope, category, memory_key),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if row and row["execute_after"]:
+        return {"execute_after": str(row["execute_after"]), "already_pending": True}
+
     execute_after = (get_local_now() + timedelta(minutes=delay_minutes)).isoformat()
     execute_write_with_retry(
         """
@@ -4031,7 +4052,7 @@ def queue_memory_feedback_forget(scope, category, memory_key, delay_minutes=60):
         """,
         (scope, category, memory_key, execute_after),
     )
-    return execute_after
+    return {"execute_after": execute_after, "already_pending": False}
 
 
 def undo_memory_feedback_forget(scope, category, memory_key):
@@ -11289,12 +11310,12 @@ def brainstem_home():
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Brainstem Login</title>
   <style>
-    body { margin:0; font-family: "SF Pro Text", "Avenir Next", "Helvetica Neue", system-ui, sans-serif; background:#313631; color:#FFEBC4; display:flex; min-height:100vh; align-items:center; justify-content:center; }
-    .card { width:min(420px,92vw); border:2px solid #1A1712; border-radius:14px; background:#344237; padding:16px; }
-    .title { font-size:1.1rem; font-weight:800; margin-bottom:8px; }
-    .muted { color:#d7c8a8; font-size:.92rem; margin-bottom:10px; }
-    input { width:100%; border:2px solid #1A1712; border-radius:10px; padding:10px; background:#263129; color:#FFEBC4; }
-    button { margin-top:10px; width:100%; border:2px solid #1A1712; border-radius:10px; padding:10px; background:#6a4b13; color:#ffe5b3; font-weight:800; cursor:pointer; }
+    body { margin:0; font-family: "Avenir Next", "SF Pro Text", "Segoe UI", system-ui, sans-serif; background:#080808; color:#ffffff; display:flex; min-height:100vh; align-items:center; justify-content:center; }
+    .card { width:min(420px,92vw); border:1px solid #2a2a2a; border-radius:14px; background:#111111; padding:18px; display:flex; flex-direction:column; align-items:center; }
+    .title { font-size:1.05rem; font-weight:600; margin-bottom:6px; text-align:center; }
+    .muted { color:#a8a8a8; font-size:.86rem; margin-bottom:10px; text-align:center; }
+    input { display:block; width:100%; border:1px solid #2f2f2f; border-radius:10px; padding:11px; background:#000000; color:#ffffff; text-align:center; }
+    button { margin-top:10px; width:100%; border:1px solid #333333; border-radius:10px; padding:10px; background:#171717; color:#f7f7f7; font-weight:500; cursor:pointer; }
   </style>
 </head>
 <body>
@@ -11324,7 +11345,7 @@ def brainstem_home():
   <title>Brainstem</title>
   <style>
     :root {{
-      --bg: #313631;
+      --bg: #2f352f;
       --fg: #FFEBC4;
       --outline: #1A1712;
       --accent: #FFA200;
@@ -11332,12 +11353,12 @@ def brainstem_home():
       --panel: #344237;
     }}
     * {{ box-sizing: border-box; }}
-    body {{ margin:0; font-family: "SF Pro Text", "Avenir Next", "Helvetica Neue", system-ui, sans-serif; background: var(--bg); color: var(--fg); }}
+    body {{ margin:0; font-family: "Avenir Next", "SF Pro Text", "Segoe UI", "Helvetica Neue", system-ui, sans-serif; background: var(--bg); color: var(--fg); font-weight: 450; letter-spacing: 0.1px; }}
     .topbar {{ position: sticky; top:0; z-index:10; border-bottom: 2px solid var(--outline); background: rgba(46,58,49,0.95); backdrop-filter: blur(6px); }}
     .topbar-inner {{ max-width: 1200px; margin:0 auto; padding: 12px; display:flex; align-items:center; gap:10px; flex-wrap: wrap; }}
-    .brand {{ font-weight: 800; letter-spacing: 0.3px; font-size: 1.1rem; }}
+    .brand {{ font-weight: 650; letter-spacing: 0.2px; font-size: 1.08rem; }}
     .tabs {{ display:flex; flex-wrap:wrap; gap:8px; }}
-    .tab-btn {{ border:2px solid var(--outline); background: var(--panel); color: var(--fg); font-weight:700; border-radius: 10px; padding: 8px 12px; cursor:pointer; }}
+    .tab-btn {{ border:2px solid var(--outline); background: var(--panel); color: var(--fg); font-weight:520; border-radius: 10px; padding: 8px 12px; cursor:pointer; }}
     .tab-btn.active {{ outline: 2px solid var(--accent); }}
     .container {{ max-width: 1200px; margin: 0 auto; padding: 14px; }}
     .section {{ display:none; }}
@@ -11349,12 +11370,12 @@ def brainstem_home():
     .span-6 {{ grid-column: span 6; }}
     .span-4 {{ grid-column: span 4; }}
     .span-3 {{ grid-column: span 3; }}
-    .title {{ font-size: 1rem; font-weight: 800; margin-bottom: 8px; }}
+    .title {{ font-size: 1rem; font-weight: 620; margin-bottom: 8px; }}
     .muted {{ color: var(--muted); font-size: 0.9rem; }}
-    .kpi {{ font-size: 1.4rem; font-weight:800; }}
+    .kpi {{ font-size: 1.35rem; font-weight:620; }}
     .row {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
     .pill {{ border: 1px solid var(--outline); border-radius:999px; padding:4px 10px; font-size:0.82rem; background:#3a4a3e; }}
-    .btn {{ border:2px solid var(--outline); background:#455646; color:var(--fg); border-radius:10px; padding:8px 12px; cursor:pointer; font-weight:700; }}
+    .btn {{ border:2px solid var(--outline); background:#455646; color:var(--fg); border-radius:10px; padding:8px 12px; cursor:pointer; font-weight:520; }}
     .btn.warn {{ background: #6a4b13; color:#ffe5b3; }}
     .btn.acc {{ background: #2f5d3a; }}
     .btn.err {{ background: #6a2d2d; }}
@@ -11363,7 +11384,7 @@ def brainstem_home():
       background:#263129; color:var(--fg); border:2px solid var(--outline); border-radius:10px; padding:8px; width:100%;
     }}
     .table {{ width:100%; border-collapse: collapse; font-size:0.9rem; }}
-    .table th, .table td {{ border-bottom:1px solid #253128; padding:8px; text-align:left; vertical-align:top; }}
+    .table th, .table td {{ border-bottom:1px solid #253128; padding:8px; text-align:left; vertical-align:top; overflow-wrap:anywhere; word-break:break-word; }}
     .table th {{ color: var(--muted); font-size:0.82rem; }}
     .links a {{ color: #ffd48a; text-decoration: none; word-break: break-all; }}
     .links a:hover {{ text-decoration: underline; }}
@@ -11374,6 +11395,13 @@ def brainstem_home():
     .term-box {{ border:2px solid var(--outline); border-radius:10px; padding:8px; background:#2d3b31; }}
     .chart-wrap {{ height: 320px; border:2px solid var(--outline); border-radius:10px; background:#253128; position:relative; }}
     canvas {{ width:100%; height:100%; display:block; }}
+    .card {{ overflow:hidden; }}
+    .axis-legend {{ position:absolute; left:10px; bottom:8px; color:#d2c39f; font-size:11px; opacity:0.95; background:rgba(14,22,17,0.7); padding:4px 6px; border-radius:6px; border:1px solid #3a4b3c; }}
+    .memory-timer {{ color:#ff6b6b; font-size:11px; font-weight:400; margin-top:4px; }}
+    .history-legend {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }}
+    .history-item {{ display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); }}
+    .history-dot {{ width:10px; height:10px; border-radius:999px; display:inline-block; }}
+    .welcome {{ line-height:1.45; font-size:0.95rem; color:#e6d7b8; }}
     .expandable summary {{ cursor:pointer; font-weight:700; }}
     @media (max-width: 900px) {{
       .span-8, .span-6, .span-4, .span-3 {{ grid-column: span 12; }}
@@ -11402,7 +11430,7 @@ const sections = [
   {{id:"context", label:"Context + Tone"}},
   {{id:"news", label:"News/Poll"}},
   {{id:"ops", label:"Ops + Tasks"}},
-  {{id:"costs", label:"Costs"}},
+  {{id:"usage", label:"Usage"}},
   {{id:"whitepaper", label:"Whitepaper"}},
 ];
 
@@ -11460,6 +11488,10 @@ async function renderOverview() {{
   const data = await api("/brainstem/api/overview");
   target.innerHTML = `
     <div class="grid">
+      <div class="card span-12">
+        <div class="title">Welcome To Brainstem</div>
+        <div class="welcome">Brainstem is Jeeves' control surface for cognition, memory, and live decision state. It maps what Jeeves knows, how tone is being shaped, and which automation loops are currently active.</div>
+      </div>
       <div class="card span-3"><div class="title">Now</div><div class="muted">${{esc(data.now_local || "")}}</div></div>
       <div class="card span-3"><div class="title">Commit</div><div class="kpi">${{esc((data.deploy||{{}}).commit_sha || "n/a")}}</div></div>
       <div class="card span-3"><div class="title">Alerts 24h</div><div class="kpi">${{esc(((data.counts||{{}}).alerts_24h)||0)}}</div></div>
@@ -11490,8 +11522,17 @@ async function renderKeyPage() {{
 async function renderMemory() {{
   const target = document.getElementById("section-memory");
   const data = await api("/brainstem/api/memory");
+  const pendingMap = new Map((data.pending_feedback || []).map(item => [
+    `${{item.scope}}::${{item.category}}::${{item.memory_key}}`,
+    item.execute_after
+  ]));
   const rows = (data.items || []).map(item => {{
     const key = `${{item.scope}}::${{item.category}}::${{item.memory_key}}`;
+    const pendingUntil = pendingMap.get(key);
+    const pendingTimer = pendingUntil
+      ? `<div class="memory-timer forget-timer" data-execute-after="${{esc(pendingUntil)}}">Queued for deletion</div>`
+      : "";
+    const queueDisabled = pendingUntil ? "disabled" : "";
     return `<tr>
       <td><code>${{esc(key)}}</code><div class="muted">${{esc(item.updated_at || "")}}</div></td>
       <td>${{esc(item.value || "")}}</td>
@@ -11499,13 +11540,16 @@ async function renderMemory() {{
       <td>
         <div class="row">
           <button class="btn acc" onclick="memoryFeedback('${{esc(item.scope)}}','${{esc(item.category)}}','${{esc(item.memory_key)}}','accurate')">Accurate</button>
-          <button class="btn err" onclick="memoryFeedback('${{esc(item.scope)}}','${{esc(item.category)}}','${{esc(item.memory_key)}}','inaccurate')">Inaccurate</button>
+          <button class="btn err" ${{queueDisabled}} onclick="memoryFeedback('${{esc(item.scope)}}','${{esc(item.category)}}','${{esc(item.memory_key)}}','inaccurate')">Inaccurate</button>
           <button class="btn ghost" onclick="memoryFeedback('${{esc(item.scope)}}','${{esc(item.category)}}','${{esc(item.memory_key)}}','undo_inaccurate')">Undo</button>
         </div>
+        ${{pendingTimer}}
       </td>
     </tr>`;
   }}).join("");
-  const pending = (data.pending_feedback || []).map(item => `<li><code>${{esc(item.scope)}}::${{esc(item.category)}}::${{esc(item.memory_key)}}</code> forget at ${{esc(item.execute_after)}}</li>`).join("");
+  const pending = (data.pending_feedback || []).map(item =>
+    `<li><code>${{esc(item.scope)}}::${{esc(item.category)}}::${{esc(item.memory_key)}}</code> <span class="forget-timer memory-timer" data-execute-after="${{esc(item.execute_after)}}">forget at ${{esc(item.execute_after)}}</span></li>`
+  ).join("");
   target.innerHTML = `
     <div class="grid">
       <div class="card span-12">
@@ -11519,6 +11563,7 @@ async function renderMemory() {{
       </div>
     </div>
   `;
+  startForgetCountdowns();
 }}
 
 async function memoryFeedback(scope, category, memory_key, action) {{
@@ -11534,6 +11579,29 @@ async function memoryFeedback(scope, category, memory_key, action) {{
     body: JSON.stringify({{scope, category, memory_key, action}})
   }});
   renderMemory();
+}}
+
+let forgetTimerTicker = null;
+function startForgetCountdowns() {{
+  if (forgetTimerTicker) clearInterval(forgetTimerTicker);
+  const tick = () => {{
+    document.querySelectorAll(".forget-timer").forEach(el => {{
+      const ts = String(el.getAttribute("data-execute-after") || "").trim();
+      const ms = Date.parse(ts);
+      if (!Number.isFinite(ms)) return;
+      const remaining = Math.max(0, ms - Date.now());
+      const hh = Math.floor(remaining / 3600000);
+      const mm = Math.floor((remaining % 3600000) / 60000);
+      const ss = Math.floor((remaining % 60000) / 1000);
+      if (remaining <= 0) {{
+        el.textContent = "Deleting now...";
+        return;
+      }}
+      el.textContent = `Queued delete in ${{String(hh).padStart(2,"0")}}:${{String(mm).padStart(2,"0")}}:${{String(ss).padStart(2,"0")}}`;
+    }});
+  }};
+  tick();
+  forgetTimerTicker = setInterval(tick, 1000);
 }}
 
 function drawContext3D(canvas, point) {{
@@ -11561,6 +11629,14 @@ function drawContext3D(canvas, point) {{
     ctx.fillStyle=color; ctx.beginPath(); ctx.arc(a.x,a.y,r,0,Math.PI*2); ctx.fill();
   }}
 
+  function labelAt(p, text, color="#d8c69f") {{
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.font = "11px Avenir Next, SF Pro Text, system-ui, sans-serif";
+    ctx.fillText(text, p.x + 4, p.y - 4);
+    ctx.restore();
+  }}
+
   function render() {{
     const rect = canvas.getBoundingClientRect();
     canvas.width = rect.width * devicePixelRatio;
@@ -11578,6 +11654,12 @@ function drawContext3D(canvas, point) {{
     line(pIdeal, pCurrent, "#FFA200", 2, 0.45); // faint vector line (ideal -> current)
     dot(pIdeal, "#9dd8a0", 4);
     dot(pCurrent, "#FFA200", 6);
+    labelAt(project({{x:1,y:0.5,z:0.5}},rect.width,rect.height), "G");
+    labelAt(project({{x:0,y:0.5,z:0.5}},rect.width,rect.height), "-G");
+    labelAt(project({{x:0.5,y:0.5,z:1}},rect.width,rect.height), "C");
+    labelAt(project({{x:0.5,y:0.5,z:0}},rect.width,rect.height), "-C");
+    labelAt(project({{x:0.5,y:1,z:0.5}},rect.width,rect.height), "S");
+    labelAt(project({{x:0.5,y:0,z:0.5}},rect.width,rect.height), "-S");
   }}
 
   canvas.onpointerdown = e => {{ state.drag=true; state.lastX=e.clientX; state.lastY=e.clientY; }};
@@ -11597,27 +11679,49 @@ async function renderContextTone() {{
   const target = document.getElementById("section-context");
   const data = await api("/brainstem/api/context-tone");
   const sig = ((data.tone_vector||{{}}).signals || {{}});
+  const brevity = Number((data.tone_vector||{{}}).brevity ?? 0);
+  const directness = Number((data.tone_vector||{{}}).directness ?? 0);
+  const warmth = Number((data.tone_vector||{{}}).warmth ?? 0);
+  const seriousness = Number((data.tone_vector||{{}}).seriousness ?? 0);
+  const style = String((data.tone_vector||{{}}).style || "balanced");
   const point = {{
     x: Math.max(0, Math.min(1, Number(sig.inbox_busy ?? 0.5))),      // inbox axis
     y: Math.max(0, Math.min(1, Number(sig.restedness_score ?? (1-Number(sig.fatigue_score ?? 0.5))))), // sleep axis
-    z: Math.max(0, Math.min(1, 1-Number(sig.calendar_busy ?? 0.5))), // free-calendar axis
+    z: Math.max(0, Math.min(1, Number(sig.calendar_busy ?? 0.5))), // calendar load axis
   }};
   target.innerHTML = `
     <div class="grid">
       <div class="card span-8">
         <div class="title">3D Context Vector</div>
-        <div class="muted">Axes: Inbox load (x), Restedness (y), Free calendar (z). Drag to rotate.</div>
-        <div class="chart-wrap"><canvas id="ctx3d"></canvas></div>
+        <div class="muted">Axes: Gmail load (G), Calendar load (C), Sleep/restedness (S). Drag to rotate.</div>
+        <div class="chart-wrap">
+          <canvas id="ctx3d"></canvas>
+          <div class="axis-legend">G = Gmail Inbox<br>C = Google Calendar<br>S = Sleep</div>
+        </div>
       </div>
       <div class="card span-4">
         <div class="title">Why This Tone</div>
         <p class="muted">Like human tone, response style shifts subtly with energy, workload, and cognitive load. Busy inbox/calendar pushes brevity and directness. Better rest raises warmth and lowers unnecessary hardness.</p>
-        <pre>${{esc(JSON.stringify(data.tone_vector || {{}}, null, 2))}}</pre>
+        <div class="row"><span class="pill">Style: ${{esc(style)}}</span></div>
+        <table class="table" style="margin-top:8px">
+          <tbody>
+            <tr><td>Brevity</td><td>${{(brevity*100).toFixed(1)}}%</td></tr>
+            <tr><td>Directness</td><td>${{(directness*100).toFixed(1)}}%</td></tr>
+            <tr><td>Warmth</td><td>${{(warmth*100).toFixed(1)}}%</td></tr>
+            <tr><td>Seriousness</td><td>${{(seriousness*100).toFixed(1)}}%</td></tr>
+            <tr><td>Gmail load</td><td>${{(Number(sig.inbox_busy ?? 0)*100).toFixed(1)}}%</td></tr>
+            <tr><td>Calendar load</td><td>${{(Number(sig.calendar_busy ?? 0)*100).toFixed(1)}}%</td></tr>
+            <tr><td>Restedness</td><td>${{(Number(sig.restedness_score ?? 0.5)*100).toFixed(1)}}%</td></tr>
+            <tr><td>Fatigue</td><td>${{(Number(sig.fatigue_score ?? 0.5)*100).toFixed(1)}}%</td></tr>
+          </tbody>
+        </table>
       </div>
       <div class="card span-12">
         <div class="title">Historical Signals</div>
         <div id="history-controls"></div>
         <div class="chart-wrap"><canvas id="hist"></canvas></div>
+        <div id="history-legend" class="history-legend"></div>
+        <div id="history-note" class="muted" style="margin-top:8px;"></div>
       </div>
     </div>
   `;
@@ -11631,10 +11735,10 @@ async function setupHistory(rangeKey) {{
   controls.appendChild(rangeButtons(rangeKey, setupHistory));
   const data = await api("/brainstem/api/history?range="+encodeURIComponent(rangeKey));
   const canvas = document.getElementById("hist");
-  drawHistory(canvas, data);
+  drawHistory(canvas, data, document.getElementById("history-legend"), document.getElementById("history-note"));
 }}
 
-function drawHistory(canvas, data) {{
+function drawHistory(canvas, data, legendEl, noteEl) {{
   const rows = data.points || [];
   const rect = canvas.getBoundingClientRect();
   const ctx = canvas.getContext("2d");
@@ -11650,24 +11754,48 @@ function drawHistory(canvas, data) {{
     ["calendar_busy","#6bb7ff"],["inbox_busy","#c77dff"],["fatigue_score","#ff6b6b"],["restedness_score","#4dd4ac"],
     ["stress_signal","#ff9f43"],["anti_sycophancy","#ffe28c"]
   ];
+  const labels = {{
+    brevity:"Brevity", directness:"Directness", warmth:"Warmth", seriousness:"Seriousness",
+    calendar_busy:"Calendar", inbox_busy:"Inbox", fatigue_score:"Fatigue", restedness_score:"Restedness",
+    stress_signal:"Stress", anti_sycophancy:"Anti-sycophancy"
+  }};
   const enabled = new Set((data.enabled_series || series.map(s=>s[0])));
   const pad = 28, w = rect.width - pad*2, h = rect.height - pad*2;
   ctx.strokeStyle = "#5f6e63"; ctx.strokeRect(pad, pad, w, h);
+  let anyVariance = false;
   series.forEach(([name,color]) => {{
     if (!enabled.has(name)) return;
+    let minV = 1;
+    let maxV = 0;
     ctx.strokeStyle = color; ctx.lineWidth = 1.8; ctx.beginPath();
     rows.forEach((r,i) => {{
+      const v = Math.max(0,Math.min(1, Number(r[name] ?? 0)));
+      minV = Math.min(minV, v);
+      maxV = Math.max(maxV, v);
       const x = pad + (i/(rows.length-1||1))*w;
-      const y = pad + (1-Math.max(0,Math.min(1, Number(r[name] ?? 0))))*h;
+      const y = pad + (1-v)*h;
       if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
     }});
     ctx.stroke();
+    if (maxV - minV > 0.015) anyVariance = true;
   }});
+  if (legendEl) {{
+    legendEl.innerHTML = series.filter(([name]) => enabled.has(name)).map(([name,color]) =>
+      `<span class="history-item"><span class="history-dot" style="background:${{color}}"></span>${{labels[name] || name}}</span>`
+    ).join("");
+  }}
+  if (noteEl) {{
+    noteEl.textContent = anyVariance
+      ? ""
+      : "Most lines are currently flat. That usually means this feature is newly launched or inputs have been stable over the selected window.";
+  }}
 }}
 
 async function renderNewsPoll() {{
   const target = document.getElementById("section-news");
   const data = await api("/brainstem/api/poll?force_currents=0");
+  const src = data.source_debug || {{}};
+  const queries = (src.generated_queries || []).map(q => `<tr><td>${{esc(q[1] || "")}}</td><td>${{esc(q[0] || "")}}</td></tr>`).join("");
   const groups = data.grouped || {{}};
   const groupHtml = Object.entries(groups).map(([cat, items]) => {{
     const itemHtml = (items||[]).map(it => `<tr>
@@ -11683,7 +11811,17 @@ async function renderNewsPoll() {{
   }}).join("");
   target.innerHTML = `
     <div class="grid">
-      <div class="card span-12"><div class="title">Poll Diagnostics</div><pre>${{esc(JSON.stringify(data.source_debug || {{}}, null, 2))}}</pre></div>
+      <div class="card span-4"><div class="title">Candidates</div><div class="kpi">${{Object.values(groups).reduce((n,arr)=>n+(arr||[]).length,0)}}</div></div>
+      <div class="card span-4"><div class="title">Currents Due</div><div class="kpi">${{String(Boolean(src.currents_due))}}</div></div>
+      <div class="card span-4"><div class="title">Currents Added</div><div class="kpi">${{Number(src.currents_added || 0)}}</div></div>
+      <div class="card span-12">
+        <div class="title">Generated Queries</div>
+        <table class="table"><thead><tr><th>Category</th><th>Query</th></tr></thead><tbody>${{queries || "<tr><td colspan='2' class='muted'>none</td></tr>"}}</tbody></table>
+      </div>
+      <details class="card span-12 expandable">
+        <summary>Raw Source Debug (advanced)</summary>
+        <pre>${{esc(JSON.stringify(src, null, 2))}}</pre>
+      </details>
       ${{groupHtml}}
     </div>
   `;
@@ -11692,14 +11830,27 @@ async function renderNewsPoll() {{
 async function renderGeoPanel() {{
   const target = document.getElementById("section-news");
   const data = await api("/brainstem/api/geopolitics");
-  const terms = (data.manual_terms || []).map(t => `
+  const manualTerms = Array.isArray(data.manual_terms) ? data.manual_terms : [];
+  const profileTerms = Array.isArray((data.profile || {{}}).terms) ? (data.profile || {{}}).terms : [];
+  const combined = [];
+  const seen = new Set();
+  manualTerms.forEach(t => {{
+    const term = String((t || {{}}).term || "").trim();
+    if (!term || seen.has(term.toLowerCase())) return;
+    seen.add(term.toLowerCase());
+    combined.push({{term, source: "manual"}});
+  }});
+  profileTerms.forEach(term => {{
+    const t = String(term || "").trim();
+    if (!t || seen.has(t.toLowerCase())) return;
+    seen.add(t.toLowerCase());
+    combined.push({{term: t, source: "profile"}});
+  }});
+  const terms = combined.map(t => `
     <div class="term-box">
-      <div><strong>${{esc(t.term)}}</strong> <span class="muted">mode=${{esc(t.mode||"normal")}} weight=${{esc(t.weight||1)}}</span></div>
+      <div><strong>${{esc(t.term)}}</strong> <span class="muted">${{esc(t.source)}}</span></div>
       <div class="row">
-        <button class="btn" onclick="geoTerm('${{esc(t.term)}}','boost')">Boost</button>
-        <button class="btn" onclick="geoTerm('${{esc(t.term)}}','suppress')">Suppress</button>
-        <button class="btn ghost" onclick="geoTerm('${{esc(t.term)}}','normal')">Normal</button>
-        <button class="btn err" onclick="geoTerm('${{esc(t.term)}}','remove')">Remove</button>
+        <button class="btn err" onclick="geoRemove('${{esc(t.term)}}')">Remove</button>
       </div>
     </div>
   `).join("");
@@ -11714,7 +11865,7 @@ async function renderGeoPanel() {{
       <button class="btn err" onclick="geoReset()">Reset G Profile</button>
     </div>
     <div class="row" style="margin-top:10px;">${{terms || "<span class='muted'>no manual terms yet</span>"}}</div>
-    <pre>${{esc(JSON.stringify(data.profile || {{}}, null, 2))}}</pre>
+    <details class="expandable" style="margin-top:8px;"><summary>Profile Debug</summary><pre>${{esc(JSON.stringify(data.profile || {{}}, null, 2))}}</pre></details>
   `;
   target.prepend(panel);
 }}
@@ -11730,11 +11881,11 @@ async function geoAdd() {{
   renderNewsPoll().then(renderGeoPanel);
 }}
 
-async function geoTerm(term, mode) {{
-  if (!confirm("Are you sure you want to update this geopolitics term?")) return;
+async function geoRemove(term) {{
+  if (!confirm("Are you sure you want to remove this geopolitics term?")) return;
   await api("/brainstem/api/geopolitics", {{
     method:"POST", headers:{{"Content-Type":"application/json"}},
-    body: JSON.stringify({{action:"set_mode", term, mode}})
+    body: JSON.stringify({{action:"remove_term", term}})
   }});
   renderNewsPoll().then(renderGeoPanel);
 }}
@@ -11786,13 +11937,13 @@ async function runOp(action) {{
   typeConsole(document.getElementById("ops-console"), JSON.stringify(out, null, 2));
 }}
 
-async function renderCosts() {{
-  const target = document.getElementById("section-costs");
+async function renderUsage() {{
+  const target = document.getElementById("section-usage");
   const data = await api("/brainstem/api/costs");
   const rows = Object.entries(data.providers || {{}}).map(([k,v]) => `<tr><td>${{esc(k)}}</td><td><pre>${{esc(JSON.stringify(v, null, 2))}}</pre></td></tr>`).join("");
   target.innerHTML = `
     <div class="grid">
-      <div class="card span-12"><div class="title">Cost + Usage</div><div class="muted">${{esc(data.disclaimer || "")}}</div></div>
+      <div class="card span-12"><div class="title">Usage + Cost</div><div class="muted">${{esc(data.disclaimer || "")}}</div></div>
       <div class="card span-12"><table class="table"><thead><tr><th>Provider</th><th>Metrics</th></tr></thead><tbody>${{rows}}</tbody></table></div>
       <div class="card span-12"><div class="title">Rollups</div><pre>${{esc(JSON.stringify(data.rollups || {{}}, null, 2))}}</pre></div>
     </div>
@@ -11820,7 +11971,7 @@ async function boot() {{
   await renderNewsPoll();
   await renderGeoPanel();
   await renderOps();
-  await renderCosts();
+  await renderUsage();
   await renderWhitepaper();
 }}
 boot();
@@ -11901,8 +12052,9 @@ def brainstem_api_memory_feedback():
                 new_stability=adjusted.get("new_stability"),
             )
     elif action == "inaccurate":
-        execute_after = queue_memory_feedback_forget(scope, category, memory_key, delay_minutes=60)
-        result["execute_after"] = execute_after
+        queued = queue_memory_feedback_forget(scope, category, memory_key, delay_minutes=60)
+        result["execute_after"] = queued.get("execute_after")
+        result["already_pending"] = bool(queued.get("already_pending"))
     else:
         undone_forget = undo_memory_feedback_forget(scope, category, memory_key)
         if undone_forget > 0:
@@ -11985,6 +12137,15 @@ def brainstem_api_geopolitics():
                 updated.append(row)
             set_brainstem_setting("geo_manual_terms", updated)
             audit_brainstem_action("geo_set_mode", term, payload)
+        elif action == "remove_term":
+            if term:
+                # "Remove" is a temporary user guidance hint:
+                # add/replace a suppressed manual term so auto-query generation
+                # can ignore it without disabling autonomous profile updates.
+                updated = [item for item in manual_terms if str(item.get("term") or "").lower() != term]
+                updated.append({"term": term, "mode": "suppress", "weight": 1.0})
+                set_brainstem_setting("geo_manual_terms", updated)
+                audit_brainstem_action("geo_remove_term_hint", term, payload)
         manual_terms = get_brainstem_setting("geo_manual_terms", default=[]) or []
 
     profile = build_stable_g_interest_profile(interaction_limit=220, max_terms=6)
