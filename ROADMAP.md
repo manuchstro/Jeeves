@@ -109,6 +109,8 @@ Last updated: 2026-04-10
 - ✅ Added sleep datapoint timeseries storage for Brainstem graphing:
   - each normalized sleep datapoint is persisted as a single numeric value in `sleep_datapoints`
   - debug endpoint added: `/debug/context/sleep/history`
+- ✅ Added guard-state debug endpoint for Point 2 validation:
+  - `/debug/guards` now reports journal lock state (`first_inbound_pending`, interactions since gratitude prompt) and key context gates.
 - ✅ Inbox fullness signal upgrade:
   - inbox counts now use full `in:inbox` size estimates (not last-day slice)
   - relative busy score now blends global percentile + same-weekday baseline + surge factor
