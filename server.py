@@ -11739,7 +11739,7 @@ function readableMemoryId(item) {{
   const scope = String(item.scope || "working");
   const key = String(item.memory_key || "memory");
   const cat = String(item.category || "general");
-  return `${{scope[0]?.toUpperCase() || "W"}}-${{cat.slice(0,3).toUpperCase()}}-${{tinyHash(scope + "|" + cat + "|" + key)}}`;
+  return `${{scope}} / ${{cat}} / ${{key}}`;
 }}
 
 function formatValueReadable(value) {{
@@ -11837,14 +11837,11 @@ async function renderMemory() {{
       : "";
     const queueDisabled = pendingUntil ? "disabled" : "";
     const idDisplay = readableMemoryId(item);
-    const typeDisplay = readableMemoryType(item);
-    const labelDisplay = memoryLabelForKey(item);
     const updated = fmtTs(item.updated_at);
     return `<tr>
       <td>
-        <div class="mem-id-title">${{esc(idDisplay)}} • ${{esc(labelDisplay)}}</div>
-        <div class="mem-id-sub">${{esc(typeDisplay)}} • ${{esc(String(item.scope || "working"))}}</div>
-        <div class="mem-id-sub">updated: ${{esc(updated)}}</div>
+        <div class="mem-id-title">${{esc(idDisplay)}}</div>
+        <div class="mem-id-sub">${{esc(updated)}}</div>
       </td>
       <td>${{formatValueReadable(item.value)}}</td>
       <td class="confidence-col">${{Number(item.confidence ?? 0).toFixed(3)}}</td>
@@ -11868,7 +11865,7 @@ async function renderMemory() {{
       <div class="card span-12">
         <div class="title">Memory Explorer</div>
         <div class="muted">Marking inaccurate queues deletion in 1 hour. Undo available before execution.</div>
-        <table class="table"><thead><tr><th>Memory</th><th>Readable Value</th><th class="confidence-col">Confidence</th><th class="feedback-col">Feedback</th></tr></thead><tbody>${{rows}}</tbody></table>
+        <table class="table"><thead><tr><th>Memory ID</th><th>Value</th><th class="confidence-col">Confidence</th><th class="feedback-col">Accuracy • Deletion Toggle</th></tr></thead><tbody>${{rows}}</tbody></table>
       </div>
       <div class="card span-12">
         <div class="title">Pending Forget Queue</div>
