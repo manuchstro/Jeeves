@@ -3,6 +3,12 @@
 Last updated: 2026-04-12
 
 ## Recently Deployed (Completed)
+- ✅ Memory graph telemetry hardening
+  - memory count snapshots now persist on each `/tasks/context-refresh` run (15-minute cron path)
+  - cumulative memory graph now reads from snapshot history for smoother growth line over time
+- ✅ Brainstem graph UX upgrade
+  - hover tooltips on line graphs now show line/series name + exact x/y values
+  - x-axis date/time labels added for better readability
 - ✅ Security hardening: fail-closed auth + startup validation
   - app now fails closed when `INTERNAL_API_KEY` is missing (no silent open access)
   - insecure fallback defaults removed from Brainstem auth/session signing paths
