@@ -9480,10 +9480,10 @@ def ai_decide_alert_candidates(candidates):
             candidate_id = f"C{idx}"
             tier = int(candidate.get("assigned_tier") or 3)
             decision_map[candidate_id] = {
-                "send": tier <= ALERT_PUSH_TIER_MAX,
+                "send": tier <= 1,
                 "category": ((candidate.get("category") or "G").upper()[:1]) or "G",
                 "tier": tier,
-                "why": f"rule_gate:tier<={ALERT_PUSH_TIER_MAX}",
+                "why": "rule_gate:tier1_only",
             }
         return decision_map
 
@@ -9607,7 +9607,8 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False
             should_push = False
             if send_messages:
                 tier_value = int(effective_tier or 3)
-                if tier_value <= ALERT_PUSH_TIER_MAX:
+                # Live alerts are tier-1 only. Tier-2/3 are retained for brief/ranking context.
+                if tier_value == 1:
                     should_push = True
                 if should_push and not is_recent_fred_candidate(effective_candidate, max_age_days=5):
                     should_push = False
