@@ -11829,14 +11829,29 @@ def brainstem_home():
       --outline: #1A1712;
       --accent: #FFA200;
       --muted: #d7c8a8;
-      --panel: #344237;
+      --panel: #313a34;
     }}
     * {{ box-sizing: border-box; }}
-    body {{ margin:0; font-family: Georgia, "Times New Roman", serif; background: var(--bg); color: var(--fg); font-weight: 430; letter-spacing: 0.1px; }}
+    body {{
+      margin:0;
+      font-family: Georgia, "Times New Roman", serif;
+      background:
+        radial-gradient(1200px 520px at 82% -8%, rgba(255,162,0,0.055), transparent 62%),
+        radial-gradient(900px 420px at -8% 110%, rgba(110,130,116,0.08), transparent 60%),
+        repeating-linear-gradient(0deg, rgba(255,255,255,0.012) 0 1px, transparent 1px 36px),
+        linear-gradient(180deg, #000000 0%, #030504 100%);
+      color: var(--fg);
+      font-weight: 430;
+      letter-spacing: 0.1px;
+    }}
     .app-shell {{ min-height: 100vh; display:flex; }}
     .sidebar {{
       width: 250px; flex: 0 0 250px; border-right: 2px solid var(--outline); background: #0a0a0a;
       padding: 14px 10px; transition: transform 220ms ease, opacity 220ms ease; overflow-y:auto; z-index: 25;
+    }}
+    .sidebar {{
+      background:
+        linear-gradient(180deg, #090909 0%, #0d100e 100%);
     }}
     .sidebar-header {{ display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }}
     .brand {{ font-weight: 650; letter-spacing: 0.2px; font-size: 1.08rem; }}
@@ -11864,7 +11879,16 @@ def brainstem_home():
     .section {{ display:none; }}
     .section.active {{ display:block; animation: fadeIn 180ms ease both; }}
     .grid {{ display:grid; grid-template-columns: repeat(12, 1fr); gap:12px; }}
-    .card {{ border:2px solid var(--outline); background: var(--panel); border-radius:14px; padding:12px; animation: cardIn 210ms ease both; }}
+    .card {{
+      border:2px solid var(--outline);
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.015) 0%, rgba(0,0,0,0.03) 100%),
+        repeating-linear-gradient(135deg, rgba(255,255,255,0.012) 0 1px, transparent 1px 22px),
+        var(--panel);
+      border-radius:14px;
+      padding:12px;
+      animation: cardIn 210ms ease both;
+    }}
     .span-12 {{ grid-column: span 12; }}
     .span-8 {{ grid-column: span 8; }}
     .span-6 {{ grid-column: span 6; }}
@@ -11929,11 +11953,10 @@ def brainstem_home():
       max-width: 660px;
       width: min(660px, 96%);
       background:
-        radial-gradient(circle at 12% 15%, rgba(255,230,185,0.14) 0 10%, transparent 45%),
-        radial-gradient(circle at 86% 78%, rgba(70,110,78,0.18) 0 14%, transparent 50%),
-        repeating-linear-gradient(145deg, rgba(255,235,205,0.07) 0 2px, transparent 2px 14px),
-        repeating-linear-gradient(35deg, rgba(20,28,22,0.15) 0 1px, transparent 1px 16px),
-        linear-gradient(165deg, #ff9f2f 0%, #e07a1a 55%, #ba5c13 100%);
+        linear-gradient(132deg, rgba(255,241,214,0.08) 0%, rgba(255,255,255,0) 42%),
+        linear-gradient(48deg, rgba(30,22,12,0.15) 0%, rgba(30,22,12,0) 45%),
+        repeating-linear-gradient(150deg, rgba(255,238,210,0.055) 0 1px, transparent 1px 18px),
+        linear-gradient(165deg, #f2952d 0%, #d87418 56%, #af5310 100%);
       border: 2px solid #7a4612;
       border-radius: 14px;
       padding: 20px 22px;
@@ -11941,9 +11964,7 @@ def brainstem_home():
     }}
     .landing-title {{ font-size: clamp(1.3rem, 2.7vw, 2rem); font-weight:620; margin-bottom:10px; }}
     .landing-text {{ max-width: 560px; color: #fff4dd; line-height:1.5; }}
-    .landing-orb {{ position:absolute; border-radius:999px; filter: blur(1px); opacity:0.24; pointer-events:none; }}
-    .landing-orb.a {{ width:220px; height:220px; right:-40px; top:-40px; background: radial-gradient(circle, #ffa200, transparent 70%); animation: floatA 6s ease-in-out infinite; }}
-    .landing-orb.b {{ width:190px; height:190px; left:-30px; bottom:-50px; background: radial-gradient(circle, #7ea57d, transparent 68%); animation: floatB 7s ease-in-out infinite; }}
+    .landing-orb {{ display:none; }}
     .landing-small {{ margin-top:18px; color:#b6aa8d; font-size: 0.88rem; }}
     .expandable summary {{ cursor:pointer; font-weight:700; }}
     @keyframes fadeIn {{ from {{ opacity: 0; transform: translateY(4px); }} to {{ opacity:1; transform: translateY(0); }} }}
@@ -12799,9 +12820,9 @@ function drawHistory(canvas, data, legendEl, noteEl) {{
   canvas.onmouseleave = () => {{ tip.style.display = "none"; }};
 }}
 
-async function renderNewsPoll() {{
+async function renderNewsPoll(forceCurrents = 0) {{
   const target = document.getElementById("section-news");
-  const data = await api("/brainstem/api/poll?force_currents=0");
+  const data = await api("/brainstem/api/poll?force_currents=" + encodeURIComponent(String(forceCurrents ? 1 : 0)));
   const src = data.source_debug || {{}};
   const queries = (src.generated_queries || []).map(q => `<tr><td>${{esc(q[1] || "")}}</td><td>${{esc(q[0] || "")}}</td></tr>`).join("");
   const groups = data.grouped || {{}};
@@ -12821,7 +12842,11 @@ async function renderNewsPoll() {{
     <div class="grid">
       <div class="card span-12">
         <div class="title">Live News Polls</div>
-        <div class="muted">Currents due toggles true only when its cooldown window is due or forced.</div>
+        <div class="row">
+          <div class="muted">Currents due toggles true only when its cooldown window is due or forced.</div>
+          <button class="btn ghost" onclick="forceCurrentsPollNow()">Force Currents Now</button>
+          <span class="muted" id="news-force-status"></span>
+        </div>
       </div>
       <div class="card span-4"><div class="title">Candidates</div><div class="kpi">${{Object.values(groups).reduce((n,arr)=>n+(arr||[]).length,0)}}</div></div>
       <div class="card span-4"><div class="title">Currents Due</div><div class="kpi">${{String(Boolean(src.currents_due))}}</div></div>
@@ -12837,6 +12862,16 @@ async function renderNewsPoll() {{
       ${{groupHtml}}
     </div>
   `;
+}}
+
+async function forceCurrentsPollNow() {{
+  const statusBefore = document.getElementById("news-force-status");
+  if (statusBefore) statusBefore.textContent = "Running forced currents poll...";
+  await renderNewsPoll(1);
+  await renderGeoPanel();
+  await renderEconPanel();
+  const statusAfter = document.getElementById("news-force-status");
+  if (statusAfter) statusAfter.textContent = "Forced currents poll completed.";
 }}
 
 async function renderGeoPanel() {{
