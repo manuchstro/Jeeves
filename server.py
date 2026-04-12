@@ -3460,8 +3460,8 @@ def get_inbox_daily_context(local_date=None):
 
 
 def compute_relative_inbox_busy_score(inbox_count, unread_count, lookback_days=14):
-    # Explicit zero baseline: if inbox is empty, load is 0%.
-    if int(inbox_count or 0) <= 0 and int(unread_count or 0) <= 0:
+    # Explicit zero baseline: if unread inbox is empty, load is 0%.
+    if int(unread_count or 0) <= 0:
         return 0.0
 
     conn = get_conn()
@@ -3478,11 +3478,12 @@ def compute_relative_inbox_busy_score(inbox_count, unread_count, lookback_days=1
     rows = [dict(row) for row in cur.fetchall()]
     conn.close()
 
-    samples = [int((item.get("inbox_count") or 0) + (item.get("unread_count") or 0) * 1.5) for item in rows]
-    current = int(inbox_count or 0) + int((unread_count or 0) * 1.5)
+    # Busy score uses unread workload only (not total inbox size).
+    samples = [int(item.get("unread_count") or 0) for item in rows]
+    current = int(unread_count or 0)
     if not samples:
-        # cold start heuristic
-        return clamp01(current / 30.0)
+        # cold start heuristic for unread count
+        return clamp01(current / 20.0)
 
     def percentile_rank(values, target):
         if not values:
@@ -3499,7 +3500,7 @@ def compute_relative_inbox_busy_score(inbox_count, unread_count, lookback_days=1
         except:
             weekday = ""
         if weekday == now_weekday:
-            weekday_samples.append(int((item.get("inbox_count") or 0) + (item.get("unread_count") or 0) * 1.5))
+            weekday_samples.append(int(item.get("unread_count") or 0))
 
     global_pct = percentile_rank(samples, current)
     weekday_pct = percentile_rank(weekday_samples, current) if len(weekday_samples) >= 4 else global_pct
@@ -3529,7 +3530,7 @@ def fetch_gmail_inbox_daily_context(local_date=None):
             "inbox_count": inbox_count,
             "unread_count": unread_count,
             "busy_score": busy_score,
-            "summary_text": f"inbox {inbox_count}, unread {unread_count}, relative load {round(busy_score, 2)}",
+            "summary_text": f"inbox {inbox_count}, unread {unread_count}, relative unread load {round(busy_score, 2)}",
             "source": f"gmail:{account_email or 'me'}",
             "confidence": 0.72,
         }
