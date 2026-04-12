@@ -3596,20 +3596,16 @@ def refresh_sleep_context_from_provider(local_date=None):
             num = float(value)
         except:
             return None
-        # Preferred path from your iPhone payload: seconds -> minutes -> halved -> hours -> 10% haircut.
+        # Preferred path from your iPhone payload: seconds -> hours -> 10% haircut.
         if num > 1000:
-            minutes = num / 60.0
-            corrected_minutes = minutes / 2.0
-            hours = (corrected_minutes / 60.0) * 0.9
+            hours = (num / 3600.0) * 0.9
             return round(max(0.0, hours), 3)
         # Fallback if provider emits minutes.
         if num > 48:
-            hours = ((num / 2.0) / 60.0) * 0.9
+            hours = (num / 60.0) * 0.9
             return round(max(0.0, hours), 3)
         # Fallback if provider emits hours.
         hours = num
-        if hours >= 12.0:
-            hours = hours / 2.0
         hours = hours * 0.9 if hours > 0 else hours
         return round(max(0.0, hours), 3)
 
