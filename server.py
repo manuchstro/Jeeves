@@ -4654,25 +4654,12 @@ def get_cost_usage_snapshot():
     alerts_30d = int(row["c"] if row and row["c"] is not None else 0)
     conn.close()
     return {
-        "disclaimer": "Provider cost estimates are intentionally disabled to avoid inaccurate reporting.",
-        "accuracy": {
-            "activity_counts": "exact_local_db",
-            "provider_costs": "not_reported",
-        },
-        "providers": {
-            "openai": {"configured": bool(os.environ.get("OPENAI_API_KEY"))},
-            "twilio": {"configured": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN)},
-            "massive": {"configured": bool(MASSIVE_API_KEY)},
-            "twelvedata": {"configured": bool(TWELVEDATA_API_KEY)},
-            "nyt": {"configured": bool(NYT_API_KEY)},
-            "fred": {"configured": bool(FRED_API_KEY)},
-            "currents": {"configured": bool(CURRENTS_API_KEY)},
-        },
         "rollups": {
             "interactions_30d": interactions_30d,
             "alerts_30d": alerts_30d,
             "outbound_messages_30d": outbound_30d,
         },
+        "generated_at": now_local_iso(),
     }
 
 
@@ -4730,13 +4717,25 @@ def get_usage_activity_points(range_key="30d"):
 
     keys = sorted(set(interactions.keys()) | set(outbound.keys()) | set(alerts.keys()))
     points = []
+    interactions_cum = 0
+    outbound_cum = 0
+    alerts_cum = 0
     for k in keys:
+        i = interactions.get(k, 0)
+        o = outbound.get(k, 0)
+        a = alerts.get(k, 0)
+        interactions_cum += i
+        outbound_cum += o
+        alerts_cum += a
         points.append(
             {
                 "t": k,
-                "interactions": interactions.get(k, 0),
-                "outbound": outbound.get(k, 0),
-                "alerts": alerts.get(k, 0),
+                "interactions": i,
+                "outbound": o,
+                "alerts": a,
+                "interactions_cum": interactions_cum,
+                "outbound_cum": outbound_cum,
+                "alerts_cum": alerts_cum,
             }
         )
     return {
@@ -12154,6 +12153,15 @@ async function renderOverview() {{
   const data = await api("/brainstem/api/overview");
   const health = data.health || {{}};
   const commitClass = health.healthy ? "health-good" : "health-bad";
+  const guard = data.journal_guard || {{}};
+  const guardActive = Boolean(guard.active);
+  const guardPill = guardActive ? `<span class="pill">Active</span>` : `<span class="pill">Idle</span>`;
+  const guardSummary = guardActive
+    ? `Journal guard is active: your first inbound message after the latest gratitude prompt will be treated as the journal response.`
+    : `Journal guard is idle: no recent gratitude prompt is waiting for a first inbound response.`;
+  const guardDetail = guardActive
+    ? `Window: ${{esc(String(guard.window_hours || ""))}}h • Interactions since prompt: ${{esc(String(guard.interactions_since_prompt || 0))}}`
+    : `Reason: ${{esc(String(guard.reason || "none"))}}`;
   target.innerHTML = `
     <div class="grid">
       <div class="card span-3"><div class="title">Now</div><div class="muted">${{esc(data.now_local || "")}}</div></div>
@@ -12164,7 +12172,12 @@ async function renderOverview() {{
       </div>
       <div class="card span-3"><div class="title">Alerts 24h</div><div class="kpi">${{esc(((data.counts||{{}}).alerts_24h)||0)}}</div></div>
       <div class="card span-3"><div class="title">Memory Items</div><div class="kpi">${{esc(((data.counts||{{}}).memory_items)||0)}}</div></div>
-      <div class="card span-12"><div class="title">Guard Status</div><pre>${{esc(JSON.stringify(data.journal_guard || {{}}, null, 2))}}</pre></div>
+      <div class="card span-12">
+        <div class="title">Guard Status</div>
+        <div class="row">${{guardPill}}</div>
+        <div>${{esc(guardSummary)}}</div>
+        <div class="muted" style="margin-top:6px;">${{guardDetail}}</div>
+      </div>
     </div>
   `;
 }}
@@ -12263,6 +12276,13 @@ function drawSimpleTrend(canvas, points, series, yLabelSuffix = "") {{
       linePoints.push({{x, y, v, t: p.t, line: s.key}});
     }});
     ctx.stroke();
+    if (linePoints.length === 1) {{
+      const only = linePoints[0];
+      ctx.fillStyle = s.color;
+      ctx.beginPath();
+      ctx.arc(only.x, only.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }}
     plot.push(...linePoints);
   }});
   ctx.fillStyle = "#bfae86";
@@ -12940,34 +12960,19 @@ async function runOp(action) {{
 async function renderUsage() {{
   const target = document.getElementById("section-usage");
   const data = await api("/brainstem/api/costs");
-  const providerCards = Object.entries(data.providers || {{}}).map(([k,v]) => {{
-    const configured = Boolean((v || {{}}).configured);
-    const entries = Object.entries(v || {{}})
-      .filter(([name]) => name !== "configured")
-      .map(([name,val]) => `<tr><td>${{esc(name.replaceAll("_"," "))}}</td><td>${{esc(String(val))}}</td></tr>`)
-      .join("");
-    return `<div class="card span-6">
-      <div class="title">${{esc(k.toUpperCase())}}</div>
-      <div class="row"><span class="pill">${{configured ? "Configured" : "Not configured"}}</span></div>
-      <table class="table" style="margin-top:8px"><tbody>${{entries || "<tr><td class='muted' colspan='2'>No usage counters yet</td></tr>"}}</tbody></table>
-    </div>`;
-  }}).join("");
   const rollups = data.rollups || {{}};
-  const accuracy = data.accuracy || {{}};
   target.innerHTML = `
     <div class="grid">
-      <div class="card span-12"><div class="title">Usage</div><div class="muted">${{esc(data.disclaimer || "")}}</div></div>
-      <div class="card span-12"><div class="muted">Accuracy: activity counts = <strong>${{esc(accuracy.activity_counts || "unknown")}}</strong>; provider costs = <strong>${{esc(accuracy.provider_costs || "unknown")}}</strong></div></div>
+      <div class="card span-12"><div class="title">Usage</div><div class="muted">Cumulative local usage counters.</div></div>
       <div class="card span-4"><div class="title">Interactions (30d)</div><div class="kpi">${{esc(rollups.interactions_30d ?? 0)}}</div></div>
       <div class="card span-4"><div class="title">Alerts (30d)</div><div class="kpi">${{esc(rollups.alerts_30d ?? 0)}}</div></div>
       <div class="card span-4"><div class="title">Outbound Msg (30d)</div><div class="kpi">${{esc(rollups.outbound_messages_30d ?? 0)}}</div></div>
       <div class="card span-12">
-        <div class="title">Activity Graph</div>
+        <div class="title">Cumulative Activity Graph</div>
         <div id="usage-activity-controls"></div>
         <div class="chart-wrap"><canvas id="usage-activity-chart"></canvas></div>
         <div id="usage-activity-meta" class="muted" style="margin-top:8px;"></div>
       </div>
-      ${{providerCards}}
     </div>
   `;
   setupUsageActivity("30d");
@@ -12981,12 +12986,12 @@ async function setupUsageActivity(rangeKey) {{
   const points = data.points || [];
   const canvas = document.getElementById("usage-activity-chart");
   drawSimpleTrend(canvas, points, [
-    {{key: "interactions", color: "#6bb7ff"}},
-    {{key: "outbound", color: "#4dd4ac"}},
-    {{key: "alerts", color: "#FFA200"}},
+    {{key: "interactions_cum", color: "#6bb7ff"}},
+    {{key: "outbound_cum", color: "#4dd4ac"}},
+    {{key: "alerts_cum", color: "#FFA200"}},
   ]);
   const meta = document.getElementById("usage-activity-meta");
-  meta.textContent = `Bucket: ${{esc(data.bucket || "")}} • points: ${{points.length}}`;
+  meta.textContent = `Cumulative by bucket: ${{esc(data.bucket || "")}} • points: ${{points.length}}`;
 }}
 
 async function renderWhitepaper() {{

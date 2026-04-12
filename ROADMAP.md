@@ -2,6 +2,15 @@
 
 Last updated: 2026-04-12
 
+## Active Execution Plan (New)
+- 🔄 Memory safety + clean-slate iteration loop
+  - take a full backup snapshot of Jeeves memory state before reset
+  - reset to a clean memory slate so Jeeves can re-learn from fresh interactions
+  - run focused bug/UI validation passes
+  - if the run fails, restore from backup
+  - if the run succeeds, discard the backup
+  - repeat this loop until zero known bugs/UI fixes remain
+
 ## Recently Deployed (Completed)
 - ✅ Usage panel trust hardening
   - removed estimated provider-cost fields to avoid inaccurate cost reporting
