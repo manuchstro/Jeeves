@@ -75,7 +75,7 @@ GRATITUDE_HOUR = 22
 GRATITUDE_MINUTE = 15
 JOURNAL_RESPONSE_WINDOW_HOURS = 12
 BRAINSTEM_AUTH_MODE = (os.environ.get("BRAINSTEM_AUTH_MODE") or "internal_key").strip().lower()
-BRAINSTEM_PASSCODE = (os.environ.get("BRAINSTEM_PASSCODE") or "30410061402113").strip()
+BRAINSTEM_PASSCODE = (os.environ.get("BRAINSTEM_PASSCODE") or "").strip()
 BRAINSTEM_SESSION_COOKIE = "brainstem_session"
 BRAINSTEM_SESSION_HOURS = max(1, int(os.environ.get("BRAINSTEM_SESSION_HOURS", "24")))
 CALENDAR_CONTEXT_URL = os.environ.get("CALENDAR_CONTEXT_URL", "").strip()
@@ -110,6 +110,19 @@ LOW_QUALITY_CURRENTS_DOMAINS = {
     "mirror.co.uk",
     "sott.net",
 }
+
+
+def validate_security_configuration():
+    errors = []
+    if not INTERNAL_API_KEY:
+        errors.append("INTERNAL_API_KEY is required")
+    if BRAINSTEM_PASSCODE == "30410061402113":
+        errors.append("BRAINSTEM_PASSCODE uses insecure default")
+    if errors:
+        raise RuntimeError("Security configuration error: " + "; ".join(errors))
+
+
+validate_security_configuration()
 # Accept incrementing Jeeves attachment numbers (e.g., Jeeves_#1..., Jeeves_#2..., etc.).
 IBKR_TRUSTED_PORTFOLIO_FILENAME_RE = re.compile(r"^Jeeves_#\d+\..+\.html$", re.IGNORECASE)
 WHATSAPP_REPLY_CHUNK_MAX = 1200
@@ -3773,7 +3786,11 @@ def build_unauthorized_message_warning(source_number, message_text):
 
 def require_internal_api_key():
     if not INTERNAL_API_KEY:
-        return None
+        return app.response_class(
+            response=json.dumps({"ok": False, "reason": "server_misconfigured_missing_internal_api_key"}, indent=2),
+            status=503,
+            mimetype="application/json",
+        )
     provided = (
         request.headers.get("X-Internal-Key")
         or request.args.get("key")
@@ -3842,9 +3859,21 @@ def get_request_passcode():
 
 
 def get_brainstem_session_signature():
-    secret = INTERNAL_API_KEY or "brainstem-fallback-secret"
+    secret = INTERNAL_API_KEY
+    if not secret:
+        raise RuntimeError("INTERNAL_API_KEY is required for Brainstem session signing")
     message = f"{BRAINSTEM_PASSCODE}|brainstem-session-v1".encode("utf-8")
     return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def wants_strict_task_status():
+    raw = (
+        request.args.get("strict")
+        or request.form.get("strict")
+        or request.headers.get("X-Strict-Status")
+        or ""
+    )
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def has_brainstem_session():
@@ -9451,10 +9480,10 @@ def ai_decide_alert_candidates(candidates):
             candidate_id = f"C{idx}"
             tier = int(candidate.get("assigned_tier") or 3)
             decision_map[candidate_id] = {
-                "send": tier <= 1,
+                "send": tier <= ALERT_PUSH_TIER_MAX,
                 "category": ((candidate.get("category") or "G").upper()[:1]) or "G",
                 "tier": tier,
-                "why": "rule_gate:tier1_only",
+                "why": f"rule_gate:tier<={ALERT_PUSH_TIER_MAX}",
             }
         return decision_map
 
@@ -9494,7 +9523,6 @@ def ai_decide_alert_candidates(candidates):
 def run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False, include_local=False):
     candidates, source_debug = build_poll_candidates(force_currents=force_currents, include_local=include_local)
     watchlist = get_watchlist()
-    feedback_profile = get_feedback_profile(limit=20)
     results = []
     shortlist, scored_candidates = prepare_alert_shortlist(candidates, watchlist, limit=AI_ALERT_SHORTLIST_MAX)
     ai_decisions = ai_decide_alert_candidates(shortlist)
@@ -9506,9 +9534,6 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False
             "candidate_id": f"C{idx}",
             "ai_decision": ai_decisions.get(f"C{idx}", {}),
         }
-
-    tier2_push_cap = max(0, int(feedback_profile.get("tier2_cap", 4)))
-    tier2_pushed_today = count_sent_tier_alerts_today(2)
 
     for candidate in scored_candidates:
         event_hash = build_event_hash(candidate["category"], candidate["headline"])
@@ -9582,12 +9607,8 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False
             should_push = False
             if send_messages:
                 tier_value = int(effective_tier or 3)
-                if tier_value == 1 and ALERT_PUSH_TIER_MAX >= 1:
+                if tier_value <= ALERT_PUSH_TIER_MAX:
                     should_push = True
-                elif tier_value == 2:
-                    # Tier 2 is never pushed as a live alert. It can still be logged
-                    # for downstream use (e.g., daily brief ranking/selection).
-                    should_push = False
                 if should_push and not is_recent_fred_candidate(effective_candidate, max_age_days=5):
                     should_push = False
 
@@ -12791,23 +12812,22 @@ def task_context_refresh():
     tone_vector = build_tone_vector({}, snapshot)
     record_tone_snapshot(snapshot, tone_vector)
     ok = len(failures) == 0
+    response_payload = {
+        "ok": ok,
+        "local_date": local_date,
+        "inbox_refreshed": bool(inbox_payload),
+        "calendar_refreshed": bool(calendar_payload),
+        "sleep_refreshed": bool(sleep_payload),
+        "configured": configured,
+        "failures": failures,
+        "calendar_age_minutes": round(calendar_age_minutes, 1) if calendar_age_minutes is not None else None,
+        "context_snapshot": snapshot,
+        "tone_vector": tone_vector,
+    }
+    status_code = 200 if (ok or not wants_strict_task_status()) else 500
     return app.response_class(
-        response=json.dumps(
-            {
-                "ok": ok,
-                "local_date": local_date,
-                "inbox_refreshed": bool(inbox_payload),
-                "calendar_refreshed": bool(calendar_payload),
-                "sleep_refreshed": bool(sleep_payload),
-                "configured": configured,
-                "failures": failures,
-                "calendar_age_minutes": round(calendar_age_minutes, 1) if calendar_age_minutes is not None else None,
-                "context_snapshot": snapshot,
-                "tone_vector": tone_vector,
-            },
-            indent=2,
-        ),
-        status=200,
+        response=json.dumps(response_payload, indent=2),
+        status=status_code,
         mimetype="application/json",
     )
 
@@ -12868,9 +12888,11 @@ def task_daily_brief():
     if result.get("ok"):
         mark_scheduled_task_run("daily_brief", local_date=local_date)
         log_outbound_message("daily_brief", brief)
+    response_payload = {"ok": bool(result.get("ok")), "message": brief, "send_result": result}
+    status_code = 200 if (response_payload["ok"] or not wants_strict_task_status()) else 500
     return app.response_class(
-        response=json.dumps({"message": brief, "send_result": result}, indent=2),
-        status=200,
+        response=json.dumps(response_payload, indent=2),
+        status=status_code,
         mimetype="application/json",
     )
 
@@ -12909,9 +12931,16 @@ def task_gratitude():
     if result.get("ok"):
         mark_scheduled_task_run("gratitude", local_date=local_date)
         log_outbound_message("gratitude", prompt)
+    response_payload = {
+        "ok": bool(result.get("ok")),
+        "message": prompt,
+        "send_result": result,
+        "memory_run": run_info,
+    }
+    status_code = 200 if (response_payload["ok"] or not wants_strict_task_status()) else 500
     return app.response_class(
-        response=json.dumps({"message": prompt, "send_result": result, "memory_run": run_info}, indent=2),
-        status=200,
+        response=json.dumps(response_payload, indent=2),
+        status=status_code,
         mimetype="application/json",
     )
 
@@ -12988,9 +13017,25 @@ def task_scheduled_check():
             log_outbound_message("gratitude", prompt)
             results["gratitude"]["sent"] = True
 
+    failures = []
+    daily_send = (results.get("daily_brief") or {}).get("send_result") or {}
+    gratitude_send = (results.get("gratitude") or {}).get("send_result") or {}
+    gratitude_memory = (results.get("gratitude") or {}).get("memory_run") or {}
+    if results.get("daily_brief", {}).get("due") and not daily_send.get("ok", False):
+        failures.append("daily_brief_send_failed")
+    if results.get("gratitude", {}).get("due") and not gratitude_send.get("ok", False):
+        failures.append("gratitude_send_failed")
+    if gratitude_memory and gratitude_memory.get("ok") is False:
+        failures.append("gratitude_memory_run_failed")
+    if failures:
+        results["ok"] = False
+        results["failures"] = failures
+    else:
+        results["ok"] = True
+    status_code = 200 if (results["ok"] or not wants_strict_task_status()) else 500
     return app.response_class(
         response=json.dumps(results, indent=2),
-        status=200,
+        status=status_code,
         mimetype="application/json",
     )
 
