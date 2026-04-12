@@ -4185,6 +4185,162 @@ def undo_last_accurate_feedback(scope, category, memory_key):
     }
 
 
+def _stability_rank(value):
+    order = {
+        "situational": 0,
+        "emerging": 1,
+        "adaptive": 2,
+        "evolving": 3,
+        "durable": 4,
+    }
+    return order.get((value or "situational").strip().lower(), 0)
+
+
+def _stability_from_rank(rank):
+    by_rank = {
+        0: "situational",
+        1: "emerging",
+        2: "adaptive",
+        3: "evolving",
+        4: "durable",
+    }
+    return by_rank.get(int(rank), "situational")
+
+
+def _reinforcement_slowdown_multiplier(reinforcement_count):
+    # Each reinforcement slows decay by 8%, capped at 40% total from this term.
+    return max(0.60, 1.0 - (0.08 * max(0, int(reinforcement_count or 0))))
+
+
+def _stability_slowdown_multiplier(stability):
+    table = {
+        "situational": 1.00,
+        "emerging": 0.94,   # 6% slower
+        "adaptive": 0.88,   # 12% slower
+        "evolving": 0.78,   # 22% slower
+        "durable": 0.65,    # 35% slower
+    }
+    return table.get((stability or "situational").strip().lower(), 1.00)
+
+
+def get_active_accurate_feedback_count(scope, category, memory_key, lookback_days=90):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COUNT(*) AS c
+        FROM memory_feedback_history
+        WHERE scope = ?
+          AND category = ?
+          AND memory_key = ?
+          AND action = 'accurate'
+          AND undone_at IS NULL
+          AND datetime(created_at) >= datetime('now', ?)
+        """,
+        (scope, category, memory_key, f"-{max(1, int(lookback_days))} days"),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return int((row or {}).get("c") or 0)
+
+
+def get_active_accurate_feedback_counts_map(scope="long_term", lookback_days=90):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT scope, category, memory_key, COUNT(*) AS c
+        FROM memory_feedback_history
+        WHERE action = 'accurate'
+          AND undone_at IS NULL
+          AND scope = ?
+          AND datetime(created_at) >= datetime('now', ?)
+        GROUP BY scope, category, memory_key
+        """,
+        (scope, f"-{max(1, int(lookback_days))} days"),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    out = {}
+    for row in rows:
+        out[(row.get("scope"), row.get("category"), row.get("memory_key"))] = int(row.get("c") or 0)
+    return out
+
+
+def reinforce_memory_from_feedback(scope, category, memory_key, source_text="brainstem_feedback_accurate"):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT value, confidence, stability
+        FROM memory_items
+        WHERE scope = ? AND category = ? AND memory_key = ?
+        LIMIT 1
+        """,
+        (scope, category, memory_key),
+    )
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return None
+
+    old_conf = float(row["confidence"] or 0.5)
+    old_stability = row["stability"] or "situational"
+
+    # Adaptive reinforcement: larger gain at low confidence, diminishing returns near cap.
+    max_boost = 0.10
+    min_boost = 0.02
+    span = max(0.0, 1.0 - old_conf)
+    delta = min_boost + ((max_boost - min_boost) * (span ** 1.15))
+    new_conf = max(0.01, min(MEMORY_CONFIDENCE_MAX, old_conf + float(delta)))
+
+    prior_reinforcements = get_active_accurate_feedback_count(scope, category, memory_key, lookback_days=90)
+    next_reinforcement_count = prior_reinforcements + 1
+    if next_reinforcement_count >= 6:
+        target_stability = "durable"
+    elif next_reinforcement_count >= 4:
+        target_stability = "evolving"
+    elif next_reinforcement_count >= 2:
+        target_stability = "adaptive"
+    else:
+        target_stability = "emerging"
+
+    new_stability = _stability_from_rank(max(_stability_rank(old_stability), _stability_rank(target_stability)))
+
+    cur.execute(
+        """
+        UPDATE memory_items
+        SET confidence = ?, stability = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE scope = ? AND category = ? AND memory_key = ?
+        """,
+        (new_conf, new_stability, scope, category, memory_key),
+    )
+    conn.commit()
+    conn.close()
+
+    add_memory_provenance_event(
+        scope,
+        category,
+        memory_key,
+        action="feedback_reinforcement",
+        source_text=source_text,
+        source_trust="direct_user",
+        confidence=new_conf,
+        stability=new_stability,
+        old_value=row["value"],
+        new_value=row["value"],
+    )
+    return {
+        "old_confidence": old_conf,
+        "new_confidence": new_conf,
+        "old_stability": old_stability,
+        "new_stability": new_stability,
+        "delta": round(new_conf - old_conf, 4),
+        "prior_reinforcements": prior_reinforcements,
+        "reinforcement_count": next_reinforcement_count,
+    }
+
+
 def adjust_memory_confidence(scope, category, memory_key, delta=0.07, source_text="brainstem_feedback"):
     conn = get_conn()
     cur = conn.cursor()
@@ -5667,9 +5823,11 @@ def apply_memory_decay():
         except:
             correlation_map[row["memory_key"]] = 0.0
 
+    reinforcement_counts = get_active_accurate_feedback_counts_map(scope="long_term", lookback_days=90)
+
     cur.execute(
         """
-        SELECT id, category, memory_key, confidence, julianday('now') - julianday(updated_at) AS age_days
+        SELECT id, category, memory_key, confidence, stability, julianday('now') - julianday(updated_at) AS age_days
         FROM memory_items
         WHERE scope = 'long_term'
         """
@@ -5723,6 +5881,15 @@ def apply_memory_decay():
 
         random_factor = 1 + random.uniform(-0.01, 0.01)
         decay_step = 0.015 * random_factor
+
+        stability = row.get("stability") or "situational"
+        decay_step *= _stability_slowdown_multiplier(stability)
+
+        reinforcement_count = int(
+            reinforcement_counts.get(("long_term", row.get("category"), row.get("memory_key")), 0)
+        )
+        decay_step *= _reinforcement_slowdown_multiplier(reinforcement_count)
+
         corr = float(correlation_map.get(row.get("memory_key", ""), 0.0))
         if corr >= MEMORY_CORRELATION_THRESHOLD:
             slowdown_multiplier = max(0.5, 1 - (0.05 * ((corr - MEMORY_CORRELATION_THRESHOLD) / 0.1)))
@@ -12495,9 +12662,12 @@ def brainstem_api_memory_feedback():
 
     result = {"ok": True, "action": action}
     if action == "accurate":
-        adjusted = adjust_memory_confidence(scope, category, memory_key, delta=0.08, source_text="brainstem_feedback_accurate")
-        result["adjusted"] = adjusted
+        adjusted = reinforce_memory_from_feedback(scope, category, memory_key, source_text="brainstem_feedback_accurate")
         if adjusted:
+            next_reinforcement_count = int(adjusted.get("reinforcement_count") or 1)
+            stability_multiplier = _stability_slowdown_multiplier(adjusted.get("new_stability") or "situational")
+            reinforcement_multiplier = _reinforcement_slowdown_multiplier(next_reinforcement_count)
+            slowdown_pct = round((1.0 - (stability_multiplier * reinforcement_multiplier)) * 100.0, 1)
             record_memory_feedback_history(
                 scope,
                 category,
@@ -12508,6 +12678,9 @@ def brainstem_api_memory_feedback():
                 new_confidence=adjusted.get("new_confidence"),
                 new_stability=adjusted.get("new_stability"),
             )
+            result["reinforcement_count"] = next_reinforcement_count
+            result["decay_slowdown_percent"] = slowdown_pct
+        result["adjusted"] = adjusted
     elif action == "inaccurate":
         queued = queue_memory_feedback_forget(scope, category, memory_key, delay_minutes=60)
         result["execute_after"] = queued.get("execute_after")
