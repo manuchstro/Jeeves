@@ -11444,17 +11444,28 @@ def brainstem_home():
     }}
     * {{ box-sizing: border-box; }}
     body {{ margin:0; font-family: Georgia, "Times New Roman", serif; background: var(--bg); color: var(--fg); font-weight: 430; letter-spacing: 0.1px; }}
-    .topbar {{ position: sticky; top:0; z-index:10; border-bottom: 2px solid var(--outline); background: rgba(0,0,0,0.93); backdrop-filter: blur(6px); }}
-    .topbar-inner {{ max-width: 1200px; margin:0 auto; padding: 12px; display:flex; align-items:center; gap:10px; flex-wrap: wrap; }}
+    .app-shell {{ min-height: 100vh; display:flex; }}
+    .sidebar {{
+      width: 250px; flex: 0 0 250px; border-right: 2px solid var(--outline); background: #0a0a0a;
+      padding: 14px 10px; transition: transform 220ms ease, opacity 220ms ease; overflow-y:auto; z-index: 25;
+    }}
+    .sidebar-header {{ display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }}
     .brand {{ font-weight: 650; letter-spacing: 0.2px; font-size: 1.08rem; }}
-    .tabs {{ display:flex; flex-wrap:wrap; gap:8px; }}
-    .tab-btn {{ border:2px solid var(--outline); background: var(--panel); color: var(--fg); font-weight:520; border-radius: 10px; padding: 8px 12px; cursor:pointer; }}
+    .tabs {{ display:flex; flex-direction:column; gap:8px; }}
+    .tab-btn {{ border:2px solid var(--outline); background: var(--panel); color: var(--fg); font-weight:520; border-radius: 10px; padding: 9px 11px; cursor:pointer; text-align:left; width:100%; transition: transform 140ms ease, background 140ms ease, opacity 140ms ease; }}
     .tab-btn.active {{ outline: 2px solid var(--accent); }}
-    .container {{ max-width: 1200px; margin: 0 auto; padding: 14px; }}
+    .tab-btn:hover {{ transform: translateY(-1px); }}
+    .sidebar.collapsed {{ transform: translateX(-100%); opacity: 0.95; pointer-events:none; }}
+    .main-area {{ flex:1; min-width:0; display:flex; flex-direction:column; }}
+    .topbar {{ position: sticky; top:0; z-index:20; border-bottom: 2px solid var(--outline); background: rgba(0,0,0,0.93); backdrop-filter: blur(6px); }}
+    .topbar-inner {{ padding: 10px 14px; display:flex; align-items:center; justify-content:space-between; gap:10px; }}
+    .menu-btn {{ border:2px solid var(--outline); background:#222; color:var(--fg); border-radius:8px; padding:7px 10px; cursor:pointer; font-weight:520; }}
+    .topbar-right {{ display:flex; align-items:center; gap:10px; }}
+    .container {{ max-width: 1200px; width:100%; margin: 0 auto; padding: 14px; }}
     .section {{ display:none; }}
-    .section.active {{ display:block; }}
+    .section.active {{ display:block; animation: fadeIn 180ms ease both; }}
     .grid {{ display:grid; grid-template-columns: repeat(12, 1fr); gap:12px; }}
-    .card {{ border:2px solid var(--outline); background: var(--panel); border-radius:14px; padding:12px; }}
+    .card {{ border:2px solid var(--outline); background: var(--panel); border-radius:14px; padding:12px; animation: cardIn 210ms ease both; }}
     .span-12 {{ grid-column: span 12; }}
     .span-8 {{ grid-column: span 8; }}
     .span-6 {{ grid-column: span 6; }}
@@ -11476,6 +11487,14 @@ def brainstem_home():
     .table {{ width:100%; border-collapse: collapse; font-size:0.9rem; }}
     .table th, .table td {{ border-bottom:1px solid #253128; padding:8px; text-align:left; vertical-align:top; overflow-wrap:anywhere; word-break:break-word; }}
     .table th {{ color: var(--muted); font-size:0.82rem; }}
+    .mem-id-title {{ font-weight:620; }}
+    .mem-id-sub {{ font-size: 12px; color: var(--muted); margin-top: 2px; }}
+    .mem-value-wrap {{ line-height: 1.4; }}
+    .mem-value-row {{ margin-bottom: 4px; }}
+    .confidence-col {{ min-width: 88px; white-space: nowrap; }}
+    .feedback-col {{ min-width: 126px; }}
+    .feedback-col .row {{ flex-direction: column; align-items: stretch; }}
+    .feedback-col .btn {{ width: 100%; min-width: 0; }}
     .links a {{ color: #ffd48a; text-decoration: none; word-break: break-all; }}
     .links a:hover {{ text-decoration: underline; }}
     #ops-console {{
@@ -11492,28 +11511,54 @@ def brainstem_home():
     .history-item {{ display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); }}
     .history-dot {{ width:10px; height:10px; border-radius:999px; display:inline-block; }}
     .welcome {{ line-height:1.45; font-size:0.95rem; color:#e6d7b8; }}
+    .landing-wrap {{ min-height: calc(100vh - 120px); display:flex; align-items:center; justify-content:center; }}
+    .landing-card {{ position:relative; width:min(780px, 96%); min-height:320px; background: linear-gradient(160deg, #101310 0%, #161b16 100%); border:2px solid var(--outline); border-radius:16px; padding:28px; overflow:hidden; }}
+    .landing-title {{ font-size: clamp(1.3rem, 2.7vw, 2rem); font-weight:620; margin-bottom:10px; }}
+    .landing-text {{ max-width: 560px; color: #e8d6af; line-height:1.5; }}
+    .landing-orb {{ position:absolute; border-radius:999px; filter: blur(1px); opacity:0.24; pointer-events:none; }}
+    .landing-orb.a {{ width:220px; height:220px; right:-40px; top:-40px; background: radial-gradient(circle, #ffa200, transparent 70%); animation: floatA 6s ease-in-out infinite; }}
+    .landing-orb.b {{ width:190px; height:190px; left:-30px; bottom:-50px; background: radial-gradient(circle, #7ea57d, transparent 68%); animation: floatB 7s ease-in-out infinite; }}
+    .landing-small {{ margin-top:18px; color:#b6aa8d; font-size: 0.88rem; }}
     .expandable summary {{ cursor:pointer; font-weight:700; }}
+    @keyframes fadeIn {{ from {{ opacity: 0; transform: translateY(4px); }} to {{ opacity:1; transform: translateY(0); }} }}
+    @keyframes cardIn {{ from {{ opacity: 0; transform: translateY(6px); }} to {{ opacity:1; transform: translateY(0); }} }}
+    @keyframes floatA {{ 0%{{transform:translateY(0)}}50%{{transform:translateY(8px)}}100%{{transform:translateY(0)}} }}
+    @keyframes floatB {{ 0%{{transform:translateY(0)}}50%{{transform:translateY(-8px)}}100%{{transform:translateY(0)}} }}
     @media (max-width: 900px) {{
       .span-8, .span-6, .span-4, .span-3 {{ grid-column: span 12; }}
       .tab-btn {{ padding: 8px 10px; font-size: 0.9rem; }}
+      .sidebar {{ position: fixed; top:0; left:0; bottom:0; width:min(82vw,280px); flex-basis:auto; box-shadow: 0 0 0 9999px rgba(0,0,0,0.45); }}
+      .sidebar.collapsed {{ transform: translateX(-102%); box-shadow:none; }}
     }}
   </style>
 </head>
 <body>
-  <div class="topbar">
-    <div class="topbar-inner">
-      <div class="brand">Brainstem</div>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="brand">Brainstem</div>
+      </div>
       <div class="tabs" id="tabs"></div>
-      <div class="muted" id="auth-note">secured via passcode session</div>
-      <a class="tab-btn" href="/brainstem?logout=1">Lock</a>
-    </div>
-  </div>
-  <div class="container">
-    <div id="sections"></div>
+    </aside>
+    <main class="main-area">
+      <div class="topbar">
+        <div class="topbar-inner">
+          <button class="menu-btn" id="menu-toggle" type="button">Menu</button>
+          <div class="topbar-right">
+            <div class="muted" id="auth-note">secured via passcode session</div>
+            <a class="tab-btn" style="width:auto;text-align:center;" href="/brainstem?logout=1">Lock</a>
+          </div>
+        </div>
+      </div>
+      <div class="container">
+        <div id="sections"></div>
+      </div>
+    </main>
   </div>
 <script>
 const KEY_QS = "{key_qs}";
 const sections = [
+  {{id:"landing", label:"Landing"}},
   {{id:"overview", label:"Overview"}},
   {{id:"key", label:"Key"}},
   {{id:"memory", label:"Memory"}},
@@ -11535,6 +11580,17 @@ function api(path, opts={{}}) {{
 function makeTabs() {{
   const tabs = document.getElementById("tabs");
   const holder = document.getElementById("sections");
+  const sidebar = document.getElementById("sidebar");
+  const menuBtn = document.getElementById("menu-toggle");
+  if (window.innerWidth <= 900) sidebar.classList.add("collapsed");
+  menuBtn.onclick = () => sidebar.classList.toggle("collapsed");
+  window.addEventListener("resize", () => {{
+    if (window.innerWidth > 900) {{
+      sidebar.classList.remove("collapsed");
+    }} else if (!sidebar.classList.contains("collapsed")) {{
+      // keep current state on mobile
+    }}
+  }});
   sections.forEach((s, idx) => {{
     const b = document.createElement("button");
     b.className = "tab-btn" + (idx===0 ? " active":"");
@@ -11554,6 +11610,10 @@ function activateSection(id) {{
     document.getElementById("tab-"+s.id).classList.toggle("active", s.id===id);
     document.getElementById("section-"+s.id).classList.toggle("active", s.id===id);
   }});
+  if (window.innerWidth <= 900) {{
+    const sidebar = document.getElementById("sidebar");
+    if (sidebar) sidebar.classList.add("collapsed");
+  }}
 }}
 
 function esc(s) {{
@@ -11573,20 +11633,97 @@ function rangeButtons(active, onChange) {{
   return wrap;
 }}
 
+function fmtTs(ts) {{
+  if (!ts) return "";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return String(ts);
+  return d.toLocaleString([], {{year:"numeric", month:"short", day:"2-digit", hour:"2-digit", minute:"2-digit", second:"2-digit"}});
+}}
+
+function humanizeToken(s) {{
+  return String(s || "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\\s+/g, " ")
+    .trim()
+    .replace(/\\b\\w/g, c => c.toUpperCase());
+}}
+
+function readableMemoryType(item) {{
+  const category = String(item.category || "");
+  const map = {{
+    behavior_trends: "Behavior Trend",
+    memory_threads: "Memory Thread",
+    nightly_summary: "Nightly Summary",
+    state: "State Signal",
+    open_loop: "Open Loop",
+    priorities: "Priority",
+    deep_preferences: "Deep Preference",
+    relationship_preferences: "Relationship Preference",
+    protected: "Protected Memory",
+  }};
+  return map[category] || humanizeToken(category) || "Memory";
+}}
+
+function readableMemoryId(item) {{
+  const scope = String(item.scope || "working");
+  const key = String(item.memory_key || "");
+  const compact = key ? key.replace(/[^a-zA-Z0-9]/g, "").slice(0, 10).toUpperCase() : "MEM";
+  const cat = String(item.category || "general").slice(0, 3).toUpperCase();
+  return `${{scope[0]?.toUpperCase() || "W"}}-${{cat}}-${{compact}}`;
+}}
+
+function formatValueReadable(value) {{
+  if (value === null || value === undefined || value === "") return "<span class='muted'>empty</span>";
+  if (typeof value === "number") return `<div class="mem-value-wrap">${{esc(value.toFixed(3))}}</div>`;
+  let parsed = null;
+  if (typeof value === "string") {{
+    const trimmed = value.trim();
+    if (/^[-+]?\\d+(\\.\\d+)?$/.test(trimmed)) return `<div class="mem-value-wrap">${{esc(Number(trimmed).toFixed(3))}}</div>`;
+    if ((trimmed.startsWith("{{") && trimmed.endsWith("}}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {{
+      try {{ parsed = JSON.parse(trimmed); }} catch {{ parsed = null; }}
+    }}
+    if (!parsed) return `<div class="mem-value-wrap">${{esc(trimmed)}}</div>`;
+  }} else if (typeof value === "object") {{
+    parsed = value;
+  }}
+  if (!parsed) return `<div class="mem-value-wrap">${{esc(String(value))}}</div>`;
+  if (Array.isArray(parsed)) {{
+    return `<div class="mem-value-wrap">${{parsed.slice(0,6).map(v => `<div class="mem-value-row">• ${{esc(typeof v === "object" ? JSON.stringify(v) : String(v))}}</div>`).join("")}}</div>`;
+  }}
+  const rows = Object.entries(parsed).map(([k,v]) => {{
+    let val = v;
+    if (typeof v === "number") val = Number(v).toFixed(3).replace(/\\.000$/, "");
+    if (typeof v === "object" && v !== null) val = JSON.stringify(v);
+    return `<div class="mem-value-row"><span class="muted">${{esc(humanizeToken(k))}}</span>: ${{esc(String(val))}}</div>`;
+  }}).join("");
+  return `<div class="mem-value-wrap">${{rows || "<span class='muted'>empty object</span>"}}</div>`;
+}}
+
 async function renderOverview() {{
   const target = document.getElementById("section-overview");
   const data = await api("/brainstem/api/overview");
   target.innerHTML = `
     <div class="grid">
-      <div class="card span-12">
-        <div class="title">Welcome To Brainstem</div>
-        <div class="welcome">Brainstem is Jeeves' control surface for cognition, memory, and live decision state. It maps what Jeeves knows, how tone is being shaped, and which automation loops are currently active.</div>
-      </div>
       <div class="card span-3"><div class="title">Now</div><div class="muted">${{esc(data.now_local || "")}}</div></div>
       <div class="card span-3"><div class="title">Commit</div><div class="kpi">${{esc((data.deploy||{{}}).commit_sha || "n/a")}}</div></div>
       <div class="card span-3"><div class="title">Alerts 24h</div><div class="kpi">${{esc(((data.counts||{{}}).alerts_24h)||0)}}</div></div>
       <div class="card span-3"><div class="title">Memory Items</div><div class="kpi">${{esc(((data.counts||{{}}).memory_items)||0)}}</div></div>
       <div class="card span-12"><div class="title">Guard Status</div><pre>${{esc(JSON.stringify(data.journal_guard || {{}}, null, 2))}}</pre></div>
+    </div>
+  `;
+}}
+
+function renderLanding() {{
+  const target = document.getElementById("section-landing");
+  target.innerHTML = `
+    <div class="landing-wrap">
+      <div class="landing-card">
+        <div class="landing-orb a"></div>
+        <div class="landing-orb b"></div>
+        <div class="landing-title">Welcome to Brainstem</div>
+        <div class="landing-text">Brainstem is Jeeves' internal control surface: memory state, context signals, tone dynamics, and operational diagnostics. Use the menu to navigate each subsystem and guide behavior safely.</div>
+        <div class="landing-small">Secure session active. Select a panel from the side menu to begin.</div>
+      </div>
     </div>
   `;
 }}
@@ -11623,11 +11760,18 @@ async function renderMemory() {{
       ? `<div class="memory-timer forget-timer" data-execute-after="${{esc(pendingUntil)}}">Queued for deletion</div>`
       : "";
     const queueDisabled = pendingUntil ? "disabled" : "";
+    const idDisplay = readableMemoryId(item);
+    const typeDisplay = readableMemoryType(item);
+    const updated = fmtTs(item.updated_at);
     return `<tr>
-      <td><code>${{esc(key)}}</code><div class="muted">${{esc(item.updated_at || "")}}</div></td>
-      <td>${{esc(item.value || "")}}</td>
-      <td>${{esc(item.confidence ?? "")}}</td>
       <td>
+        <div class="mem-id-title">${{esc(idDisplay)}} • ${{esc(typeDisplay)}}</div>
+        <div class="mem-id-sub">scope: ${{esc(item.scope || "working")}} • category: ${{esc(item.category || "")}}</div>
+        <div class="mem-id-sub">updated: ${{esc(updated)}}</div>
+      </td>
+      <td>${{formatValueReadable(item.value)}}</td>
+      <td class="confidence-col">${{Number(item.confidence ?? 0).toFixed(3)}}</td>
+      <td class="feedback-col">
         <div class="row">
           <button class="btn acc" onclick="memoryFeedback('${{esc(item.scope)}}','${{esc(item.category)}}','${{esc(item.memory_key)}}','accurate')">Accurate</button>
           <button class="btn err" ${{queueDisabled}} onclick="memoryFeedback('${{esc(item.scope)}}','${{esc(item.category)}}','${{esc(item.memory_key)}}','inaccurate')">Inaccurate</button>
@@ -11638,14 +11782,16 @@ async function renderMemory() {{
     </tr>`;
   }}).join("");
   const pending = (data.pending_feedback || []).map(item =>
-    `<li><code>${{esc(item.scope)}}::${{esc(item.category)}}::${{esc(item.memory_key)}}</code> <span class="forget-timer memory-timer" data-execute-after="${{esc(item.execute_after)}}">forget at ${{esc(item.execute_after)}}</span></li>`
+    `<li><strong>${{esc(readableMemoryId(item))}}</strong> <span class="muted">(${{
+      esc(readableMemoryType(item))
+    }})</span> <span class="forget-timer memory-timer" data-execute-after="${{esc(item.execute_after)}}">forget at ${{esc(item.execute_after)}}</span></li>`
   ).join("");
   target.innerHTML = `
     <div class="grid">
       <div class="card span-12">
         <div class="title">Memory Explorer</div>
         <div class="muted">Marking inaccurate queues deletion in 1 hour. Undo available before execution.</div>
-        <table class="table"><thead><tr><th>ID</th><th>Value</th><th>Confidence</th><th>Feedback</th></tr></thead><tbody>${{rows}}</tbody></table>
+        <table class="table"><thead><tr><th>Memory</th><th>Readable Value</th><th class="confidence-col">Confidence</th><th class="feedback-col">Feedback</th></tr></thead><tbody>${{rows}}</tbody></table>
       </div>
       <div class="card span-12">
         <div class="title">Pending Forget Queue</div>
@@ -12151,6 +12297,7 @@ async function renderWhitepaper() {{
 
 async function boot() {{
   makeTabs();
+  renderLanding();
   await renderOverview();
   await renderKeyPage();
   await renderMemory();
