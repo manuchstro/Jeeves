@@ -121,6 +121,14 @@ G_QUERY_CORE_TERMS = {
     "sanctions", "shipping", "strait", "ceasefire", "conflict", "war", "oil", "energy",
     "diplomatic", "military", "geopolitics",
 }
+G_QUERY_BLOCKED_TERMS = {
+    "gratitude", "grateful", "family", "friend", "friends", "journal", "emotion",
+    "emotional", "tone", "warmth", "sycophancy", "sleep", "fatigue", "calendar",
+}
+NEWS_MEMORY_BLOCKLIST_CATEGORIES = {
+    "behavior_trends", "emotional_state", "state", "relationship_preferences",
+    "memory_threads", "nightly_summary", "frictions",
+}
 
 CALENDAR_SCHOOL_TERMS = {
     "lecture", "lectures", "class", "classes", "prof", "professor", "office hours",
@@ -3752,6 +3760,7 @@ def build_command_key_reply():
     memory_view = append_internal_key(f"{base}/debug/memory/view" if base else "/debug/memory/view")
     poll_preview = link("/debug/poll/preview")
     poll_run = link("/debug/poll/run")
+    poll_run_readable = link("/tasks/poll?readable=1")
     portfolio_sync = link("/tasks/portfolio-sync?days=14")
     portfolio_truth_json = link("/debug/portfolio/truth")
     portfolio_truth_view = link("/debug/portfolio/truth/view")
@@ -3772,6 +3781,7 @@ def build_command_key_reply():
         "",
         "Core task links:",
         f"- poll run: {poll_run}",
+        f"- poll run (readable): {poll_run_readable}",
         f"- poll preview: {poll_preview}",
         f"- daily brief (force): {daily_brief_force}",
         f"- scheduled check: {scheduled_check}",
@@ -6287,9 +6297,10 @@ def has_seen_event_hash(event_hash):
     cur.execute(
         """
         SELECT id
-        FROM event_hashes
+        FROM alert_log
         WHERE event_hash = ?
-          AND datetime(last_seen_at) >= datetime('now', '-36 hours')
+          AND sent_to_user = 1
+          AND datetime(created_at) >= datetime('now', '-36 hours')
         """,
         (event_hash,),
     )
@@ -7835,8 +7846,6 @@ def normalize_candidate_category(candidate, watchlist=None):
     source = candidate.get("source") or ""
     if source == "FRED":
         return "E", "source_fred"
-    if original == "P":
-        return "P", None
     scored = classify_news_category_scored(
         candidate.get("origin_query") or "",
         candidate.get("headline") or "",
@@ -7847,6 +7856,14 @@ def normalize_candidate_category(candidate, watchlist=None):
     normalized = scored.get("category") or original
     if normalized not in {"P", "E", "G", "L"}:
         normalized = original
+
+    score_map = scored.get("scores") or {}
+    original_score = float(score_map.get(original, 0.0))
+    normalized_score = float(score_map.get(normalized, 0.0))
+
+    # Global reclassification rule: only reclassify when alternate score is truly stronger.
+    if normalized != original and (normalized_score - original_score) < 0.55:
+        return original, None
 
     # Ambiguity guard: if the score margin is small, keep original category.
     if normalized != original and float(scored.get("margin") or 0.0) < 1.2:
@@ -8146,6 +8163,71 @@ def normalize_candidate_query_text(text, max_terms=7):
     return " ".join(cleaned)
 
 
+def contains_signal_term(text, term):
+    haystack = (text or "").lower()
+    needle = (term or "").lower().strip()
+    if not haystack or not needle:
+        return False
+    if " " in needle:
+        return needle in haystack
+    return re.search(rf"\b{re.escape(needle)}\b", haystack) is not None
+
+
+def is_geo_intent_text(text):
+    t = (text or "").lower().strip()
+    if not t:
+        return False
+    if any(contains_signal_term(t, term) for term in G_QUERY_BLOCKED_TERMS):
+        return False
+    return any(contains_signal_term(t, term) for term in G_QUERY_CORE_TERMS)
+
+
+def build_stable_g_interest_profile(interaction_limit=180, max_terms=5):
+    term_counts = Counter()
+    matched_refs = 0
+    for event in get_recent_interaction_events(limit=interaction_limit):
+        text = (event.get("message_text") or "").strip()
+        if not text:
+            continue
+
+        refs = interpret_event_references(text)
+        for ref in refs:
+            if not ref.upper().startswith("G"):
+                continue
+            resolved = resolve_alert_reference(ref)
+            if resolved.get("status") != "ok":
+                continue
+            matched_refs += 1
+            headline = ((resolved.get("match") or {}).get("headline") or "").lower()
+            if not headline:
+                continue
+            for token in re.findall(r"[a-z0-9]{3,}", headline):
+                if token in STORY_STOPWORDS or token in G_QUERY_GENERIC_TERMS:
+                    continue
+                if token in G_QUERY_CORE_TERMS:
+                    term_counts[token] += 2
+
+        # Also count direct geopolitical terms from free-text prompts.
+        for token in re.findall(r"[a-z0-9]{3,}", text.lower()):
+            if token in G_QUERY_CORE_TERMS:
+                term_counts[token] += 1
+
+    if not term_counts:
+        return {"query": None, "terms": [], "matched_refs": 0}
+
+    top_terms = [term for term, _ in term_counts.most_common(max_terms)]
+    if len(top_terms) == 1:
+        top_terms.append("geopolitics")
+    if len(top_terms) < 2:
+        return {"query": None, "terms": [], "matched_refs": matched_refs}
+
+    return {
+        "query": " ".join(top_terms[:max_terms]),
+        "terms": top_terms[:max_terms],
+        "matched_refs": matched_refs,
+    }
+
+
 def tighten_g_query_text(text):
     raw = (text or "").strip().lower()
     if not raw:
@@ -8203,11 +8285,11 @@ def is_news_query_signal(query_text, watchlist=None, trusted_portfolio=None):
         "shipping", "strait", "conflict", "war", "ceasefire", "stock",
         "earnings", "guidance", "company", "earthquake", "bay area", "california",
     ]
-    if any(term in t for term in signal_terms):
+    if any(contains_signal_term(t, term) for term in signal_terms):
         return True
 
     for symbol in (watchlist or []) + (trusted_portfolio or []):
-        if symbol and symbol.lower() in t:
+        if symbol and contains_signal_term(t, symbol.lower()):
             return True
     return False
 
@@ -8225,6 +8307,9 @@ def build_dynamic_news_queries(limit=10, include_local=False):
         "category_limited": 0,
         "g_tightened": 0,
         "g_dropped": 0,
+        "g_profile_query": None,
+        "g_profile_terms": [],
+        "g_profile_matched_refs": 0,
         "p_query_count": 0,
         "p_query_reason": None,
         "category_counts": {},
@@ -8275,21 +8360,38 @@ def build_dynamic_news_queries(limit=10, include_local=False):
     add_query("broad market performance", "P")
     add_query("forward looking market performance", "P")
 
+    g_profile = build_stable_g_interest_profile(interaction_limit=220, max_terms=5)
+    if g_profile.get("query"):
+        add_query(g_profile["query"], "G")
+        query_debug["g_profile_query"] = g_profile["query"]
+        query_debug["g_profile_terms"] = g_profile.get("terms", [])
+        query_debug["g_profile_matched_refs"] = int(g_profile.get("matched_refs", 0))
+
     relevant = get_relevant_memories("current interests recurring focus active concerns", limit=12)
     for item in relevant.get("working", []) + relevant.get("long_term", []):
         value = (item.get("value") or "").strip()
         if not value:
             continue
+        if (item.get("category") or "").strip().lower() in NEWS_MEMORY_BLOCKLIST_CATEGORIES:
+            continue
         category = item.get("category") or ""
-        if category in {"behavior_trends", "priorities", "deep_preferences", "preferences", "goals"}:
-            add_query(value, infer_category_hint_from_text(value))
+        if category in {"priorities", "deep_preferences", "preferences", "goals"}:
+            resolved = infer_category_hint_from_text(value)
+            # Keep G dynamic behavior stable from interaction profile, not volatile memory strings.
+            if resolved == "G":
+                continue
+            add_query(value, resolved)
 
     for event in get_recent_interaction_events(limit=20):
         message_text = (event.get("message_text") or "").strip()
         if len(message_text) < 8:
             continue
         if event.get("intent") in {"news", "watchlist_stats", "ticker_quote", "fred", "daily_brief"}:
-            add_query(message_text, infer_category_hint_from_text(message_text))
+            resolved = infer_category_hint_from_text(message_text)
+            # Keep G dynamic behavior stable from interaction profile, not per-message churn.
+            if resolved == "G":
+                continue
+            add_query(message_text, resolved)
 
     selected = []
     category_counts = Counter()
@@ -8399,7 +8501,11 @@ def build_poll_candidates(force_currents=False, include_local=False):
     category_reassigned_count = 0
     category_reassigned_examples = []
     for candidate in candidates:
+        original_category = candidate.get("category")
         normalized_category, reason = normalize_candidate_category(candidate, watchlist=watchlist)
+        chain = [original_category] if original_category else []
+        if normalized_category and (not chain or chain[-1] != normalized_category):
+            chain.append(normalized_category)
         if normalized_category != candidate.get("category"):
             category_reassigned_count += 1
             if len(category_reassigned_examples) < 6:
@@ -8409,12 +8515,15 @@ def build_poll_candidates(force_currents=False, include_local=False):
                     "to": normalized_category,
                     "source": candidate.get("source"),
                     "reason": reason,
+                    "chain": chain,
                 })
-        normalized = {**candidate, "category": normalized_category}
+        normalized = {**candidate, "category": normalized_category, "reclass_chain": chain}
         if normalized.get("category") == "G":
             integrity = g_integrity_guard(normalized)
             if integrity.get("action") == "reclassify_L":
                 normalized["category"] = "L"
+                if not normalized.get("reclass_chain") or normalized["reclass_chain"][-1] != "L":
+                    normalized["reclass_chain"] = (normalized.get("reclass_chain") or []) + ["L"]
                 source_debug["g_integrity_reclass_count"] += 1
                 if len(source_debug["g_integrity_examples"]) < 6:
                     source_debug["g_integrity_examples"].append({
@@ -8422,9 +8531,12 @@ def build_poll_candidates(force_currents=False, include_local=False):
                         "from": "G",
                         "to": "L",
                         "reason": integrity.get("reason"),
+                        "chain": normalized.get("reclass_chain"),
                     })
             elif integrity.get("action") == "reclassify_E":
                 normalized["category"] = "E"
+                if not normalized.get("reclass_chain") or normalized["reclass_chain"][-1] != "E":
+                    normalized["reclass_chain"] = (normalized.get("reclass_chain") or []) + ["E"]
                 source_debug["g_integrity_reclass_count"] += 1
                 if len(source_debug["g_integrity_examples"]) < 6:
                     source_debug["g_integrity_examples"].append({
@@ -8432,6 +8544,7 @@ def build_poll_candidates(force_currents=False, include_local=False):
                         "from": "G",
                         "to": "E",
                         "reason": integrity.get("reason"),
+                        "chain": normalized.get("reclass_chain"),
                     })
             elif integrity.get("action") == "drop":
                 source_debug["g_integrity_drop_count"] += 1
@@ -8441,6 +8554,7 @@ def build_poll_candidates(force_currents=False, include_local=False):
                         "from": "G",
                         "to": "drop",
                         "reason": integrity.get("reason"),
+                        "chain": (normalized.get("reclass_chain") or []) + ["drop"],
                     })
                 continue
 
@@ -8637,6 +8751,7 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False
             "score_reasons": candidate["selection_reasons"],
             "fingerprint": build_event_fingerprint(candidate),
             "shortlisted": shortlist_item is not None,
+            "reclass_chain": candidate.get("reclass_chain"),
             "ai_candidate_id": shortlist_item.get("candidate_id") if shortlist_item else None,
             "ai_send": ai_decision.get("send") if shortlist_item else None,
             "ai_why": ai_decision.get("why") if shortlist_item else None,

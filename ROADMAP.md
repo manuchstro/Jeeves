@@ -1,6 +1,6 @@
 # Jeeves Roadmap
 
-Last updated: 2026-04-10
+Last updated: 2026-04-11
 
 ## Recently Deployed (Completed)
 - ✅ Removed `portfolio_profile` from active logic paths and removed manual `portfolio_update` intent path; portfolio truth now stays with `portfolio_holdings` + `portfolio_snapshots` flow.
@@ -189,6 +189,7 @@ Last updated: 2026-04-10
 - Google sign-in auth.
 - API spend metrics, usage graphs, and cost totals.
 - “Calls used / remaining” visibility where provider data allows it.
+- Geopolitics query-interest panel: show stable `G` profile terms/weights inferred from your `G` alert interactions, with visibility into current active `G` query bias.
 - Add historical trend graph view for tone/context signals on one unified chart (e.g., brevity, directness, warmth, seriousness, busy_score, calendar_busy, inbox_busy, fatigue_score, market_stress, stress_signal, anti_sycophancy).
 - Full readable memory explorer from foundation.
 - Per-memory accuracy feedback controls.
