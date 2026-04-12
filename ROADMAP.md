@@ -135,7 +135,8 @@ Last updated: 2026-04-11
 - ✅ Keep contradiction handling as a recorded human-like signal, without automatically decreasing old-memory confidence.
 - ✅ Remove/deprecate inferred `portfolio_profile` memory signals from decision-critical logic.
 - ✅ Keep portfolio truth sourced from `portfolio_holdings` + `portfolio_snapshots`.
-- 🧪 Add health/integrity checks and safeguards for `portfolio_holdings` + `portfolio_snapshots` update/replace flow.
+- ✅ Add health/integrity checks and safeguards for `portfolio_holdings` + `portfolio_snapshots` update/replace flow.
+- ✅ Validate portfolio integrity failure modes (negative-payload reject, forced mid-transaction rollback, successful atomic replace).
 
 3. **A2P Go-Live and SMS Production Validation (Now)**
 - Finish campaign approval flow.
