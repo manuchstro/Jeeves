@@ -6281,7 +6281,13 @@ def build_tone_vector(journal_analysis, context_snapshot):
 
     calendar_busy = clamp01((calendar_features.get("busy_score") or 0.0))
     inbox_busy = clamp01((inbox_features.get("busy_score") or 0.0))
-    busy_score = clamp01(max(calendar_busy, inbox_busy))
+    # Weighted additive blend: inbox contributes at 60% of calendar weight.
+    calendar_weight = 1.0
+    inbox_weight = 0.6
+    busy_score = clamp01(
+        ((calendar_busy * calendar_weight) + (inbox_busy * inbox_weight))
+        / (calendar_weight + inbox_weight)
+    )
     sleep_hours_raw = sleep_features.get("sleep_hours")
     sleep_avg_7d_raw = sleep_features.get("recent_avg_7d_hours")
     try:
