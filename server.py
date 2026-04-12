@@ -12706,19 +12706,9 @@ function calendarAgeText(ts) {{
 }}
 
 async function refreshContextToneNow() {{
-  const btn = document.getElementById("ctx-refresh-btn");
-  const status = document.getElementById("ctx-refresh-status");
-  if (btn) btn.disabled = true;
-  if (status) status.textContent = "Refreshing...";
-  try {{
-    const out = await api("/tasks/context-refresh");
-    await renderContextTone();
-    if (status) status.textContent = out && out.ok ? "Context refreshed" : "Refresh ran with warnings";
-  }} catch (e) {{
-    if (status) status.textContent = "Refresh failed";
-  }} finally {{
-    if (btn) btn.disabled = false;
-  }}
+  const qs = KEY_QS.replace(/^\\?/, "");
+  const url = "/tasks/context-refresh" + (qs ? ("?" + qs) : "");
+  window.location.href = url;
 }}
 
 let historySeriesEnabled = new Set([
