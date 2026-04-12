@@ -4395,6 +4395,17 @@ def get_brainstem_overview_payload():
     gmail_connected = bool(get_gmail_service()[0])
     calendar_connected = bool(CALENDAR_CONTEXT_URL)
     reasons = []
+    calendar_age_minutes = None
+    calendar_row = get_calendar_daily_context(local_date=get_local_date_string())
+    if calendar_row and calendar_row.get("updated_at"):
+        try:
+            updated_at = datetime.fromisoformat(str(calendar_row.get("updated_at")).replace("Z", "+00:00"))
+            now_dt = get_local_now()
+            if updated_at.tzinfo is not None and now_dt.tzinfo is None:
+                now_dt = now_dt.replace(tzinfo=updated_at.tzinfo)
+            calendar_age_minutes = max(0.0, (now_dt - updated_at).total_seconds() / 60.0)
+        except:
+            calendar_age_minutes = None
     if not openai_configured:
         reasons.append("openai missing")
     if not twilio_configured:
@@ -4403,6 +4414,8 @@ def get_brainstem_overview_payload():
         reasons.append("gmail disconnected")
     if not calendar_connected:
         reasons.append("calendar provider missing")
+    if calendar_connected and calendar_age_minutes is not None and calendar_age_minutes > 20:
+        reasons.append(f"calendar stale {int(calendar_age_minutes)}m")
     healthy = len(reasons) == 0
     return {
         "now_local": now.isoformat(),
@@ -4417,6 +4430,7 @@ def get_brainstem_overview_payload():
             "twilio_configured": twilio_configured,
             "gmail_connected": gmail_connected,
             "calendar_provider": calendar_connected,
+            "calendar_age_minutes": round(calendar_age_minutes, 1) if calendar_age_minutes is not None else None,
         },
         "journal_guard": get_journal_guard_status(),
         "feedback_context_allowed": feedback_context_allowed(),
@@ -12677,12 +12691,29 @@ def brainstem_api_ops_run():
         result = run_nightly_memory_consolidation_with_retry(max_attempts=3, base_delay_seconds=1.0)
     elif action == "context_refresh":
         local_date = get_local_date_string()
+        inbox_refreshed = bool(fetch_gmail_inbox_daily_context(local_date=local_date))
+        calendar_refreshed = bool(refresh_calendar_context_from_provider(local_date=local_date))
+        sleep_refreshed = bool(refresh_sleep_context_from_provider(local_date=local_date))
+        configured = {
+            "calendar_provider": bool(CALENDAR_CONTEXT_URL),
+            "sleep_provider": bool(SLEEP_CONTEXT_URL),
+            "gmail_connected": bool(get_gmail_service()[0]),
+        }
+        failures = []
+        if configured["calendar_provider"] and not calendar_refreshed:
+            failures.append("calendar_refresh_failed")
+        if configured["sleep_provider"] and not sleep_refreshed:
+            failures.append("sleep_refresh_failed")
+        if configured["gmail_connected"] and not inbox_refreshed:
+            failures.append("gmail_refresh_failed")
         result = {
-            "ok": True,
+            "ok": len(failures) == 0,
             "local_date": local_date,
-            "inbox_refreshed": bool(fetch_gmail_inbox_daily_context(local_date=local_date)),
-            "calendar_refreshed": bool(refresh_calendar_context_from_provider(local_date=local_date)),
-            "sleep_refreshed": bool(refresh_sleep_context_from_provider(local_date=local_date)),
+            "inbox_refreshed": inbox_refreshed,
+            "calendar_refreshed": calendar_refreshed,
+            "sleep_refreshed": sleep_refreshed,
+            "configured": configured,
+            "failures": failures,
         }
     audit_brainstem_action("ops_run", action, payload)
     return app.response_class(response=json.dumps(result, indent=2), status=200, mimetype="application/json")
@@ -12722,22 +12753,48 @@ def task_context_refresh():
     inbox_payload = fetch_gmail_inbox_daily_context(local_date=local_date)
     calendar_payload = refresh_calendar_context_from_provider(local_date=local_date)
     sleep_payload = refresh_sleep_context_from_provider(local_date=local_date)
+    configured = {
+        "calendar_provider": bool(CALENDAR_CONTEXT_URL),
+        "sleep_provider": bool(SLEEP_CONTEXT_URL),
+        "gmail_connected": bool(get_gmail_service()[0]),
+    }
+    failures = []
+    if configured["calendar_provider"] and not calendar_payload:
+        failures.append("calendar_refresh_failed")
+    if configured["sleep_provider"] and not sleep_payload:
+        failures.append("sleep_refresh_failed")
+    if configured["gmail_connected"] and not inbox_payload:
+        failures.append("gmail_refresh_failed")
+
+    calendar_age_minutes = None
+    calendar_row = get_calendar_daily_context(local_date=local_date)
+    if calendar_row and calendar_row.get("updated_at"):
+        try:
+            updated_at = datetime.fromisoformat(str(calendar_row.get("updated_at")).replace("Z", "+00:00"))
+            now_dt = get_local_now()
+            if updated_at.tzinfo is not None and now_dt.tzinfo is None:
+                now_dt = now_dt.replace(tzinfo=updated_at.tzinfo)
+            calendar_age_minutes = max(0.0, (now_dt - updated_at).total_seconds() / 60.0)
+            if configured["calendar_provider"] and calendar_age_minutes > 20:
+                failures.append(f"calendar_stale_{int(calendar_age_minutes)}m")
+        except:
+            pass
+
     snapshot = build_journal_context_snapshot()
     tone_vector = build_tone_vector({}, snapshot)
     record_tone_snapshot(snapshot, tone_vector)
+    ok = len(failures) == 0
     return app.response_class(
         response=json.dumps(
             {
-                "ok": True,
+                "ok": ok,
                 "local_date": local_date,
                 "inbox_refreshed": bool(inbox_payload),
                 "calendar_refreshed": bool(calendar_payload),
                 "sleep_refreshed": bool(sleep_payload),
-                "configured": {
-                    "calendar_provider": bool(CALENDAR_CONTEXT_URL),
-                    "sleep_provider": bool(SLEEP_CONTEXT_URL),
-                    "gmail_connected": bool(get_gmail_service()[0]),
-                },
+                "configured": configured,
+                "failures": failures,
+                "calendar_age_minutes": round(calendar_age_minutes, 1) if calendar_age_minutes is not None else None,
                 "context_snapshot": snapshot,
                 "tone_vector": tone_vector,
             },
