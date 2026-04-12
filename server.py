@@ -4655,6 +4655,10 @@ def get_cost_usage_snapshot():
     conn.close()
     return {
         "disclaimer": "Cost projection is approximate and may be inaccurate.",
+        "accuracy": {
+            "activity_counts": "exact_local_db",
+            "provider_costs": "approximate_unless_provider_billing_connected",
+        },
         "providers": {
             "openai": {"configured": bool(os.environ.get("OPENAI_API_KEY")), "estimated_30d_calls_proxy": interactions_30d},
             "twilio": {"configured": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN), "outbound_messages_30d": outbound_30d},
@@ -12949,9 +12953,11 @@ async function renderUsage() {{
     </div>`;
   }}).join("");
   const rollups = data.rollups || {{}};
+  const accuracy = data.accuracy || {{}};
   target.innerHTML = `
     <div class="grid">
       <div class="card span-12"><div class="title">Usage + Cost</div><div class="muted">${{esc(data.disclaimer || "")}}</div></div>
+      <div class="card span-12"><div class="muted">Accuracy: activity counts = <strong>${{esc(accuracy.activity_counts || "unknown")}}</strong>; provider costs = <strong>${{esc(accuracy.provider_costs || "unknown")}}</strong></div></div>
       <div class="card span-4"><div class="title">Interactions (30d)</div><div class="kpi">${{esc(rollups.interactions_30d ?? 0)}}</div></div>
       <div class="card span-4"><div class="title">Alerts (30d)</div><div class="kpi">${{esc(rollups.alerts_30d ?? 0)}}</div></div>
       <div class="card span-4"><div class="title">Outbound Msg (30d)</div><div class="kpi">${{esc(rollups.outbound_messages_30d ?? 0)}}</div></div>
