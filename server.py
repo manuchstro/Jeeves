@@ -13,6 +13,7 @@ import math
 import base64
 import random
 import time
+import hmac
 from email.utils import parsedate_to_datetime
 from difflib import SequenceMatcher
 from collections import Counter
@@ -73,6 +74,7 @@ DAILY_BRIEF_MINUTE = 0
 GRATITUDE_HOUR = 22
 GRATITUDE_MINUTE = 15
 JOURNAL_RESPONSE_WINDOW_HOURS = 12
+BRAINSTEM_AUTH_MODE = (os.environ.get("BRAINSTEM_AUTH_MODE") or "internal_key").strip().lower()
 CALENDAR_CONTEXT_URL = os.environ.get("CALENDAR_CONTEXT_URL", "").strip()
 CALENDAR_CONTEXT_BEARER = os.environ.get("CALENDAR_CONTEXT_BEARER", "").strip()
 SLEEP_CONTEXT_URL = os.environ.get("SLEEP_CONTEXT_URL", "").strip()
@@ -664,6 +666,61 @@ def init_db():
         relation_type TEXT NOT NULL,
         details_json TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS brainstem_settings (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS brainstem_action_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        actor TEXT NOT NULL DEFAULT 'internal',
+        action TEXT NOT NULL,
+        target TEXT,
+        payload_json TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS memory_feedback_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL,
+        category TEXT NOT NULL,
+        memory_key TEXT NOT NULL,
+        action TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        execute_after DATETIME NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        undone_at DATETIME
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS tone_signal_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        local_date TEXT NOT NULL,
+        captured_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        brevity REAL,
+        directness REAL,
+        warmth REAL,
+        seriousness REAL,
+        busy_score REAL,
+        calendar_busy REAL,
+        inbox_busy REAL,
+        fatigue_score REAL,
+        restedness_score REAL,
+        market_stress REAL,
+        stress_signal REAL,
+        friction_signal REAL,
+        memory_confidence REAL,
+        anti_sycophancy REAL
     )
     """)
 
@@ -3744,34 +3801,279 @@ def append_internal_key(url):
     return f"{url}{separator}key={quote_plus(INTERNAL_API_KEY)}"
 
 
+def require_brainstem_access():
+    # For now, Brainstem uses the same internal-key gate as debug/task routes.
+    # This keeps execution deterministic and avoids exposing action endpoints.
+    return require_internal_api_key()
+
+
+def get_brainstem_setting(key, default=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT value_json
+        FROM brainstem_settings
+        WHERE key = ?
+        LIMIT 1
+        """,
+        (key,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return default
+    try:
+        return json.loads(row["value_json"])
+    except Exception:
+        return default
+
+
+def set_brainstem_setting(key, value):
+    execute_write_with_retry(
+        """
+        INSERT INTO brainstem_settings (key, value_json, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET
+            value_json = excluded.value_json,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (str(key), serialize_json(value, fallback={})),
+    )
+
+
+def audit_brainstem_action(action, target="", payload=None, actor="internal"):
+    execute_write_with_retry(
+        """
+        INSERT INTO brainstem_action_audit (actor, action, target, payload_json)
+        VALUES (?, ?, ?, ?)
+        """,
+        (actor or "internal", action or "unknown", target or "", serialize_json(payload, fallback={})),
+    )
+
+
+def process_due_memory_feedback_queue(now_local=None):
+    now_local = now_local or get_local_now()
+    now_iso = now_local.isoformat()
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, scope, category, memory_key, action
+        FROM memory_feedback_queue
+        WHERE status = 'pending'
+          AND datetime(execute_after) <= datetime(?)
+        ORDER BY id ASC
+        LIMIT 50
+        """,
+        (now_iso,),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+
+    for item in rows:
+        if item.get("action") != "forget":
+            execute_write_with_retry(
+                "UPDATE memory_feedback_queue SET status = 'ignored' WHERE id = ?",
+                (item["id"],),
+            )
+            continue
+
+        scope = item.get("scope")
+        category = item.get("category")
+        memory_key = item.get("memory_key")
+
+        # Delete memory + embedding safely.
+        execute_write_with_retry(
+            """
+            DELETE FROM memory_items
+            WHERE scope = ? AND category = ? AND memory_key = ?
+            """,
+            (scope, category, memory_key),
+        )
+        execute_write_with_retry(
+            """
+            DELETE FROM memory_embeddings
+            WHERE scope = ? AND category = ? AND memory_key = ?
+            """,
+            (scope, category, memory_key),
+        )
+        add_memory_provenance_event(
+            scope,
+            category,
+            memory_key,
+            action="feedback_forget_delete",
+            source_text="brainstem_inaccurate_delayed_delete",
+            source_trust="direct_user",
+            confidence=0.2,
+            stability="situational",
+        )
+        execute_write_with_retry(
+            """
+            UPDATE memory_feedback_queue
+            SET status = 'applied'
+            WHERE id = ?
+            """,
+            (item["id"],),
+        )
+
+
+def queue_memory_feedback_forget(scope, category, memory_key, delay_minutes=60):
+    delay_minutes = max(5, int(delay_minutes or 60))
+    execute_after = (get_local_now() + timedelta(minutes=delay_minutes)).isoformat()
+    execute_write_with_retry(
+        """
+        INSERT INTO memory_feedback_queue (scope, category, memory_key, action, status, execute_after)
+        VALUES (?, ?, ?, 'forget', 'pending', ?)
+        """,
+        (scope, category, memory_key, execute_after),
+    )
+    return execute_after
+
+
+def undo_memory_feedback_forget(scope, category, memory_key):
+    execute_write_with_retry(
+        """
+        UPDATE memory_feedback_queue
+        SET status = 'undone', undone_at = CURRENT_TIMESTAMP
+        WHERE scope = ?
+          AND category = ?
+          AND memory_key = ?
+          AND action = 'forget'
+          AND status = 'pending'
+        """,
+        (scope, category, memory_key),
+    )
+
+
+def adjust_memory_confidence(scope, category, memory_key, delta=0.07, source_text="brainstem_feedback"):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT value, confidence, stability
+        FROM memory_items
+        WHERE scope = ? AND category = ? AND memory_key = ?
+        LIMIT 1
+        """,
+        (scope, category, memory_key),
+    )
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return None
+    old_conf = float(row["confidence"] or 0.5)
+    new_conf = max(0.01, min(MEMORY_CONFIDENCE_MAX, old_conf + float(delta)))
+    stability = row["stability"] or "situational"
+    if delta > 0 and stability == "situational":
+        stability = "emerging"
+    cur.execute(
+        """
+        UPDATE memory_items
+        SET confidence = ?, stability = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE scope = ? AND category = ? AND memory_key = ?
+        """,
+        (new_conf, stability, scope, category, memory_key),
+    )
+    conn.commit()
+    conn.close()
+    add_memory_provenance_event(
+        scope,
+        category,
+        memory_key,
+        action="feedback_confidence_adjust",
+        source_text=source_text,
+        source_trust="direct_user",
+        confidence=new_conf,
+        stability=stability,
+        old_value=row["value"],
+        new_value=row["value"],
+    )
+    return {"old_confidence": old_conf, "new_confidence": new_conf, "stability": stability}
+
+
+def record_tone_snapshot(context_snapshot, tone_vector):
+    context_snapshot = context_snapshot or {}
+    tone_vector = tone_vector or {}
+    signals = tone_vector.get("signals") or {}
+    execute_write_with_retry(
+        """
+        INSERT INTO tone_signal_snapshots (
+            local_date, brevity, directness, warmth, seriousness,
+            busy_score, calendar_busy, inbox_busy, fatigue_score, restedness_score,
+            market_stress, stress_signal, friction_signal, memory_confidence, anti_sycophancy
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            get_local_date_string(),
+            tone_vector.get("brevity"),
+            tone_vector.get("directness"),
+            tone_vector.get("warmth"),
+            tone_vector.get("seriousness"),
+            signals.get("busy_score"),
+            signals.get("calendar_busy"),
+            signals.get("inbox_busy"),
+            signals.get("fatigue_score"),
+            signals.get("restedness_score"),
+            signals.get("market_stress"),
+            signals.get("stress_signal"),
+            signals.get("friction_signal"),
+            signals.get("memory_confidence"),
+            signals.get("anti_sycophancy"),
+        ),
+    )
+
+
+def get_operator_links_map():
+    base = get_public_base_url()
+
+    def link(path):
+        target = f"{base}{path}" if base else path
+        return append_internal_key(target)
+
+    return {
+        "core": {
+            "poll_run": link("/debug/poll/run"),
+            "poll_run_readable": link("/tasks/poll?readable=1"),
+            "poll_preview": link("/debug/poll/preview"),
+            "daily_brief_force": link("/tasks/daily-brief?force=1"),
+            "scheduled_check": link("/tasks/scheduled-check"),
+            "guards": link("/debug/guards"),
+        },
+        "portfolio": {
+            "sync_trusted": link("/tasks/portfolio-sync?days=14"),
+            "truth_json": link("/debug/portfolio/truth"),
+            "truth_view": link("/debug/portfolio/truth/view"),
+            "integrity": link("/debug/portfolio/integrity"),
+        },
+        "memory_context": {
+            "memory_raw": link("/debug/memory"),
+            "memory_compact": link("/debug/memory?compact=1"),
+            "memory_view": link("/debug/memory/view"),
+            "context_debug": link("/debug/context"),
+            "context_refresh": link("/tasks/context-refresh"),
+            "inbox_refresh": link("/debug/context/inbox/refresh"),
+            "calendar_refresh": link("/debug/context/calendar/refresh"),
+            "sleep_refresh": link("/debug/context/sleep/refresh"),
+            "sleep_history": link("/debug/context/sleep/history"),
+            "alerts_debug": link("/debug/alerts"),
+            "daily_brief_debug": link("/debug/daily-brief"),
+            "gmail_debug": link("/debug/gmail"),
+        },
+    }
+
+
 # ---------------- OPERATOR LINK HUB (`key` RESPONSE) ----------------
 
 def build_command_key_reply():
     base = get_public_base_url()
     privacy_link = f"{base}/privacy" if base else "/privacy"
     terms_link = f"{base}/terms" if base else "/terms"
-
-    def link(path):
-        target = f"{base}{path}" if base else path
-        return append_internal_key(target)
-
-    memory_raw = append_internal_key(f"{base}/debug/memory" if base else "/debug/memory")
-    memory_compact = append_internal_key(f"{base}/debug/memory?compact=1" if base else "/debug/memory?compact=1")
-    memory_view = append_internal_key(f"{base}/debug/memory/view" if base else "/debug/memory/view")
-    poll_preview = link("/debug/poll/preview")
-    poll_run = link("/debug/poll/run")
-    poll_run_readable = link("/tasks/poll?readable=1")
-    portfolio_sync = link("/tasks/portfolio-sync?days=14")
-    portfolio_truth_json = link("/debug/portfolio/truth")
-    portfolio_truth_view = link("/debug/portfolio/truth/view")
-    portfolio_integrity = link("/debug/portfolio/integrity")
-    daily_brief_force = link("/tasks/daily-brief?force=1")
-    scheduled_check = link("/tasks/scheduled-check")
-    context_debug = link("/debug/context")
-    context_refresh = link("/tasks/context-refresh")
-    inbox_refresh = link("/debug/context/inbox/refresh")
-    calendar_refresh = link("/debug/context/calendar/refresh")
-    sleep_refresh = link("/debug/context/sleep/refresh")
+    links = get_operator_links_map()
+    core = links.get("core") or {}
+    portfolio = links.get("portfolio") or {}
+    memory_context = links.get("memory_context") or {}
 
     return "\n".join([
         COMMAND_KEY_REPLY,
@@ -3780,28 +4082,147 @@ def build_command_key_reply():
         f"terms: {terms_link}",
         "",
         "Core task links:",
-        f"- poll run: {poll_run}",
-        f"- poll run (readable): {poll_run_readable}",
-        f"- poll preview: {poll_preview}",
-        f"- daily brief (force): {daily_brief_force}",
-        f"- scheduled check: {scheduled_check}",
+        f"- poll run: {core.get('poll_run', '')}",
+        f"- poll run (readable): {core.get('poll_run_readable', '')}",
+        f"- poll preview: {core.get('poll_preview', '')}",
+        f"- daily brief (force): {core.get('daily_brief_force', '')}",
+        f"- scheduled check: {core.get('scheduled_check', '')}",
+        f"- guards: {core.get('guards', '')}",
         "",
         "Portfolio truth links:",
-        f"- sync trusted portfolio: {portfolio_sync}",
-        f"- portfolio truth (json): {portfolio_truth_json}",
-        f"- portfolio truth (readable): {portfolio_truth_view}",
-        f"- portfolio integrity: {portfolio_integrity}",
+        f"- sync trusted portfolio: {portfolio.get('sync_trusted', '')}",
+        f"- portfolio truth (json): {portfolio.get('truth_json', '')}",
+        f"- portfolio truth (readable): {portfolio.get('truth_view', '')}",
+        f"- portfolio integrity: {portfolio.get('integrity', '')}",
         "",
         "Memory and context links:",
-        f"memory debug raw: {memory_raw}",
-        f"memory debug compact: {memory_compact}",
-        f"memory debug view: {memory_view}",
-        f"context debug: {context_debug}",
-        f"context refresh (all): {context_refresh}",
-        f"inbox refresh: {inbox_refresh}",
-        f"calendar refresh: {calendar_refresh}",
-        f"sleep refresh: {sleep_refresh}",
+        f"memory debug raw: {memory_context.get('memory_raw', '')}",
+        f"memory debug compact: {memory_context.get('memory_compact', '')}",
+        f"memory debug view: {memory_context.get('memory_view', '')}",
+        f"context debug: {memory_context.get('context_debug', '')}",
+        f"context refresh (all): {memory_context.get('context_refresh', '')}",
+        f"inbox refresh: {memory_context.get('inbox_refresh', '')}",
+        f"calendar refresh: {memory_context.get('calendar_refresh', '')}",
+        f"sleep refresh: {memory_context.get('sleep_refresh', '')}",
+        f"sleep history: {memory_context.get('sleep_history', '')}",
+        f"alerts debug: {memory_context.get('alerts_debug', '')}",
+        f"daily brief debug: {memory_context.get('daily_brief_debug', '')}",
+        f"gmail debug: {memory_context.get('gmail_debug', '')}",
     ])
+
+
+def get_tone_signal_snapshots(range_key="24h"):
+    range_map = {
+        "24h": "-24 hours",
+        "7d": "-7 days",
+        "30d": "-30 days",
+        "max": "-3650 days",
+    }
+    window = range_map.get((range_key or "24h").lower(), "-24 hours")
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT local_date, captured_at, brevity, directness, warmth, seriousness,
+               busy_score, calendar_busy, inbox_busy, fatigue_score, restedness_score,
+               market_stress, stress_signal, friction_signal, memory_confidence, anti_sycophancy
+        FROM tone_signal_snapshots
+        WHERE datetime(captured_at) >= datetime('now', ?)
+        ORDER BY datetime(captured_at) ASC
+        LIMIT 5000
+        """,
+        (window,),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_pending_memory_feedback_entries(limit=200):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, scope, category, memory_key, action, status, execute_after, created_at
+        FROM memory_feedback_queue
+        WHERE status = 'pending'
+        ORDER BY datetime(execute_after) ASC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_brainstem_overview_payload():
+    now = get_local_now()
+    snapshot = build_journal_context_snapshot()
+    tone_vector = build_tone_vector({}, snapshot)
+    record_tone_snapshot(snapshot, tone_vector)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) AS c FROM memory_items")
+    row = cur.fetchone()
+    memory_count = int(row["c"] if row and row["c"] is not None else 0)
+    cur.execute("SELECT COUNT(*) AS c FROM alert_log WHERE datetime(created_at) >= datetime('now','-24 hours')")
+    row = cur.fetchone()
+    alerts_24h = int(row["c"] if row and row["c"] is not None else 0)
+    cur.execute("SELECT alert_id, category, tier, headline, created_at FROM alert_log ORDER BY id DESC LIMIT 1")
+    row = cur.fetchone()
+    last_alert = dict(row) if row else None
+    conn.close()
+    return {
+        "now_local": now.isoformat(),
+        "deploy": {
+            "commit_sha": RAILWAY_GIT_COMMIT_SHA,
+            "deployment_id": RAILWAY_DEPLOYMENT_ID,
+        },
+        "journal_guard": get_journal_guard_status(),
+        "feedback_context_allowed": feedback_context_allowed(),
+        "article_request_context_allowed": article_request_context_allowed(),
+        "counts": {
+            "memory_items": memory_count,
+            "alerts_24h": alerts_24h,
+            "pending_memory_feedback": len(get_pending_memory_feedback_entries(limit=500)),
+        },
+        "last_alert": last_alert,
+        "context_snapshot": snapshot,
+        "tone_vector": tone_vector,
+    }
+
+
+def get_cost_usage_snapshot():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) AS c FROM outbound_messages WHERE datetime(created_at) >= datetime('now','-30 days')")
+    row = cur.fetchone()
+    outbound_30d = int(row["c"] if row and row["c"] is not None else 0)
+    cur.execute("SELECT COUNT(*) AS c FROM interaction_events WHERE datetime(created_at) >= datetime('now','-30 days')")
+    row = cur.fetchone()
+    interactions_30d = int(row["c"] if row and row["c"] is not None else 0)
+    cur.execute("SELECT COUNT(*) AS c FROM alert_log WHERE datetime(created_at) >= datetime('now','-30 days')")
+    row = cur.fetchone()
+    alerts_30d = int(row["c"] if row and row["c"] is not None else 0)
+    conn.close()
+    return {
+        "disclaimer": "Cost projection is approximate and may be inaccurate.",
+        "providers": {
+            "openai": {"configured": bool(os.environ.get("OPENAI_API_KEY")), "estimated_30d_calls_proxy": interactions_30d},
+            "twilio": {"configured": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN), "outbound_messages_30d": outbound_30d},
+            "massive": {"configured": bool(MASSIVE_API_KEY)},
+            "twelvedata": {"configured": bool(TWELVEDATA_API_KEY)},
+            "nyt": {"configured": bool(NYT_API_KEY)},
+            "fred": {"configured": bool(FRED_API_KEY)},
+            "currents": {"configured": bool(CURRENTS_API_KEY)},
+        },
+        "rollups": {
+            "interactions_30d": interactions_30d,
+            "alerts_30d": alerts_30d,
+            "outbound_messages_30d": outbound_30d,
+        },
+    }
 
 
 def get_recent_alert_feedback(limit=20):
@@ -8212,10 +8633,30 @@ def build_stable_g_interest_profile(interaction_limit=180, max_terms=5):
             if token in G_QUERY_CORE_TERMS:
                 term_counts[token] += 1
 
-    if not term_counts:
+    manual_terms = get_brainstem_setting("geo_manual_terms", default=[]) or []
+    for item in manual_terms:
+        if isinstance(item, dict):
+            term = str(item.get("term") or "").strip().lower()
+            mode = str(item.get("mode") or "normal").strip().lower()
+            weight = float(item.get("weight") or 1.0)
+        else:
+            term = str(item or "").strip().lower()
+            mode = "normal"
+            weight = 1.0
+        if not term or not is_geo_intent_text(term):
+            continue
+        if mode == "suppress":
+            term_counts[term] -= max(1, int(round(weight * 3)))
+        elif mode == "boost":
+            term_counts[term] += max(1, int(round(weight * 4)))
+        else:
+            term_counts[term] += max(1, int(round(weight * 2)))
+
+    positive_terms = Counter({k: v for k, v in term_counts.items() if v > 0})
+    if not positive_terms:
         return {"query": None, "terms": [], "matched_refs": 0}
 
-    top_terms = [term for term, _ in term_counts.most_common(max_terms)]
+    top_terms = [term for term, _ in positive_terms.most_common(max_terms)]
     if len(top_terms) == 1:
         top_terms.append("geopolitics")
     if len(top_terms) < 2:
@@ -10477,8 +10918,10 @@ def debug_context():
     denied = require_internal_api_key()
     if denied:
         return denied
+    process_due_memory_feedback_queue()
     snapshot = build_journal_context_snapshot()
     tone_vector = build_tone_vector({}, snapshot)
+    record_tone_snapshot(snapshot, tone_vector)
     return app.response_class(
         response=json.dumps(
             {
@@ -10641,16 +11084,778 @@ def debug_context_sleep_history():
     )
 
 
+@app.route("/brainstem", methods=["GET"])
+def brainstem_home():
+    denied = require_brainstem_access()
+    if denied:
+        return denied
+    base = get_public_base_url()
+    key_qs = ""
+    if INTERNAL_API_KEY:
+        key_qs = f"?key={quote_plus(INTERNAL_API_KEY)}"
+
+    html_page = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Brainstem</title>
+  <style>
+    :root {{
+      --bg: #2E3A31;
+      --fg: #FFEBC4;
+      --outline: #1A1712;
+      --accent: #FFA200;
+      --muted: #d7c8a8;
+      --panel: #344237;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin:0; font-family: "SF Pro Display", "Avenir Next", "Inter", system-ui, sans-serif; background: var(--bg); color: var(--fg); }}
+    .topbar {{ position: sticky; top:0; z-index:10; border-bottom: 2px solid var(--outline); background: rgba(46,58,49,0.95); backdrop-filter: blur(6px); }}
+    .topbar-inner {{ max-width: 1200px; margin:0 auto; padding: 12px; display:flex; align-items:center; gap:10px; flex-wrap: wrap; }}
+    .brand {{ font-weight: 800; letter-spacing: 0.3px; font-size: 1.1rem; }}
+    .tabs {{ display:flex; flex-wrap:wrap; gap:8px; }}
+    .tab-btn {{ border:2px solid var(--outline); background: var(--panel); color: var(--fg); font-weight:700; border-radius: 10px; padding: 8px 12px; cursor:pointer; }}
+    .tab-btn.active {{ outline: 2px solid var(--accent); }}
+    .container {{ max-width: 1200px; margin: 0 auto; padding: 14px; }}
+    .section {{ display:none; }}
+    .section.active {{ display:block; }}
+    .grid {{ display:grid; grid-template-columns: repeat(12, 1fr); gap:12px; }}
+    .card {{ border:2px solid var(--outline); background: var(--panel); border-radius:14px; padding:12px; }}
+    .span-12 {{ grid-column: span 12; }}
+    .span-8 {{ grid-column: span 8; }}
+    .span-6 {{ grid-column: span 6; }}
+    .span-4 {{ grid-column: span 4; }}
+    .span-3 {{ grid-column: span 3; }}
+    .title {{ font-size: 1rem; font-weight: 800; margin-bottom: 8px; }}
+    .muted {{ color: var(--muted); font-size: 0.9rem; }}
+    .kpi {{ font-size: 1.4rem; font-weight:800; }}
+    .row {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
+    .pill {{ border: 1px solid var(--outline); border-radius:999px; padding:4px 10px; font-size:0.82rem; background:#3a4a3e; }}
+    .btn {{ border:2px solid var(--outline); background:#455646; color:var(--fg); border-radius:10px; padding:8px 12px; cursor:pointer; font-weight:700; }}
+    .btn.warn {{ background: #6a4b13; color:#ffe5b3; }}
+    .btn.acc {{ background: #2f5d3a; }}
+    .btn.err {{ background: #6a2d2d; }}
+    .btn.ghost {{ background: transparent; }}
+    input, textarea, select {{
+      background:#263129; color:var(--fg); border:2px solid var(--outline); border-radius:10px; padding:8px; width:100%;
+    }}
+    .table {{ width:100%; border-collapse: collapse; font-size:0.9rem; }}
+    .table th, .table td {{ border-bottom:1px solid #253128; padding:8px; text-align:left; vertical-align:top; }}
+    .table th {{ color: var(--muted); font-size:0.82rem; }}
+    .links a {{ color: #ffd48a; text-decoration: none; word-break: break-all; }}
+    .links a:hover {{ text-decoration: underline; }}
+    #ops-console {{
+      background:#111; color:#9efc9e; border:2px solid var(--outline); border-radius:10px; min-height:180px;
+      padding:10px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; overflow:auto; white-space:pre-wrap;
+    }}
+    .term-box {{ border:2px solid var(--outline); border-radius:10px; padding:8px; background:#2d3b31; }}
+    .chart-wrap {{ height: 320px; border:2px solid var(--outline); border-radius:10px; background:#253128; position:relative; }}
+    canvas {{ width:100%; height:100%; display:block; }}
+    .expandable summary {{ cursor:pointer; font-weight:700; }}
+    @media (max-width: 900px) {{
+      .span-8, .span-6, .span-4, .span-3 {{ grid-column: span 12; }}
+      .tab-btn {{ padding: 8px 10px; font-size: 0.9rem; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">Brainstem</div>
+      <div class="tabs" id="tabs"></div>
+      <div class="muted" id="auth-note">secured via internal key</div>
+    </div>
+  </div>
+  <div class="container">
+    <div id="sections"></div>
+  </div>
+<script>
+const KEY_QS = "{key_qs}";
+const sections = [
+  {{id:"overview", label:"Overview"}},
+  {{id:"key", label:"Key"}},
+  {{id:"memory", label:"Memory"}},
+  {{id:"context", label:"Context + Tone"}},
+  {{id:"news", label:"News/Poll"}},
+  {{id:"ops", label:"Ops + Tasks"}},
+  {{id:"costs", label:"Costs"}},
+  {{id:"whitepaper", label:"Whitepaper"}},
+];
+
+function api(path, opts={{}}) {{
+  const url = path + (path.includes("?") ? "&" : "?") + KEY_QS.replace(/^\\?/, "");
+  return fetch(url, opts).then(async r => {{
+    const text = await r.text();
+    try {{ return JSON.parse(text); }} catch {{ return {{ok:r.ok, raw:text}}; }}
+  }});
+}}
+
+function makeTabs() {{
+  const tabs = document.getElementById("tabs");
+  const holder = document.getElementById("sections");
+  sections.forEach((s, idx) => {{
+    const b = document.createElement("button");
+    b.className = "tab-btn" + (idx===0 ? " active":"");
+    b.textContent = s.label;
+    b.onclick = () => activateSection(s.id);
+    b.id = "tab-"+s.id;
+    tabs.appendChild(b);
+    const sec = document.createElement("section");
+    sec.className = "section" + (idx===0 ? " active":"");
+    sec.id = "section-"+s.id;
+    holder.appendChild(sec);
+  }});
+}}
+
+function activateSection(id) {{
+  sections.forEach(s => {{
+    document.getElementById("tab-"+s.id).classList.toggle("active", s.id===id);
+    document.getElementById("section-"+s.id).classList.toggle("active", s.id===id);
+  }});
+}}
+
+function esc(s) {{
+  return String(s ?? "").replace(/[&<>"']/g, c => ({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}})[c]);
+}}
+
+function rangeButtons(active, onChange) {{
+  const wrap = document.createElement("div");
+  wrap.className = "row";
+  ["max","30d","7d","24h"].forEach(key => {{
+    const b = document.createElement("button");
+    b.className = "btn" + (active===key ? " warn":" ghost");
+    b.textContent = key.toUpperCase();
+    b.onclick = () => onChange(key);
+    wrap.appendChild(b);
+  }});
+  return wrap;
+}}
+
+async function renderOverview() {{
+  const target = document.getElementById("section-overview");
+  const data = await api("/brainstem/api/overview");
+  target.innerHTML = `
+    <div class="grid">
+      <div class="card span-3"><div class="title">Now</div><div class="muted">${{esc(data.now_local || "")}}</div></div>
+      <div class="card span-3"><div class="title">Commit</div><div class="kpi">${{esc((data.deploy||{{}}).commit_sha || "n/a")}}</div></div>
+      <div class="card span-3"><div class="title">Alerts 24h</div><div class="kpi">${{esc(((data.counts||{{}}).alerts_24h)||0)}}</div></div>
+      <div class="card span-3"><div class="title">Memory Items</div><div class="kpi">${{esc(((data.counts||{{}}).memory_items)||0)}}</div></div>
+      <div class="card span-12"><div class="title">Guard Status</div><pre>${{esc(JSON.stringify(data.journal_guard || {{}}, null, 2))}}</pre></div>
+    </div>
+  `;
+}}
+
+async function renderKeyPage() {{
+  const target = document.getElementById("section-key");
+  const data = await api("/brainstem/api/key-links");
+  const blocks = Object.entries(data.links || {{}}).map(([group, values]) => {{
+    const rows = Object.entries(values || {{}}).map(([k,v]) =>
+      `<tr><td>${{esc(k)}}</td><td class="links"><a href="${{esc(v)}}" target="_blank" rel="noopener noreferrer">${{esc(v)}}</a></td></tr>`
+    ).join("");
+    return `<div class="card span-12"><div class="title">${{esc(group)}}</div><table class="table"><tbody>${{rows}}</tbody></table></div>`;
+  }}).join("");
+  target.innerHTML = `<div class="grid">${{blocks}}</div>`;
+}}
+
+async function renderMemory() {{
+  const target = document.getElementById("section-memory");
+  const data = await api("/brainstem/api/memory");
+  const rows = (data.items || []).map(item => {{
+    const key = `${{item.scope}}::${{item.category}}::${{item.memory_key}}`;
+    return `<tr>
+      <td><code>${{esc(key)}}</code><div class="muted">${{esc(item.updated_at || "")}}</div></td>
+      <td>${{esc(item.value || "")}}</td>
+      <td>${{esc(item.confidence ?? "")}}</td>
+      <td>
+        <div class="row">
+          <button class="btn acc" onclick="memoryFeedback('${{esc(item.scope)}}','${{esc(item.category)}}','${{esc(item.memory_key)}}','accurate')">Accurate</button>
+          <button class="btn err" onclick="memoryFeedback('${{esc(item.scope)}}','${{esc(item.category)}}','${{esc(item.memory_key)}}','inaccurate')">Inaccurate</button>
+          <button class="btn ghost" onclick="memoryFeedback('${{esc(item.scope)}}','${{esc(item.category)}}','${{esc(item.memory_key)}}','undo_inaccurate')">Undo</button>
+        </div>
+      </td>
+    </tr>`;
+  }}).join("");
+  const pending = (data.pending_feedback || []).map(item => `<li><code>${{esc(item.scope)}}::${{esc(item.category)}}::${{esc(item.memory_key)}}</code> forget at ${{esc(item.execute_after)}}</li>`).join("");
+  target.innerHTML = `
+    <div class="grid">
+      <div class="card span-12">
+        <div class="title">Memory Explorer</div>
+        <div class="muted">Marking inaccurate queues deletion in 1 hour. Undo available before execution.</div>
+        <table class="table"><thead><tr><th>ID</th><th>Value</th><th>Confidence</th><th>Feedback</th></tr></thead><tbody>${{rows}}</tbody></table>
+      </div>
+      <div class="card span-12">
+        <div class="title">Pending Forget Queue</div>
+        <ul>${{pending || "<li class='muted'>none</li>"}}</ul>
+      </div>
+    </div>
+  `;
+}}
+
+async function memoryFeedback(scope, category, memory_key, action) {{
+  const confirmText = action === "accurate" ? "mark this memory accurate?" : (action === "inaccurate" ? "mark this memory inaccurate and queue forget in 1 hour?" : "undo queued forget?");
+  if (!confirm("Are you sure you want to " + confirmText)) return;
+  await api("/brainstem/api/memory/feedback", {{
+    method: "POST",
+    headers: {{"Content-Type":"application/json"}},
+    body: JSON.stringify({{scope, category, memory_key, action}})
+  }});
+  renderMemory();
+}}
+
+function drawContext3D(canvas, point) {{
+  const ctx = canvas.getContext("2d");
+  const state = {{yaw:-0.6,pitch:0.5,drag:false,lastX:0,lastY:0}};
+  const ideal = {{x:0, y:1, z:0}}; // emptiest inbox, high sleep, free calendar
+  const current = point || {{x:0.5,y:0.5,z:0.5}};
+
+  function project(p, w, h) {{
+    const cy = Math.cos(state.yaw), sy = Math.sin(state.yaw);
+    const cp = Math.cos(state.pitch), sp = Math.sin(state.pitch);
+    let x = p.x-0.5, y = p.y-0.5, z = p.z-0.5;
+    const xz = x*cy - z*sy; const zz = x*sy + z*cy;
+    const yz = y*cp - zz*sp; const zz2 = y*sp + zz*cp;
+    const s = 220/(zz2+3);
+    return {{x: w/2 + xz*s*1.4, y: h/2 - yz*s*1.4}};
+  }}
+
+  function line(a,b,color,width=1,alpha=1) {{
+    ctx.save(); ctx.globalAlpha=alpha; ctx.strokeStyle=color; ctx.lineWidth=width;
+    ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); ctx.restore();
+  }}
+
+  function dot(a,color,r=5) {{
+    ctx.fillStyle=color; ctx.beginPath(); ctx.arc(a.x,a.y,r,0,Math.PI*2); ctx.fill();
+  }}
+
+  function render() {{
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * devicePixelRatio;
+    canvas.height = rect.height * devicePixelRatio;
+    ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+    ctx.clearRect(0,0,rect.width,rect.height);
+    const verts = [
+      {{x:0,y:0,z:0}},{{x:1,y:0,z:0}},{{x:1,y:1,z:0}},{{x:0,y:1,z:0}},
+      {{x:0,y:0,z:1}},{{x:1,y:0,z:1}},{{x:1,y:1,z:1}},{{x:0,y:1,z:1}},
+    ].map(v=>project(v,rect.width,rect.height));
+    const edges = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+    edges.forEach(([a,b]) => line(verts[a], verts[b], "#6e7c70", 1, 0.4));
+    const pIdeal = project(ideal,rect.width,rect.height);
+    const pCurrent = project(current,rect.width,rect.height);
+    line(pIdeal, pCurrent, "#FFA200", 2, 0.45); // faint vector line (ideal -> current)
+    dot(pIdeal, "#9dd8a0", 4);
+    dot(pCurrent, "#FFA200", 6);
+  }}
+
+  canvas.onpointerdown = e => {{ state.drag=true; state.lastX=e.clientX; state.lastY=e.clientY; }};
+  window.addEventListener("pointerup", ()=>state.drag=false);
+  window.addEventListener("pointermove", e => {{
+    if (!state.drag) return;
+    const dx = e.clientX - state.lastX, dy = e.clientY - state.lastY;
+    state.lastX = e.clientX; state.lastY = e.clientY;
+    state.yaw += dx*0.01; state.pitch += dy*0.01;
+    render();
+  }});
+  render();
+  window.addEventListener("resize", render);
+}}
+
+async function renderContextTone() {{
+  const target = document.getElementById("section-context");
+  const data = await api("/brainstem/api/context-tone");
+  const sig = ((data.tone_vector||{{}}).signals || {{}});
+  const point = {{
+    x: Math.max(0, Math.min(1, Number(sig.inbox_busy ?? 0.5))),      // inbox axis
+    y: Math.max(0, Math.min(1, Number(sig.restedness_score ?? (1-Number(sig.fatigue_score ?? 0.5))))), // sleep axis
+    z: Math.max(0, Math.min(1, 1-Number(sig.calendar_busy ?? 0.5))), // free-calendar axis
+  }};
+  target.innerHTML = `
+    <div class="grid">
+      <div class="card span-8">
+        <div class="title">3D Context Vector</div>
+        <div class="muted">Axes: Inbox load (x), Restedness (y), Free calendar (z). Drag to rotate.</div>
+        <div class="chart-wrap"><canvas id="ctx3d"></canvas></div>
+      </div>
+      <div class="card span-4">
+        <div class="title">Why This Tone</div>
+        <p class="muted">Like human tone, response style shifts subtly with energy, workload, and cognitive load. Busy inbox/calendar pushes brevity and directness. Better rest raises warmth and lowers unnecessary hardness.</p>
+        <pre>${{esc(JSON.stringify(data.tone_vector || {{}}, null, 2))}}</pre>
+      </div>
+      <div class="card span-12">
+        <div class="title">Historical Signals</div>
+        <div id="history-controls"></div>
+        <div class="chart-wrap"><canvas id="hist"></canvas></div>
+      </div>
+    </div>
+  `;
+  drawContext3D(document.getElementById("ctx3d"), point);
+  setupHistory("24h");
+}}
+
+async function setupHistory(rangeKey) {{
+  const controls = document.getElementById("history-controls");
+  controls.innerHTML = "";
+  controls.appendChild(rangeButtons(rangeKey, setupHistory));
+  const data = await api("/brainstem/api/history?range="+encodeURIComponent(rangeKey));
+  const canvas = document.getElementById("hist");
+  drawHistory(canvas, data);
+}}
+
+function drawHistory(canvas, data) {{
+  const rows = data.points || [];
+  const rect = canvas.getBoundingClientRect();
+  const ctx = canvas.getContext("2d");
+  canvas.width = rect.width * devicePixelRatio;
+  canvas.height = rect.height * devicePixelRatio;
+  ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  ctx.clearRect(0,0,rect.width,rect.height);
+  if (!rows.length) {{
+    ctx.fillStyle="#c9b894"; ctx.fillText("No history yet", 16, 24); return;
+  }}
+  const series = [
+    ["brevity","#FFA200"],["directness","#f0c36f"],["warmth","#9dd8a0"],["seriousness","#e38f6a"],
+    ["calendar_busy","#6bb7ff"],["inbox_busy","#c77dff"],["fatigue_score","#ff6b6b"],["restedness_score","#4dd4ac"],
+    ["stress_signal","#ff9f43"],["anti_sycophancy","#ffe28c"]
+  ];
+  const enabled = new Set((data.enabled_series || series.map(s=>s[0])));
+  const pad = 28, w = rect.width - pad*2, h = rect.height - pad*2;
+  ctx.strokeStyle = "#5f6e63"; ctx.strokeRect(pad, pad, w, h);
+  series.forEach(([name,color]) => {{
+    if (!enabled.has(name)) return;
+    ctx.strokeStyle = color; ctx.lineWidth = 1.8; ctx.beginPath();
+    rows.forEach((r,i) => {{
+      const x = pad + (i/(rows.length-1||1))*w;
+      const y = pad + (1-Math.max(0,Math.min(1, Number(r[name] ?? 0))))*h;
+      if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    }});
+    ctx.stroke();
+  }});
+}}
+
+async function renderNewsPoll() {{
+  const target = document.getElementById("section-news");
+  const data = await api("/brainstem/api/poll?force_currents=0");
+  const groups = data.grouped || {{}};
+  const groupHtml = Object.entries(groups).map(([cat, items]) => {{
+    const itemHtml = (items||[]).map(it => `<tr>
+      <td>${{esc(it.headline)}}</td>
+      <td>${{esc(it.source)}}</td>
+      <td><code>${{esc(it.progression_code || "")}}</code></td>
+      <td>${{esc(it.reason_summary || "")}}</td>
+    </tr>`).join("");
+    return `<details class="expandable card span-12" open>
+      <summary>${{esc(cat)}} (${{items.length}})</summary>
+      <table class="table"><thead><tr><th>Headline</th><th>Source</th><th>Progression</th><th>Selection Reason</th></tr></thead><tbody>${{itemHtml}}</tbody></table>
+    </details>`;
+  }}).join("");
+  target.innerHTML = `
+    <div class="grid">
+      <div class="card span-12"><div class="title">Poll Diagnostics</div><pre>${{esc(JSON.stringify(data.source_debug || {{}}, null, 2))}}</pre></div>
+      ${{groupHtml}}
+    </div>
+  `;
+}}
+
+async function renderGeoPanel() {{
+  const target = document.getElementById("section-news");
+  const data = await api("/brainstem/api/geopolitics");
+  const terms = (data.manual_terms || []).map(t => `
+    <div class="term-box">
+      <div><strong>${{esc(t.term)}}</strong> <span class="muted">mode=${{esc(t.mode||"normal")}} weight=${{esc(t.weight||1)}}</span></div>
+      <div class="row">
+        <button class="btn" onclick="geoTerm('${{esc(t.term)}}','boost')">Boost</button>
+        <button class="btn" onclick="geoTerm('${{esc(t.term)}}','suppress')">Suppress</button>
+        <button class="btn ghost" onclick="geoTerm('${{esc(t.term)}}','normal')">Normal</button>
+        <button class="btn err" onclick="geoTerm('${{esc(t.term)}}','remove')">Remove</button>
+      </div>
+    </div>
+  `).join("");
+  const panel = document.createElement("div");
+  panel.className = "card span-12";
+  panel.innerHTML = `
+    <div class="title">Geopolitics Query-Interest Panel</div>
+    <div class="muted">Manual guidance is advisory; system may ignore irrelevant/redundant terms.</div>
+    <div class="row" style="margin-top:8px;">
+      <input id="geo-input" placeholder="add G guidance term/topic (e.g. red sea shipping, taiwan strait)">
+      <button class="btn warn" onclick="geoAdd()">Add Term</button>
+      <button class="btn err" onclick="geoReset()">Reset G Profile</button>
+    </div>
+    <div class="row" style="margin-top:10px;">${{terms || "<span class='muted'>no manual terms yet</span>"}}</div>
+    <pre>${{esc(JSON.stringify(data.profile || {{}}, null, 2))}}</pre>
+  `;
+  target.prepend(panel);
+}}
+
+async function geoAdd() {{
+  const term = (document.getElementById("geo-input").value || "").trim();
+  if (!term) return;
+  if (!confirm("Are you sure you want to add this geopolitics guidance term?")) return;
+  await api("/brainstem/api/geopolitics", {{
+    method:"POST", headers:{{"Content-Type":"application/json"}},
+    body: JSON.stringify({{action:"add", term}})
+  }});
+  renderNewsPoll().then(renderGeoPanel);
+}}
+
+async function geoTerm(term, mode) {{
+  if (!confirm("Are you sure you want to update this geopolitics term?")) return;
+  await api("/brainstem/api/geopolitics", {{
+    method:"POST", headers:{{"Content-Type":"application/json"}},
+    body: JSON.stringify({{action:"set_mode", term, mode}})
+  }});
+  renderNewsPoll().then(renderGeoPanel);
+}}
+
+async function geoReset() {{
+  if (!confirm("Are you sure you want to reset the G profile?")) return;
+  await api("/brainstem/api/geopolitics", {{
+    method:"POST", headers:{{"Content-Type":"application/json"}},
+    body: JSON.stringify({{action:"reset"}})
+  }});
+  renderNewsPoll().then(renderGeoPanel);
+}}
+
+function typeConsole(el, text) {{
+  el.textContent = "";
+  let i = 0;
+  const timer = setInterval(() => {{
+    el.textContent += text[i++] || "";
+    el.scrollTop = el.scrollHeight;
+    if (i >= text.length) clearInterval(timer);
+  }}, 2);
+}}
+
+async function renderOps() {{
+  const target = document.getElementById("section-ops");
+  target.innerHTML = `
+    <div class="grid">
+      <div class="card span-12">
+        <div class="title">Ops + Task Controls</div>
+        <div class="row">
+          <button class="btn warn" onclick="runOp('poll')">Run Poll</button>
+          <button class="btn warn" onclick="runOp('daily_brief')">Force Daily Brief</button>
+          <button class="btn warn" onclick="runOp('journal')">Force Journal</button>
+          <button class="btn warn" onclick="runOp('memory_consolidation')">Run Memory Consolidation</button>
+          <button class="btn warn" onclick="runOp('context_refresh')">Refresh Context</button>
+        </div>
+      </div>
+      <div class="card span-12"><div class="title">Live Console</div><div id="ops-console"></div></div>
+    </div>
+  `;
+}}
+
+async function runOp(action) {{
+  if (!confirm("Are you sure you want to run " + action + "?")) return;
+  const out = await api("/brainstem/api/ops/run", {{
+    method:"POST", headers:{{"Content-Type":"application/json"}},
+    body: JSON.stringify({{action}})
+  }});
+  typeConsole(document.getElementById("ops-console"), JSON.stringify(out, null, 2));
+}}
+
+async function renderCosts() {{
+  const target = document.getElementById("section-costs");
+  const data = await api("/brainstem/api/costs");
+  const rows = Object.entries(data.providers || {{}}).map(([k,v]) => `<tr><td>${{esc(k)}}</td><td><pre>${{esc(JSON.stringify(v, null, 2))}}</pre></td></tr>`).join("");
+  target.innerHTML = `
+    <div class="grid">
+      <div class="card span-12"><div class="title">Cost + Usage</div><div class="muted">${{esc(data.disclaimer || "")}}</div></div>
+      <div class="card span-12"><table class="table"><thead><tr><th>Provider</th><th>Metrics</th></tr></thead><tbody>${{rows}}</tbody></table></div>
+      <div class="card span-12"><div class="title">Rollups</div><pre>${{esc(JSON.stringify(data.rollups || {{}}, null, 2))}}</pre></div>
+    </div>
+  `;
+}}
+
+async function renderWhitepaper() {{
+  const target = document.getElementById("section-whitepaper");
+  target.innerHTML = `
+    <div class="grid">
+      <div class="card span-12">
+        <div class="title">Whitepaper (Scaffold)</div>
+        <div class="muted">Blank for now. This page will include search, section navigation, and project narrative.</div>
+      </div>
+    </div>
+  `;
+}}
+
+async function boot() {{
+  makeTabs();
+  await renderOverview();
+  await renderKeyPage();
+  await renderMemory();
+  await renderContextTone();
+  await renderNewsPoll();
+  await renderGeoPanel();
+  await renderOps();
+  await renderCosts();
+  await renderWhitepaper();
+}}
+boot();
+</script>
+</body>
+</html>"""
+    response = app.response_class(response=html_page, status=200, mimetype="text/html")
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Content-Security-Policy"] = "default-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    return response
+
+
+@app.route("/brainstem/api/overview", methods=["GET"])
+def brainstem_api_overview():
+    denied = require_brainstem_access()
+    if denied:
+        return denied
+    process_due_memory_feedback_queue()
+    payload = get_brainstem_overview_payload()
+    return app.response_class(response=json.dumps(payload, indent=2), status=200, mimetype="application/json")
+
+
+@app.route("/brainstem/api/key-links", methods=["GET"])
+def brainstem_api_key_links():
+    denied = require_brainstem_access()
+    if denied:
+        return denied
+    return app.response_class(
+        response=json.dumps({"links": get_operator_links_map()}, indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/brainstem/api/memory", methods=["GET"])
+def brainstem_api_memory():
+    denied = require_brainstem_access()
+    if denied:
+        return denied
+    process_due_memory_feedback_queue()
+    items = get_memory_items("working", limit=500) + get_memory_items("long_term", limit=500)
+    items.sort(key=lambda row: str(row.get("updated_at") or ""), reverse=True)
+    payload = {
+        "items": items,
+        "pending_feedback": get_pending_memory_feedback_entries(limit=200),
+    }
+    return app.response_class(response=json.dumps(payload, indent=2), status=200, mimetype="application/json")
+
+
+@app.route("/brainstem/api/memory/feedback", methods=["POST"])
+def brainstem_api_memory_feedback():
+    denied = require_brainstem_access()
+    if denied:
+        return denied
+    payload = request.get_json(silent=True) or {}
+    scope = (payload.get("scope") or "").strip()
+    category = (payload.get("category") or "").strip()
+    memory_key = (payload.get("memory_key") or "").strip()
+    action = (payload.get("action") or "").strip().lower()
+    if not all([scope, category, memory_key]) or action not in {"accurate", "inaccurate", "undo_inaccurate"}:
+        return app.response_class(response=json.dumps({"ok": False, "reason": "invalid_payload"}, indent=2), status=400, mimetype="application/json")
+
+    result = {"ok": True, "action": action}
+    if action == "accurate":
+        adjusted = adjust_memory_confidence(scope, category, memory_key, delta=0.08, source_text="brainstem_feedback_accurate")
+        result["adjusted"] = adjusted
+    elif action == "inaccurate":
+        execute_after = queue_memory_feedback_forget(scope, category, memory_key, delay_minutes=60)
+        result["execute_after"] = execute_after
+    else:
+        undo_memory_feedback_forget(scope, category, memory_key)
+
+    audit_brainstem_action("memory_feedback", f"{scope}:{category}:{memory_key}", payload)
+    return app.response_class(response=json.dumps(result, indent=2), status=200, mimetype="application/json")
+
+
+@app.route("/brainstem/api/context-tone", methods=["GET"])
+def brainstem_api_context_tone():
+    denied = require_brainstem_access()
+    if denied:
+        return denied
+    process_due_memory_feedback_queue()
+    snapshot = build_journal_context_snapshot()
+    tone_vector = build_tone_vector({}, snapshot)
+    record_tone_snapshot(snapshot, tone_vector)
+    return app.response_class(
+        response=json.dumps({"context_snapshot": snapshot, "tone_vector": tone_vector}, indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/brainstem/api/history", methods=["GET"])
+def brainstem_api_history():
+    denied = require_brainstem_access()
+    if denied:
+        return denied
+    range_key = (request.args.get("range") or "24h").strip().lower()
+    points = get_tone_signal_snapshots(range_key=range_key)
+    payload = {
+        "range": range_key,
+        "count": len(points),
+        "points": points,
+        "enabled_series": [
+            "brevity", "directness", "warmth", "seriousness", "calendar_busy", "inbox_busy",
+            "fatigue_score", "restedness_score", "stress_signal", "anti_sycophancy",
+        ],
+    }
+    return app.response_class(response=json.dumps(payload, indent=2), status=200, mimetype="application/json")
+
+
+@app.route("/brainstem/api/geopolitics", methods=["GET", "POST"])
+def brainstem_api_geopolitics():
+    denied = require_brainstem_access()
+    if denied:
+        return denied
+    manual_terms = get_brainstem_setting("geo_manual_terms", default=[]) or []
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        action = (payload.get("action") or "").strip().lower()
+        term = (payload.get("term") or "").strip().lower()
+        mode = (payload.get("mode") or "normal").strip().lower()
+
+        if action == "reset":
+            set_brainstem_setting("geo_manual_terms", [])
+            audit_brainstem_action("geo_reset", "manual_terms", payload)
+        elif action == "add":
+            if term and is_geo_intent_text(term):
+                existing = [item for item in manual_terms if str(item.get("term") or "").lower() != term]
+                existing.append({"term": term, "mode": "normal", "weight": 1.0})
+                set_brainstem_setting("geo_manual_terms", existing)
+                audit_brainstem_action("geo_add", term, payload)
+        elif action == "set_mode":
+            updated = []
+            for item in manual_terms:
+                row_term = str(item.get("term") or "").lower()
+                if row_term != term:
+                    updated.append(item)
+                    continue
+                if mode == "remove":
+                    continue
+                row = {**item, "mode": mode if mode in {"normal", "boost", "suppress"} else "normal"}
+                updated.append(row)
+            set_brainstem_setting("geo_manual_terms", updated)
+            audit_brainstem_action("geo_set_mode", term, payload)
+        manual_terms = get_brainstem_setting("geo_manual_terms", default=[]) or []
+
+    profile = build_stable_g_interest_profile(interaction_limit=220, max_terms=6)
+    return app.response_class(
+        response=json.dumps({"manual_terms": manual_terms, "profile": profile}, indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/brainstem/api/poll", methods=["GET"])
+def brainstem_api_poll():
+    denied = require_brainstem_access()
+    if denied:
+        return denied
+    force_currents = (request.args.get("force_currents") or "").strip() == "1"
+    payload = run_poll_cycle(log_to_alerts=False, send_messages=False, force_currents=force_currents)
+    grouped = {}
+    for item in payload.get("results") or []:
+        final_cat = (item.get("category") or "G").upper()
+        grouped.setdefault(final_cat, [])
+        chain = item.get("reclass_chain") or [final_cat]
+        final_tier = int(item.get("tier") or 3)
+        # Build progression code approximation (older stages get gradually higher tier numbers).
+        progression_parts = []
+        chain_len = len(chain)
+        for idx, cat in enumerate(chain):
+            tier_guess = min(3, max(1, final_tier + (chain_len - 1 - idx)))
+            progression_parts.append(f"{str(cat).upper()[:1]}{tier_guess}")
+        progression_code = "-".join(progression_parts)
+        grouped[final_cat].append({
+            "headline": item.get("headline"),
+            "source": item.get("source"),
+            "tier": final_tier,
+            "reclass_chain": chain,
+            "progression_code": progression_code,
+            "reason_summary": ", ".join(item.get("score_reasons") or []) + (f" | ai:{item.get('ai_why')}" if item.get("ai_why") else ""),
+        })
+    for key in grouped:
+        grouped[key].sort(key=lambda row: (row.get("tier", 3), row.get("headline", "")))
+    return app.response_class(
+        response=json.dumps({"source_debug": payload.get("source_debug"), "grouped": grouped}, indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/brainstem/api/ops/run", methods=["POST"])
+def brainstem_api_ops_run():
+    denied = require_brainstem_access()
+    if denied:
+        return denied
+    payload = request.get_json(silent=True) or {}
+    action = (payload.get("action") or "").strip().lower()
+    result = {"ok": False, "reason": "unknown_action"}
+
+    if action == "poll":
+        result = run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False)
+        result["ok"] = True
+    elif action == "daily_brief":
+        brief = compose_daily_brief(include_debug=False)
+        result = {"ok": True, "preview": brief[:2000]}
+    elif action == "journal":
+        run_info = run_nightly_memory_consolidation_with_retry(max_attempts=3, base_delay_seconds=1.0)
+        result = {
+            "ok": True,
+            "journal_prompt": "What is one thing you were grateful for today?",
+            "memory_run": run_info,
+        }
+    elif action == "memory_consolidation":
+        result = run_nightly_memory_consolidation_with_retry(max_attempts=3, base_delay_seconds=1.0)
+    elif action == "context_refresh":
+        local_date = get_local_date_string()
+        result = {
+            "ok": True,
+            "local_date": local_date,
+            "inbox_refreshed": bool(fetch_gmail_inbox_daily_context(local_date=local_date)),
+            "calendar_refreshed": bool(refresh_calendar_context_from_provider(local_date=local_date)),
+            "sleep_refreshed": bool(refresh_sleep_context_from_provider(local_date=local_date)),
+        }
+    audit_brainstem_action("ops_run", action, payload)
+    return app.response_class(response=json.dumps(result, indent=2), status=200, mimetype="application/json")
+
+
+@app.route("/brainstem/api/costs", methods=["GET"])
+def brainstem_api_costs():
+    denied = require_brainstem_access()
+    if denied:
+        return denied
+    return app.response_class(
+        response=json.dumps(get_cost_usage_snapshot(), indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/brainstem/api/whitepaper", methods=["GET"])
+def brainstem_api_whitepaper():
+    denied = require_brainstem_access()
+    if denied:
+        return denied
+    return app.response_class(
+        response=json.dumps({"ok": True, "status": "blank_scaffold", "sections": []}, indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
 @app.route("/tasks/context-refresh", methods=["GET", "POST"])
 def task_context_refresh():
     denied = require_internal_api_key()
     if denied:
         return denied
+    process_due_memory_feedback_queue()
     local_date = get_local_date_string()
     inbox_payload = fetch_gmail_inbox_daily_context(local_date=local_date)
     calendar_payload = refresh_calendar_context_from_provider(local_date=local_date)
     sleep_payload = refresh_sleep_context_from_provider(local_date=local_date)
     snapshot = build_journal_context_snapshot()
+    tone_vector = build_tone_vector({}, snapshot)
+    record_tone_snapshot(snapshot, tone_vector)
     return app.response_class(
         response=json.dumps(
             {
@@ -10665,7 +11870,7 @@ def task_context_refresh():
                     "gmail_connected": bool(get_gmail_service()[0]),
                 },
                 "context_snapshot": snapshot,
-                "tone_vector": build_tone_vector({}, snapshot),
+                "tone_vector": tone_vector,
             },
             indent=2,
         ),
