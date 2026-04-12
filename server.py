@@ -12229,6 +12229,7 @@ function drawSimpleTrend(canvas, points, series, yLabelSuffix = "") {{
 }}
 
 async function setupMemoryGrowth(rangeKey) {{
+  window.__memoryGrowthRange = rangeKey;
   const controls = document.getElementById("memory-growth-controls");
   controls.innerHTML = "";
   controls.appendChild(rangeButtons(rangeKey, setupMemoryGrowth));
@@ -12237,11 +12238,20 @@ async function setupMemoryGrowth(rangeKey) {{
   const points = data.points || [];
   drawSimpleTrend(canvas, points, [
     {{key: "active_count", color: "#FFA200"}},
-    {{key: "inserts", color: "#4dd4ac"}},
-    {{key: "deletes", color: "#ff6b6b"}},
   ]);
   const meta = document.getElementById("memory-growth-meta");
-  meta.textContent = `Current memory count: ${{Number(data.current_count || 0)}} • Baseline estimate: ${{Number(data.baseline_estimate || 0)}}`;
+  meta.textContent = `Total memories over time (auto-refresh): current count ${{Number(data.current_count || 0)}}`;
+}}
+
+let memoryGrowthTimer = null;
+function startMemoryGrowthAutoRefresh() {{
+  if (memoryGrowthTimer) clearInterval(memoryGrowthTimer);
+  memoryGrowthTimer = setInterval(() => {{
+    const sec = document.getElementById("section-memory");
+    if (!sec || !sec.classList.contains("active")) return;
+    const range = window.__memoryGrowthRange || "30d";
+    setupMemoryGrowth(range);
+  }}, 30000);
 }}
 
 async function renderMemory() {{
@@ -12302,6 +12312,7 @@ async function renderMemory() {{
     </div>
   `;
   setupMemoryGrowth("30d");
+  startMemoryGrowthAutoRefresh();
   startForgetCountdowns();
 }}
 
