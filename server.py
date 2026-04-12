@@ -12707,8 +12707,9 @@ function calendarAgeText(ts) {{
 
 async function refreshContextToneNow() {{
   const qs = KEY_QS.replace(/^\\?/, "");
-  const url = "/tasks/context-refresh" + (qs ? ("?" + qs) : "");
-  window.location.href = url;
+  const base = "https://jeeves-production-4d42.up.railway.app/tasks/context-refresh";
+  const url = base + (qs ? ("?" + qs) : "");
+  window.open(url, "_blank", "noopener,noreferrer");
 }}
 
 let historySeriesEnabled = new Set([
