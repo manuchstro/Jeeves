@@ -4386,11 +4386,33 @@ def get_brainstem_overview_payload():
     row = cur.fetchone()
     last_alert = dict(row) if row else None
     conn.close()
+    openai_configured = bool(os.environ.get("OPENAI_API_KEY"))
+    twilio_configured = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN)
+    gmail_connected = bool(get_gmail_service()[0])
+    calendar_connected = bool(CALENDAR_CONTEXT_URL)
+    reasons = []
+    if not openai_configured:
+        reasons.append("openai missing")
+    if not twilio_configured:
+        reasons.append("twilio missing")
+    if not gmail_connected:
+        reasons.append("gmail disconnected")
+    if not calendar_connected:
+        reasons.append("calendar provider missing")
+    healthy = len(reasons) == 0
     return {
         "now_local": now.isoformat(),
         "deploy": {
             "commit_sha": RAILWAY_GIT_COMMIT_SHA,
             "deployment_id": RAILWAY_DEPLOYMENT_ID,
+        },
+        "health": {
+            "healthy": healthy,
+            "reasons": reasons,
+            "openai_configured": openai_configured,
+            "twilio_configured": twilio_configured,
+            "gmail_connected": gmail_connected,
+            "calendar_provider": calendar_connected,
         },
         "journal_guard": get_journal_guard_status(),
         "feedback_context_allowed": feedback_context_allowed(),
@@ -11451,6 +11473,16 @@ def brainstem_home():
     .tab-btn {{ border:2px solid var(--outline); background: var(--panel); color: var(--fg); font-weight:520; border-radius: 10px; padding: 9px 11px; cursor:pointer; text-align:left; width:100%; transition: transform 140ms ease, background 140ms ease, opacity 140ms ease; }}
     .tab-btn.active {{ outline: 2px solid var(--accent); }}
     .tab-btn:hover {{ transform: translateY(-1px); }}
+    .app-shell.nav-collapsed .sidebar {{
+      width: 0;
+      flex-basis: 0;
+      padding: 0;
+      border-right: 0;
+      overflow: hidden;
+      transform: none;
+      opacity: 1;
+      pointer-events: none;
+    }}
     .sidebar.collapsed {{ transform: translateX(-100%); opacity: 0.95; pointer-events:none; }}
     .main-area {{ flex:1; min-width:0; display:flex; flex-direction:column; }}
     .topbar {{ position: sticky; top:0; z-index:20; border-bottom: 2px solid var(--outline); background: rgba(0,0,0,0.93); backdrop-filter: blur(6px); }}
@@ -11483,14 +11515,16 @@ def brainstem_home():
     .table {{ width:100%; border-collapse: collapse; font-size:0.9rem; }}
     .table th, .table td {{ border-bottom:1px solid #253128; padding:8px; text-align:left; vertical-align:top; overflow-wrap:anywhere; word-break:break-word; }}
     .table th {{ color: var(--muted); font-size:0.82rem; }}
-    .mem-id-title {{ font-weight:620; }}
-    .mem-id-sub {{ font-size: 12px; color: var(--muted); margin-top: 2px; }}
+    .mem-id-title {{ font-weight:560; font-size: 0.88rem; line-height: 1.2; }}
+    .mem-id-sub {{ font-size: 11px; color: var(--muted); margin-top: 1px; line-height:1.2; }}
     .mem-value-wrap {{ line-height: 1.4; }}
     .mem-value-row {{ margin-bottom: 4px; }}
     .confidence-col {{ min-width: 88px; white-space: nowrap; }}
     .feedback-col {{ min-width: 126px; }}
     .feedback-col .row {{ flex-direction: column; align-items: stretch; }}
     .feedback-col .btn {{ width: 100%; min-width: 0; }}
+    #section-memory .table {{ font-size: 0.83rem; }}
+    #section-memory .table th {{ font-size: 0.78rem; }}
     .links a {{ color: #ffd48a; text-decoration: none; word-break: break-all; }}
     .links a:hover {{ text-decoration: underline; }}
     #ops-console {{
@@ -11507,6 +11541,9 @@ def brainstem_home():
     .history-item {{ display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); }}
     .history-dot {{ width:10px; height:10px; border-radius:999px; display:inline-block; }}
     .welcome {{ line-height:1.45; font-size:0.95rem; color:#e6d7b8; }}
+    .health-good {{ background: #3c5c45 !important; }}
+    .health-bad {{ background: #5f3434 !important; }}
+    .health-note {{ margin-top: 6px; font-size: 11px; color: #e8d6af; }}
     .landing-wrap {{ min-height: calc(100vh - 120px); display:flex; align-items:center; justify-content:center; }}
     .landing-card {{ position:relative; width:min(780px, 96%); min-height:320px; background: linear-gradient(160deg, #101310 0%, #161b16 100%); border:2px solid var(--outline); border-radius:16px; padding:28px; overflow:hidden; }}
     .landing-title {{ font-size: clamp(1.3rem, 2.7vw, 2rem); font-weight:620; margin-bottom:10px; }}
@@ -11524,6 +11561,7 @@ def brainstem_home():
       .span-8, .span-6, .span-4, .span-3 {{ grid-column: span 12; }}
       .tab-btn {{ padding: 8px 10px; font-size: 0.9rem; }}
       .sidebar {{ position: fixed; top:0; left:0; bottom:0; width:min(82vw,280px); flex-basis:auto; box-shadow: 0 0 0 9999px rgba(0,0,0,0.45); }}
+      .app-shell.nav-collapsed .sidebar {{ width:min(82vw,280px); flex-basis:auto; padding:14px 10px; border-right: 2px solid var(--outline); overflow-y:auto; }}
       .sidebar.collapsed {{ transform: translateX(-102%); box-shadow:none; }}
     }}
   </style>
@@ -11576,13 +11614,26 @@ function api(path, opts={{}}) {{
 function makeTabs() {{
   const tabs = document.getElementById("tabs");
   const holder = document.getElementById("sections");
+  const shell = document.querySelector(".app-shell");
   const sidebar = document.getElementById("sidebar");
   const menuBtn = document.getElementById("menu-toggle");
-  if (window.innerWidth <= 900) sidebar.classList.add("collapsed");
-  menuBtn.onclick = () => sidebar.classList.toggle("collapsed");
+  if (window.innerWidth <= 900) {{
+    sidebar.classList.add("collapsed");
+    if (shell) shell.classList.add("nav-collapsed");
+  }} else {{
+    if (shell) shell.classList.remove("nav-collapsed");
+  }}
+  menuBtn.onclick = () => {{
+    if (window.innerWidth <= 900) {{
+      sidebar.classList.toggle("collapsed");
+      return;
+    }}
+    if (shell) shell.classList.toggle("nav-collapsed");
+  }};
   window.addEventListener("resize", () => {{
     if (window.innerWidth > 900) {{
       sidebar.classList.remove("collapsed");
+      if (shell) shell.classList.remove("nav-collapsed");
     }} else if (!sidebar.classList.contains("collapsed")) {{
       // keep current state on mobile
     }}
@@ -11609,6 +11660,8 @@ function activateSection(id) {{
   if (window.innerWidth <= 900) {{
     const sidebar = document.getElementById("sidebar");
     if (sidebar) sidebar.classList.add("collapsed");
+    const shell = document.querySelector(".app-shell");
+    if (shell) shell.classList.add("nav-collapsed");
   }}
 }}
 
@@ -11660,12 +11713,33 @@ function readableMemoryType(item) {{
   return map[category] || humanizeToken(category) || "Memory";
 }}
 
+function memoryLabelForKey(item) {{
+  const key = String(item.memory_key || "").toLowerCase();
+  const category = String(item.category || "").toLowerCase();
+  if (key === "restedness_score") return "Restedness Score";
+  if (key === "sleep_recent_trend") return "Sleep Trend";
+  if (category === "nightly_summary") return "Nightly Summary";
+  if (category === "memory_threads" && key === "open_loop") return "Open Loop";
+  if (category === "behavior_trends" && key.includes("sleep")) return "Sleep Behavior Trend";
+  if (key.startsWith("protect_")) return "Protected Memory";
+  return humanizeToken(key || "memory");
+}}
+
+function tinyHash(text) {{
+  const src = String(text || "");
+  let h = 2166136261;
+  for (let i = 0; i < src.length; i++) {{
+    h ^= src.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }}
+  return (h >>> 0).toString(16).slice(0, 4).toUpperCase().padStart(4, "0");
+}}
+
 function readableMemoryId(item) {{
   const scope = String(item.scope || "working");
-  const key = String(item.memory_key || "");
-  const compact = key ? key.replace(/[^a-zA-Z0-9]/g, "").slice(0, 10).toUpperCase() : "MEM";
-  const cat = String(item.category || "general").slice(0, 3).toUpperCase();
-  return `${{scope[0]?.toUpperCase() || "W"}}-${{cat}}-${{compact}}`;
+  const key = String(item.memory_key || "memory");
+  const cat = String(item.category || "general");
+  return `${{scope[0]?.toUpperCase() || "W"}}-${{cat.slice(0,3).toUpperCase()}}-${{tinyHash(scope + "|" + cat + "|" + key)}}`;
 }}
 
 function formatValueReadable(value) {{
@@ -11698,10 +11772,16 @@ function formatValueReadable(value) {{
 async function renderOverview() {{
   const target = document.getElementById("section-overview");
   const data = await api("/brainstem/api/overview");
+  const health = data.health || {{}};
+  const commitClass = health.healthy ? "health-good" : "health-bad";
   target.innerHTML = `
     <div class="grid">
       <div class="card span-3"><div class="title">Now</div><div class="muted">${{esc(data.now_local || "")}}</div></div>
-      <div class="card span-3"><div class="title">Commit</div><div class="kpi">${{esc((data.deploy||{{}}).commit_sha || "n/a")}}</div></div>
+      <div class="card span-3 ${{commitClass}}">
+        <div class="title">Commit</div>
+        <div class="kpi">${{esc((data.deploy||{{}}).commit_sha || "n/a")}}</div>
+        <div class="health-note">${{health.healthy ? "System healthy" : esc((health.reasons || []).join(" • "))}}</div>
+      </div>
       <div class="card span-3"><div class="title">Alerts 24h</div><div class="kpi">${{esc(((data.counts||{{}}).alerts_24h)||0)}}</div></div>
       <div class="card span-3"><div class="title">Memory Items</div><div class="kpi">${{esc(((data.counts||{{}}).memory_items)||0)}}</div></div>
       <div class="card span-12"><div class="title">Guard Status</div><pre>${{esc(JSON.stringify(data.journal_guard || {{}}, null, 2))}}</pre></div>
@@ -11758,11 +11838,12 @@ async function renderMemory() {{
     const queueDisabled = pendingUntil ? "disabled" : "";
     const idDisplay = readableMemoryId(item);
     const typeDisplay = readableMemoryType(item);
+    const labelDisplay = memoryLabelForKey(item);
     const updated = fmtTs(item.updated_at);
     return `<tr>
       <td>
-        <div class="mem-id-title">${{esc(idDisplay)}} • ${{esc(typeDisplay)}}</div>
-        <div class="mem-id-sub">scope: ${{esc(item.scope || "working")}} • category: ${{esc(item.category || "")}}</div>
+        <div class="mem-id-title">${{esc(idDisplay)}} • ${{esc(labelDisplay)}}</div>
+        <div class="mem-id-sub">${{esc(typeDisplay)}} • ${{esc(String(item.scope || "working"))}}</div>
         <div class="mem-id-sub">updated: ${{esc(updated)}}</div>
       </td>
       <td>${{formatValueReadable(item.value)}}</td>
