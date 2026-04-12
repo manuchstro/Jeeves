@@ -4249,6 +4249,7 @@ def get_operator_links_map():
 
     return {
         "core": {
+            "brainstem": link("/brainstem"),
             "poll_run": link("/debug/poll/run"),
             "poll_run_readable": link("/tasks/poll?readable=1"),
             "poll_preview": link("/debug/poll/preview"),
@@ -4297,6 +4298,7 @@ def build_command_key_reply():
         f"terms: {terms_link}",
         "",
         "Core task links:",
+        f"- brainstem: {core.get('brainstem', '')}",
         f"- poll run: {core.get('poll_run', '')}",
         f"- poll run (readable): {core.get('poll_run_readable', '')}",
         f"- poll preview: {core.get('poll_preview', '')}",
