@@ -11515,12 +11515,13 @@ def brainstem_home():
     .table {{ width:100%; border-collapse: collapse; font-size:0.9rem; }}
     .table th, .table td {{ border-bottom:1px solid #253128; padding:8px; text-align:left; vertical-align:top; overflow-wrap:anywhere; word-break:break-word; }}
     .table th {{ color: var(--muted); font-size:0.82rem; }}
-    .mem-id-title {{ font-weight:560; font-size: 0.88rem; line-height: 1.2; }}
+    .mem-id-title {{ font-weight:560; font-size: 0.76rem; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
     .mem-id-sub {{ font-size: 11px; color: var(--muted); margin-top: 1px; line-height:1.2; }}
     .mem-value-wrap {{ line-height: 1.4; }}
     .mem-value-row {{ margin-bottom: 4px; }}
     .confidence-col {{ min-width: 88px; white-space: nowrap; }}
     .feedback-col {{ min-width: 126px; }}
+    .mem-id-col {{ width: 34%; min-width: 340px; }}
     .feedback-col .row {{ flex-direction: column; align-items: stretch; }}
     .feedback-col .btn {{ width: 100%; min-width: 0; }}
     #section-memory .table {{ font-size: 0.83rem; }}
@@ -11839,7 +11840,7 @@ async function renderMemory() {{
     const idDisplay = readableMemoryId(item);
     const updated = fmtTs(item.updated_at);
     return `<tr>
-      <td>
+      <td class="mem-id-col">
         <div class="mem-id-title">${{esc(idDisplay)}}</div>
         <div class="mem-id-sub">${{esc(updated)}}</div>
       </td>
@@ -11865,7 +11866,7 @@ async function renderMemory() {{
       <div class="card span-12">
         <div class="title">Memory Explorer</div>
         <div class="muted">Marking inaccurate queues deletion in 1 hour. Undo available before execution.</div>
-        <table class="table"><thead><tr><th>Memory ID</th><th>Value</th><th class="confidence-col">Confidence</th><th class="feedback-col">Accuracy • Deletion Toggle</th></tr></thead><tbody>${{rows}}</tbody></table>
+        <table class="table"><thead><tr><th class="mem-id-col">Memory ID</th><th>Value</th><th class="confidence-col">Confidence</th><th class="feedback-col">Accuracy • Deletion Toggle</th></tr></thead><tbody>${{rows}}</tbody></table>
       </div>
       <div class="card span-12">
         <div class="title">Pending Forget Queue</div>
