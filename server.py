@@ -11400,7 +11400,7 @@ def brainstem_home():
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Brainstem Login</title>
   <style>
-    body { margin:0; font-family: "Franklin Gothic Medium", "ITC Franklin Gothic", "Franklin Gothic Book", "Arial Narrow", Arial, sans-serif; background:#080808; color:#ffffff; display:flex; min-height:100vh; align-items:center; justify-content:center; }
+    body { margin:0; font-family: Georgia, "Times New Roman", serif; background:#080808; color:#ffffff; display:flex; min-height:100vh; align-items:center; justify-content:center; }
     .card { width:min(420px,92vw); border:1px solid #2a2a2a; border-radius:14px; background:#111111; padding:18px; display:flex; flex-direction:column; align-items:center; }
     .title { font-size:1.05rem; font-weight:600; margin-bottom:6px; text-align:center; }
     .muted { color:#a8a8a8; font-size:.86rem; margin-bottom:10px; text-align:center; }
@@ -11443,7 +11443,7 @@ def brainstem_home():
       --panel: #344237;
     }}
     * {{ box-sizing: border-box; }}
-    body {{ margin:0; font-family: "Franklin Gothic Medium", "ITC Franklin Gothic", "Franklin Gothic Book", "Arial Narrow", Arial, sans-serif; background: var(--bg); color: var(--fg); font-weight: 430; letter-spacing: 0.1px; }}
+    body {{ margin:0; font-family: Georgia, "Times New Roman", serif; background: var(--bg); color: var(--fg); font-weight: 430; letter-spacing: 0.1px; }}
     .topbar {{ position: sticky; top:0; z-index:10; border-bottom: 2px solid var(--outline); background: rgba(0,0,0,0.93); backdrop-filter: blur(6px); }}
     .topbar-inner {{ max-width: 1200px; margin:0 auto; padding: 12px; display:flex; align-items:center; gap:10px; flex-wrap: wrap; }}
     .brand {{ font-weight: 650; letter-spacing: 0.2px; font-size: 1.08rem; }}
@@ -11722,7 +11722,7 @@ function drawContext3D(canvas, point) {{
   function labelAt(p, text, color="#d8c69f") {{
     ctx.save();
     ctx.fillStyle = color;
-    ctx.font = "11px Avenir Next, SF Pro Text, system-ui, sans-serif";
+    ctx.font = "11px Georgia, Times New Roman, serif";
     ctx.fillText(text, p.x + 4, p.y - 4);
     ctx.restore();
   }}
