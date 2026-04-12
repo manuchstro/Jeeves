@@ -1,8 +1,30 @@
 # Jeeves Roadmap
 
-Last updated: 2026-04-11
+Last updated: 2026-04-12
 
 ## Recently Deployed (Completed)
+- ✅ Security hardening: fail-closed auth + startup validation
+  - app now fails closed when `INTERNAL_API_KEY` is missing (no silent open access)
+  - insecure fallback defaults removed from Brainstem auth/session signing paths
+  - startup now validates required security configuration
+- ✅ Cron strict-status reliability
+  - added strict task-status mode so cron jobs can fail loudly on real task failures (`ok:false`) instead of false-green runs
+- ✅ Re-locked live alert policy to Tier-1 only
+  - live push remains hard-enforced as Tier 1 only
+  - Tier 2/3 remain available for ranking/brief context (not live pushes)
+- ✅ Memory reinforcement upgrade
+  - `Accurate` feedback now uses adaptive reinforcement (not fixed bump)
+  - reinforcement now increases confidence with diminishing returns
+  - reinforcement now slows memory decay via explicit slowdown model
+  - undo path preserved
+- ✅ Brainstem graph + diagnostics upgrade
+  - improved Historical Signals usability (filter presets + interactive legend toggles)
+  - added Memory-page cumulative growth graph (`24h`, `7d`, `30d`, `max`)
+  - added Usage activity graph (`24h`, `7d`, `30d`, `max`)
+  - added Context+Tone freshness diagnostics (calendar snapshot date/age + summary)
+  - added Context+Tone manual “Refresh Context Now” control
+- ✅ Brainstem naming/UI updates
+  - renamed `Ops + Tasks` to `Live Operations Console` (menu + section title)
 - ✅ Removed `portfolio_profile` from active logic paths and removed manual `portfolio_update` intent path; portfolio truth now stays with `portfolio_holdings` + `portfolio_snapshots` flow.
 - ✅ Changed low-confidence deletion age gate from `120` to `80` days.
 - ✅ Fixed duplicate `recent_journal` display bug caused by legacy union behavior in debug query.
@@ -118,6 +140,7 @@ Last updated: 2026-04-11
 1. **Stabilize Messaging Cost + Alert Discipline (Now)**
 - ✅ Keep `Tier 1 only` live-alert behavior hard-enforced (Tier 2 never pushed).
 - ✅ Add a quick debug check you can run anytime to confirm push behavior after deploy.
+- ✅ Cron strict failure signaling added so Railway status reflects real failures.
 - Keep your manual testing loop: you test, report issues, I patch.
 
 2. **Memory Model Upgrade (Now / First Improvement)**
@@ -128,6 +151,7 @@ Last updated: 2026-04-11
 - ✅ For high-correlation pairs (`>= 0.8`), apply additive confidence bonus to both linked memories.
 - ✅ For high-correlation pairs (`>= 0.8`), slow decay for both linked memories (linear slowdown model).
 - ✅ Add low-confidence deletion for non-protected memories after threshold/aging rules.
+- ✅ Add adaptive user reinforcement (`Accurate`) with decay-slowdown effects and undo support.
 - ✅ Remove/replace the effective confidence-floor limitation as part of that redesign.
 - ✅ Make deep AI consolidation nightly non-optional (always attempted), with strict anti-hallucination guardrails and safe fallback behavior.
 - ✅ Run memory decay at most once per local day (daily-gated), not on every inbound message.
@@ -188,10 +212,10 @@ Last updated: 2026-04-11
 
 9. **Brainstem (Mid/Late-Term, Major Build)**
 - Google sign-in auth.
-- API spend metrics, usage graphs, and cost totals.
+- ✅ API spend metrics, usage graphs, and cost totals (first pass deployed).
 - “Calls used / remaining” visibility where provider data allows it.
 - Geopolitics query-interest panel: show stable `G` profile terms/weights inferred from your `G` alert interactions, with visibility into current active `G` query bias.
-- Add historical trend graph view for tone/context signals on one unified chart (e.g., brevity, directness, warmth, seriousness, busy_score, calendar_busy, inbox_busy, fatigue_score, market_stress, stress_signal, anti_sycophancy).
+- ✅ Add historical trend graph view for tone/context signals on one unified chart (first pass deployed; further UX refinement ongoing).
 - Full readable memory explorer from foundation.
 - Per-memory accuracy feedback controls.
 - Memory visibility toggles.
