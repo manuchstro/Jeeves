@@ -126,6 +126,12 @@ G_QUERY_CORE_TERMS = {
     "sanctions", "shipping", "strait", "ceasefire", "conflict", "war", "oil", "energy",
     "diplomatic", "military", "geopolitics",
 }
+E_QUERY_CORE_TERMS = {
+    "fed", "inflation", "cpi", "jobs", "employment", "treasury", "yield", "yields",
+    "rates", "rate", "gdp", "market", "markets", "stocks", "equity", "equities",
+    "earnings", "guidance", "macro", "economy", "recession", "growth", "unemployment",
+    "oil", "energy", "pricing", "consumer", "business",
+}
 G_QUERY_BLOCKED_TERMS = {
     "gratitude", "grateful", "family", "friend", "friends", "journal", "emotion",
     "emotional", "tone", "warmth", "sycophancy", "sleep", "fatigue", "calendar",
@@ -8812,6 +8818,78 @@ def is_geo_intent_text(text):
     return any(contains_signal_term(t, term) for term in G_QUERY_CORE_TERMS)
 
 
+def is_e_intent_text(text):
+    t = (text or "").lower().strip()
+    if not t:
+        return False
+    return any(contains_signal_term(t, term) for term in E_QUERY_CORE_TERMS)
+
+
+def build_stable_e_interest_profile(interaction_limit=180, max_terms=5):
+    term_counts = Counter()
+    matched_refs = 0
+    for event in get_recent_interaction_events(limit=interaction_limit):
+        text = (event.get("message_text") or "").strip()
+        if not text:
+            continue
+
+        refs = interpret_event_references(text)
+        for ref in refs:
+            if not ref.upper().startswith("E"):
+                continue
+            resolved = resolve_alert_reference(ref)
+            if resolved.get("status") != "ok":
+                continue
+            matched_refs += 1
+            headline = ((resolved.get("match") or {}).get("headline") or "").lower()
+            if not headline:
+                continue
+            for token in re.findall(r"[a-z0-9]{3,}", headline):
+                if token in STORY_STOPWORDS:
+                    continue
+                if token in E_QUERY_CORE_TERMS:
+                    term_counts[token] += 2
+
+        for token in re.findall(r"[a-z0-9]{3,}", text.lower()):
+            if token in E_QUERY_CORE_TERMS:
+                term_counts[token] += 1
+
+    manual_terms = get_brainstem_setting("econ_manual_terms", default=[]) or []
+    for item in manual_terms:
+        if isinstance(item, dict):
+            term = str(item.get("term") or "").strip().lower()
+            mode = str(item.get("mode") or "normal").strip().lower()
+            weight = float(item.get("weight") or 1.0)
+        else:
+            term = str(item or "").strip().lower()
+            mode = "normal"
+            weight = 1.0
+        if not term or not is_e_intent_text(term):
+            continue
+        if mode == "suppress":
+            term_counts[term] -= max(1, int(round(weight * 3)))
+        elif mode == "boost":
+            term_counts[term] += max(1, int(round(weight * 4)))
+        else:
+            term_counts[term] += max(1, int(round(weight * 2)))
+
+    positive_terms = Counter({k: v for k, v in term_counts.items() if v > 0})
+    if not positive_terms:
+        return {"query": None, "terms": [], "matched_refs": 0}
+
+    top_terms = [term for term, _ in positive_terms.most_common(max_terms)]
+    if len(top_terms) == 1:
+        top_terms.append("macro")
+    if len(top_terms) < 2:
+        return {"query": None, "terms": [], "matched_refs": matched_refs}
+
+    return {
+        "query": " ".join(top_terms[:max_terms]),
+        "terms": top_terms[:max_terms],
+        "matched_refs": matched_refs,
+    }
+
+
 def build_stable_g_interest_profile(interaction_limit=180, max_terms=5):
     term_counts = Counter()
     matched_refs = 0
@@ -8960,6 +9038,9 @@ def build_dynamic_news_queries(limit=10, include_local=False):
         "g_profile_query": None,
         "g_profile_terms": [],
         "g_profile_matched_refs": 0,
+        "e_profile_query": None,
+        "e_profile_terms": [],
+        "e_profile_matched_refs": 0,
         "p_query_count": 0,
         "p_query_reason": None,
         "category_counts": {},
@@ -9016,6 +9097,13 @@ def build_dynamic_news_queries(limit=10, include_local=False):
         query_debug["g_profile_query"] = g_profile["query"]
         query_debug["g_profile_terms"] = g_profile.get("terms", [])
         query_debug["g_profile_matched_refs"] = int(g_profile.get("matched_refs", 0))
+
+    e_profile = build_stable_e_interest_profile(interaction_limit=220, max_terms=5)
+    if e_profile.get("query"):
+        add_query(e_profile["query"], "E")
+        query_debug["e_profile_query"] = e_profile["query"]
+        query_debug["e_profile_terms"] = e_profile.get("terms", [])
+        query_debug["e_profile_matched_refs"] = int(e_profile.get("matched_refs", 0))
 
     relevant = get_relevant_memories("current interests recurring focus active concerns", limit=12)
     for item in relevant.get("working", []) + relevant.get("long_term", []):
@@ -11310,7 +11398,7 @@ def brainstem_home():
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Brainstem Login</title>
   <style>
-    body { margin:0; font-family: "Avenir Next", "SF Pro Text", "Segoe UI", system-ui, sans-serif; background:#080808; color:#ffffff; display:flex; min-height:100vh; align-items:center; justify-content:center; }
+    body { margin:0; font-family: "Franklin Gothic Medium", "ITC Franklin Gothic", "Franklin Gothic Book", "Arial Narrow", Arial, sans-serif; background:#080808; color:#ffffff; display:flex; min-height:100vh; align-items:center; justify-content:center; }
     .card { width:min(420px,92vw); border:1px solid #2a2a2a; border-radius:14px; background:#111111; padding:18px; display:flex; flex-direction:column; align-items:center; }
     .title { font-size:1.05rem; font-weight:600; margin-bottom:6px; text-align:center; }
     .muted { color:#a8a8a8; font-size:.86rem; margin-bottom:10px; text-align:center; }
@@ -11345,7 +11433,7 @@ def brainstem_home():
   <title>Brainstem</title>
   <style>
     :root {{
-      --bg: #2f352f;
+      --bg: #000000;
       --fg: #FFEBC4;
       --outline: #1A1712;
       --accent: #FFA200;
@@ -11353,8 +11441,8 @@ def brainstem_home():
       --panel: #344237;
     }}
     * {{ box-sizing: border-box; }}
-    body {{ margin:0; font-family: "Avenir Next", "SF Pro Text", "Segoe UI", "Helvetica Neue", system-ui, sans-serif; background: var(--bg); color: var(--fg); font-weight: 450; letter-spacing: 0.1px; }}
-    .topbar {{ position: sticky; top:0; z-index:10; border-bottom: 2px solid var(--outline); background: rgba(46,58,49,0.95); backdrop-filter: blur(6px); }}
+    body {{ margin:0; font-family: "Franklin Gothic Medium", "ITC Franklin Gothic", "Franklin Gothic Book", "Arial Narrow", Arial, sans-serif; background: var(--bg); color: var(--fg); font-weight: 430; letter-spacing: 0.1px; }}
+    .topbar {{ position: sticky; top:0; z-index:10; border-bottom: 2px solid var(--outline); background: rgba(0,0,0,0.93); backdrop-filter: blur(6px); }}
     .topbar-inner {{ max-width: 1200px; margin:0 auto; padding: 12px; display:flex; align-items:center; gap:10px; flex-wrap: wrap; }}
     .brand {{ font-weight: 650; letter-spacing: 0.2px; font-size: 1.08rem; }}
     .tabs {{ display:flex; flex-wrap:wrap; gap:8px; }}
@@ -11649,6 +11737,17 @@ function drawContext3D(canvas, point) {{
     ].map(v=>project(v,rect.width,rect.height));
     const edges = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
     edges.forEach(([a,b]) => line(verts[a], verts[b], "#6e7c70", 1, 0.4));
+    const center = project({x:0.5,y:0.5,z:0.5},rect.width,rect.height);
+    const xPos = project({x:1,y:0.5,z:0.5},rect.width,rect.height);
+    const xNeg = project({x:0,y:0.5,z:0.5},rect.width,rect.height);
+    const yPos = project({x:0.5,y:1,z:0.5},rect.width,rect.height);
+    const yNeg = project({x:0.5,y:0,z:0.5},rect.width,rect.height);
+    const zPos = project({x:0.5,y:0.5,z:1},rect.width,rect.height);
+    const zNeg = project({x:0.5,y:0.5,z:0},rect.width,rect.height);
+    line(xNeg, xPos, "#d9c89f", 1, 0.18);
+    line(yNeg, yPos, "#d9c89f", 1, 0.18);
+    line(zNeg, zPos, "#d9c89f", 1, 0.18);
+    dot(center, "#d9c89f", 2);
     const pIdeal = project(ideal,rect.width,rect.height);
     const pCurrent = project(current,rect.width,rect.height);
     line(pIdeal, pCurrent, "#FFA200", 2, 0.45); // faint vector line (ideal -> current)
@@ -11870,6 +11969,49 @@ async function renderGeoPanel() {{
   target.prepend(panel);
 }}
 
+async function renderEconPanel() {{
+  const target = document.getElementById("section-news");
+  const data = await api("/brainstem/api/economics");
+  const manualTerms = Array.isArray(data.manual_terms) ? data.manual_terms : [];
+  const profileTerms = Array.isArray((data.profile || {{}}).terms) ? (data.profile || {{}}).terms : [];
+  const combined = [];
+  const seen = new Set();
+  manualTerms.forEach(t => {{
+    const term = String((t || {{}}).term || "").trim();
+    if (!term || seen.has(term.toLowerCase())) return;
+    seen.add(term.toLowerCase());
+    combined.push({{term, source: "manual"}});
+  }});
+  profileTerms.forEach(term => {{
+    const t = String(term || "").trim();
+    if (!t || seen.has(t.toLowerCase())) return;
+    seen.add(t.toLowerCase());
+    combined.push({{term: t, source: "profile"}});
+  }});
+  const terms = combined.map(t => `
+    <div class="term-box">
+      <div><strong>${{esc(t.term)}}</strong> <span class="muted">${{esc(t.source)}}</span></div>
+      <div class="row">
+        <button class="btn err" onclick="econRemove('${{esc(t.term)}}')">Remove</button>
+      </div>
+    </div>
+  `).join("");
+  const panel = document.createElement("div");
+  panel.className = "card span-12";
+  panel.innerHTML = `
+    <div class="title">Economics Query-Interest Panel</div>
+    <div class="muted">Manual guidance is advisory; system may ignore irrelevant/redundant terms.</div>
+    <div class="row" style="margin-top:8px;">
+      <input id="econ-input" placeholder="add E guidance term/topic (e.g. inflation expectations, labor market)">
+      <button class="btn warn" onclick="econAdd()">Add Term</button>
+      <button class="btn err" onclick="econReset()">Reset E Profile</button>
+    </div>
+    <div class="row" style="margin-top:10px;">${{terms || "<span class='muted'>no manual terms yet</span>"}}</div>
+    <details class="expandable" style="margin-top:8px;"><summary>Profile Debug</summary><pre>${{esc(JSON.stringify(data.profile || {{}}, null, 2))}}</pre></details>
+  `;
+  target.prepend(panel);
+}}
+
 async function geoAdd() {{
   const term = (document.getElementById("geo-input").value || "").trim();
   if (!term) return;
@@ -11878,7 +12020,7 @@ async function geoAdd() {{
     method:"POST", headers:{{"Content-Type":"application/json"}},
     body: JSON.stringify({{action:"add", term}})
   }});
-  renderNewsPoll().then(renderGeoPanel);
+  renderNewsPoll().then(() => Promise.all([renderGeoPanel(), renderEconPanel()]));
 }}
 
 async function geoRemove(term) {{
@@ -11887,7 +12029,7 @@ async function geoRemove(term) {{
     method:"POST", headers:{{"Content-Type":"application/json"}},
     body: JSON.stringify({{action:"remove_term", term}})
   }});
-  renderNewsPoll().then(renderGeoPanel);
+  renderNewsPoll().then(() => Promise.all([renderGeoPanel(), renderEconPanel()]));
 }}
 
 async function geoReset() {{
@@ -11896,7 +12038,36 @@ async function geoReset() {{
     method:"POST", headers:{{"Content-Type":"application/json"}},
     body: JSON.stringify({{action:"reset"}})
   }});
-  renderNewsPoll().then(renderGeoPanel);
+  renderNewsPoll().then(() => Promise.all([renderGeoPanel(), renderEconPanel()]));
+}}
+
+async function econAdd() {{
+  const term = (document.getElementById("econ-input").value || "").trim();
+  if (!term) return;
+  if (!confirm("Are you sure you want to add this economics guidance term?")) return;
+  await api("/brainstem/api/economics", {{
+    method:"POST", headers:{{"Content-Type":"application/json"}},
+    body: JSON.stringify({{action:"add", term}})
+  }});
+  renderNewsPoll().then(() => Promise.all([renderGeoPanel(), renderEconPanel()]));
+}}
+
+async function econRemove(term) {{
+  if (!confirm("Are you sure you want to remove this economics term?")) return;
+  await api("/brainstem/api/economics", {{
+    method:"POST", headers:{{"Content-Type":"application/json"}},
+    body: JSON.stringify({{action:"remove_term", term}})
+  }});
+  renderNewsPoll().then(() => Promise.all([renderGeoPanel(), renderEconPanel()]));
+}}
+
+async function econReset() {{
+  if (!confirm("Are you sure you want to reset the E profile?")) return;
+  await api("/brainstem/api/economics", {{
+    method:"POST", headers:{{"Content-Type":"application/json"}},
+    body: JSON.stringify({{action:"reset"}})
+  }});
+  renderNewsPoll().then(() => Promise.all([renderGeoPanel(), renderEconPanel()]));
 }}
 
 function typeConsole(el, text) {{
@@ -11940,12 +12111,26 @@ async function runOp(action) {{
 async function renderUsage() {{
   const target = document.getElementById("section-usage");
   const data = await api("/brainstem/api/costs");
-  const rows = Object.entries(data.providers || {{}}).map(([k,v]) => `<tr><td>${{esc(k)}}</td><td><pre>${{esc(JSON.stringify(v, null, 2))}}</pre></td></tr>`).join("");
+  const providerCards = Object.entries(data.providers || {{}}).map(([k,v]) => {{
+    const configured = Boolean((v || {{}}).configured);
+    const entries = Object.entries(v || {{}})
+      .filter(([name]) => name !== "configured")
+      .map(([name,val]) => `<tr><td>${{esc(name.replaceAll("_"," "))}}</td><td>${{esc(String(val))}}</td></tr>`)
+      .join("");
+    return `<div class="card span-6">
+      <div class="title">${{esc(k.toUpperCase())}}</div>
+      <div class="row"><span class="pill">${{configured ? "Configured" : "Not configured"}}</span></div>
+      <table class="table" style="margin-top:8px"><tbody>${{entries || "<tr><td class='muted' colspan='2'>No usage counters yet</td></tr>"}}</tbody></table>
+    </div>`;
+  }}).join("");
+  const rollups = data.rollups || {{}};
   target.innerHTML = `
     <div class="grid">
       <div class="card span-12"><div class="title">Usage + Cost</div><div class="muted">${{esc(data.disclaimer || "")}}</div></div>
-      <div class="card span-12"><table class="table"><thead><tr><th>Provider</th><th>Metrics</th></tr></thead><tbody>${{rows}}</tbody></table></div>
-      <div class="card span-12"><div class="title">Rollups</div><pre>${{esc(JSON.stringify(data.rollups || {{}}, null, 2))}}</pre></div>
+      <div class="card span-4"><div class="title">Interactions (30d)</div><div class="kpi">${{esc(rollups.interactions_30d ?? 0)}}</div></div>
+      <div class="card span-4"><div class="title">Alerts (30d)</div><div class="kpi">${{esc(rollups.alerts_30d ?? 0)}}</div></div>
+      <div class="card span-4"><div class="title">Outbound Msg (30d)</div><div class="kpi">${{esc(rollups.outbound_messages_30d ?? 0)}}</div></div>
+      ${{providerCards}}
     </div>
   `;
 }}
@@ -11970,6 +12155,7 @@ async function boot() {{
   await renderContextTone();
   await renderNewsPoll();
   await renderGeoPanel();
+  await renderEconPanel();
   await renderOps();
   await renderUsage();
   await renderWhitepaper();
@@ -12149,6 +12335,42 @@ def brainstem_api_geopolitics():
         manual_terms = get_brainstem_setting("geo_manual_terms", default=[]) or []
 
     profile = build_stable_g_interest_profile(interaction_limit=220, max_terms=6)
+    return app.response_class(
+        response=json.dumps({"manual_terms": manual_terms, "profile": profile}, indent=2),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/brainstem/api/economics", methods=["GET", "POST"])
+def brainstem_api_economics():
+    denied = require_brainstem_access()
+    if denied:
+        return denied
+    manual_terms = get_brainstem_setting("econ_manual_terms", default=[]) or []
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        action = (payload.get("action") or "").strip().lower()
+        term = (payload.get("term") or "").strip().lower()
+
+        if action == "reset":
+            set_brainstem_setting("econ_manual_terms", [])
+            audit_brainstem_action("econ_reset", "manual_terms", payload)
+        elif action == "add":
+            if term and is_e_intent_text(term):
+                existing = [item for item in manual_terms if str(item.get("term") or "").lower() != term]
+                existing.append({"term": term, "mode": "normal", "weight": 1.0})
+                set_brainstem_setting("econ_manual_terms", existing)
+                audit_brainstem_action("econ_add", term, payload)
+        elif action == "remove_term":
+            if term:
+                updated = [item for item in manual_terms if str(item.get("term") or "").lower() != term]
+                updated.append({"term": term, "mode": "suppress", "weight": 1.0})
+                set_brainstem_setting("econ_manual_terms", updated)
+                audit_brainstem_action("econ_remove_term_hint", term, payload)
+        manual_terms = get_brainstem_setting("econ_manual_terms", default=[]) or []
+
+    profile = build_stable_e_interest_profile(interaction_limit=220, max_terms=6)
     return app.response_class(
         response=json.dumps({"manual_terms": manual_terms, "profile": profile}, indent=2),
         status=200,
