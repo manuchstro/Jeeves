@@ -3057,6 +3057,8 @@ def normalize_calendar_events(events):
         start_local = str(raw.get("start_local") or "").strip()
         end_local = str(raw.get("end_local") or "").strip()
         all_day = bool(raw.get("all_day"))
+        calendar_name = str(raw.get("calendar_name") or "").strip()
+        calendar_id = str(raw.get("calendar_id") or "").strip()
         if not title and not start_local and not end_local:
             continue
         classification = classify_calendar_event_title(title)
@@ -3066,6 +3068,8 @@ def normalize_calendar_events(events):
                 "start_local": start_local,
                 "end_local": end_local,
                 "all_day": all_day,
+                "calendar_name": calendar_name,
+                "calendar_id": calendar_id,
                 "domain": classification["domain"],
                 "event_type": classification["event_type"],
                 "tags": classification["tags"],
