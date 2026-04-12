@@ -106,6 +106,9 @@ Last updated: 2026-04-10
   - normalized sleep quantity pipeline aligned to your rule: seconds->minutes, halve duplicate, convert to hours, apply 10% discount
   - added nuanced restedness scoring (non-linear, 8h cap) and 3d/7d trend features in context
   - persisted sleep trend + restedness as memory signals (`behavior_trends.sleep_recent_trend`, `state.restedness_score`)
+- ✅ Added sleep datapoint timeseries storage for Brainstem graphing:
+  - each normalized sleep datapoint is persisted as a single numeric value in `sleep_datapoints`
+  - debug endpoint added: `/debug/context/sleep/history`
 - ✅ Inbox fullness signal upgrade:
   - inbox counts now use full `in:inbox` size estimates (not last-day slice)
   - relative busy score now blends global percentile + same-weekday baseline + surge factor

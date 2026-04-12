@@ -579,6 +579,16 @@ def init_db():
     """)
 
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS sleep_datapoints (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        local_date TEXT NOT NULL,
+        sleep_hours REAL NOT NULL,
+        source TEXT NOT NULL DEFAULT 'sleep_provider',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS inbox_daily_context (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         local_date TEXT NOT NULL UNIQUE,
@@ -3181,6 +3191,47 @@ def get_sleep_daily_context(local_date=None):
     return dict(row) if row else None
 
 
+def add_sleep_datapoint(local_date, sleep_hours, source="sleep_provider"):
+    if sleep_hours in (None, ""):
+        return False
+    try:
+        hours = float(sleep_hours)
+    except:
+        return False
+    if hours <= 0:
+        return False
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO sleep_datapoints (local_date, sleep_hours, source)
+        VALUES (?, ?, ?)
+        """,
+        (local_date, hours, source or "sleep_provider"),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_sleep_datapoints(days=60, limit=2000):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, local_date, sleep_hours, source, created_at
+        FROM sleep_datapoints
+        WHERE local_date >= date('now', ?)
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (f"-{max(1, int(days))} days", max(1, int(limit))),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
 def get_recent_sleep_series(lookback_days=14):
     conn = get_conn()
     cur = conn.cursor()
@@ -3492,6 +3543,7 @@ def refresh_sleep_context_from_provider(local_date=None):
         "confidence": norm_01(payload.get("confidence"), fallback=0.7),
     }
     upsert_sleep_daily_context(day, normalized)
+    add_sleep_datapoint(day, normalized.get("sleep_hours"), source=normalized.get("source") or "sleep_provider")
 
     # Persist trend as protected long-term behavior memory for Brainstem visibility.
     trend = build_sleep_trend_features(lookback_days=14)
@@ -10405,6 +10457,31 @@ def debug_context_sleep_refresh():
             indent=2,
         ),
         status=status,
+        mimetype="application/json",
+    )
+
+
+@app.route("/debug/context/sleep/history", methods=["GET"])
+def debug_context_sleep_history():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
+    days = int((request.args.get("days") or "60").strip() or "60")
+    limit = int((request.args.get("limit") or "500").strip() or "500")
+    points = get_sleep_datapoints(days=days, limit=limit)
+    latest = points[0] if points else None
+    return app.response_class(
+        response=json.dumps(
+            {
+                "ok": True,
+                "days": days,
+                "count": len(points),
+                "latest": latest,
+                "points": points,
+            },
+            indent=2,
+        ),
+        status=200,
         mimetype="application/json",
     )
 
