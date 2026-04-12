@@ -12305,7 +12305,7 @@ function formatGraphX(value) {{
   return raw;
 }}
 
-function drawSimpleTrend(canvas, points, series, yLabelSuffix = "") {{
+function drawSimpleTrend(canvas, points, series, yLabelSuffix = "", opts = {{}}) {{
   const rect = canvas.getBoundingClientRect();
   const ctx = canvas.getContext("2d");
   canvas.width = rect.width * devicePixelRatio;
@@ -12329,6 +12329,8 @@ function drawSimpleTrend(canvas, points, series, yLabelSuffix = "") {{
   series.forEach(s => points.forEach(p => allVals.push(Number(p[s.key] ?? 0))));
   const maxV = Math.max(1, ...allVals);
   const minV = 0;
+  const hitRadius = Number(opts.hitRadius || 30);
+  const showPointMarkers = Boolean(opts.showPointMarkers);
   const plot = [];
   series.forEach(s => {{
     ctx.strokeStyle = s.color;
@@ -12343,6 +12345,14 @@ function drawSimpleTrend(canvas, points, series, yLabelSuffix = "") {{
       linePoints.push({{x, y, v, t: p.t, line: s.key}});
     }});
     ctx.stroke();
+    if (showPointMarkers) {{
+      ctx.fillStyle = s.color;
+      linePoints.forEach(pt => {{
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      }});
+    }}
     if (linePoints.length === 1) {{
       const only = linePoints[0];
       ctx.fillStyle = s.color;
@@ -12379,7 +12389,7 @@ function drawSimpleTrend(canvas, points, series, yLabelSuffix = "") {{
       const d = Math.hypot(pt.x - mx, pt.y - my);
       if (d < bestD) {{ bestD = d; best = pt; }}
     }}
-    if (!best || bestD > 30) {{
+    if (!best || bestD > hitRadius) {{
       tip.style.display = "none";
       return;
     }}
@@ -13088,7 +13098,7 @@ async function setupUsageActivity(rangeKey) {{
     {{key: "interactions_cum", color: "#6bb7ff"}},
     {{key: "outbound_cum", color: "#4dd4ac"}},
     {{key: "alerts_cum", color: "#FFA200"}},
-  ]);
+  ], "", {{hitRadius: 56, showPointMarkers: true}});
   const meta = document.getElementById("usage-activity-meta");
   meta.textContent = `Cumulative by bucket: ${{esc(data.bucket || "")}} • points: ${{points.length}}`;
 }}
