@@ -4664,6 +4664,152 @@ def get_cost_usage_snapshot():
     }
 
 
+def get_usage_activity_points(range_key="30d"):
+    range_map = {
+        "24h": ("-24 hours", "hour"),
+        "7d": ("-7 days", "day"),
+        "30d": ("-30 days", "day"),
+        "max": ("-3650 days", "week"),
+    }
+    window, bucket = range_map.get((range_key or "30d").lower(), ("-30 days", "day"))
+    if bucket == "hour":
+        expr = "strftime('%Y-%m-%d %H:00:00', datetime(created_at))"
+    elif bucket == "week":
+        expr = "strftime('%Y-W%W', datetime(created_at))"
+    else:
+        expr = "strftime('%Y-%m-%d', datetime(created_at))"
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        SELECT {expr} AS bucket, COUNT(*) AS c
+        FROM interaction_events
+        WHERE datetime(created_at) >= datetime('now', ?)
+        GROUP BY bucket
+        ORDER BY bucket ASC
+        """,
+        (window,),
+    )
+    interactions = {str(r["bucket"]): int(r["c"] or 0) for r in cur.fetchall()}
+    cur.execute(
+        f"""
+        SELECT {expr} AS bucket, COUNT(*) AS c
+        FROM outbound_messages
+        WHERE datetime(created_at) >= datetime('now', ?)
+        GROUP BY bucket
+        ORDER BY bucket ASC
+        """,
+        (window,),
+    )
+    outbound = {str(r["bucket"]): int(r["c"] or 0) for r in cur.fetchall()}
+    cur.execute(
+        f"""
+        SELECT {expr} AS bucket, COUNT(*) AS c
+        FROM alert_log
+        WHERE datetime(created_at) >= datetime('now', ?)
+        GROUP BY bucket
+        ORDER BY bucket ASC
+        """,
+        (window,),
+    )
+    alerts = {str(r["bucket"]): int(r["c"] or 0) for r in cur.fetchall()}
+    conn.close()
+
+    keys = sorted(set(interactions.keys()) | set(outbound.keys()) | set(alerts.keys()))
+    points = []
+    for k in keys:
+        points.append(
+            {
+                "t": k,
+                "interactions": interactions.get(k, 0),
+                "outbound": outbound.get(k, 0),
+                "alerts": alerts.get(k, 0),
+            }
+        )
+    return {
+        "range": range_key,
+        "bucket": bucket,
+        "points": points,
+    }
+
+
+def get_memory_growth_points(range_key="30d"):
+    range_map = {
+        "24h": ("-24 hours", "hour"),
+        "7d": ("-7 days", "day"),
+        "30d": ("-30 days", "day"),
+        "max": ("-3650 days", "month"),
+    }
+    window, bucket = range_map.get((range_key or "30d").lower(), ("-30 days", "day"))
+    if bucket == "hour":
+        expr = "strftime('%Y-%m-%d %H:00:00', datetime(created_at))"
+    elif bucket == "month":
+        expr = "strftime('%Y-%m', datetime(created_at))"
+    else:
+        expr = "strftime('%Y-%m-%d', datetime(created_at))"
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) AS c FROM memory_items")
+    row = cur.fetchone()
+    current_count = int(row["c"] if row and row["c"] is not None else 0)
+
+    cur.execute(
+        f"""
+        SELECT {expr} AS bucket, action, COUNT(*) AS c
+        FROM memory_provenance_events
+        WHERE datetime(created_at) >= datetime('now', ?)
+          AND action IN ('insert', 'feedback_forget_delete', 'delete_low_confidence')
+        GROUP BY bucket, action
+        ORDER BY bucket ASC
+        """,
+        (window,),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+
+    per_bucket = {}
+    total_inserts = 0
+    total_deletes = 0
+    for r in rows:
+        b = str(r.get("bucket") or "")
+        action = str(r.get("action") or "")
+        c = int(r.get("c") or 0)
+        if b not in per_bucket:
+            per_bucket[b] = {"insert": 0, "delete": 0}
+        if action == "insert":
+            per_bucket[b]["insert"] += c
+            total_inserts += c
+        else:
+            per_bucket[b]["delete"] += c
+            total_deletes += c
+
+    baseline = max(0, current_count - (total_inserts - total_deletes))
+    running = baseline
+    points = []
+    for b in sorted(per_bucket.keys()):
+        ins = int(per_bucket[b]["insert"])
+        dele = int(per_bucket[b]["delete"])
+        running = max(0, running + ins - dele)
+        points.append(
+            {
+                "t": b,
+                "active_count": running,
+                "inserts": ins,
+                "deletes": dele,
+            }
+        )
+
+    return {
+        "range": range_key,
+        "bucket": bucket,
+        "current_count": current_count,
+        "baseline_estimate": baseline,
+        "points": points,
+    }
+
+
 def get_recent_alert_feedback(limit=20):
     conn = get_conn()
     cur = conn.cursor()
@@ -6293,8 +6439,9 @@ def get_sleep_context_snapshot():
 
 
 def get_calendar_context_snapshot():
-    stored = get_calendar_daily_context(local_date=get_local_date_string())
-    events = get_calendar_daily_events(local_date=get_local_date_string())
+    local_date = get_local_date_string()
+    stored = get_calendar_daily_context(local_date=local_date)
+    events = get_calendar_daily_events(local_date=local_date)
     if not stored:
         return {
             "available": False,
@@ -6304,6 +6451,8 @@ def get_calendar_context_snapshot():
     return {
         "available": True,
         "status": "connected",
+        "local_date": local_date,
+        "updated_at": stored.get("updated_at"),
         "summary": (stored.get("summary_text") or f"{stored.get('event_count')} events, busy score {stored.get('busy_score')}"),
         "features": {
             "busy_score": stored.get("busy_score"),
@@ -11813,7 +11962,7 @@ const sections = [
   {{id:"memory", label:"Memory"}},
   {{id:"context", label:"Context + Tone"}},
   {{id:"news", label:"News/Poll"}},
-  {{id:"ops", label:"Ops + Tasks"}},
+  {{id:"ops", label:"Live Operations Console"}},
   {{id:"usage", label:"Usage"}},
   {{id:"whitepaper", label:"Whitepaper"}},
 ];
@@ -12037,6 +12186,64 @@ async function renderKeyPage() {{
   </div>`;
 }}
 
+function drawSimpleTrend(canvas, points, series, yLabelSuffix = "") {{
+  const rect = canvas.getBoundingClientRect();
+  const ctx = canvas.getContext("2d");
+  canvas.width = rect.width * devicePixelRatio;
+  canvas.height = rect.height * devicePixelRatio;
+  ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  ctx.clearRect(0,0,rect.width,rect.height);
+  if (!points || !points.length) {{
+    ctx.fillStyle = "#c9b894";
+    ctx.fillText("No data in selected window", 16, 24);
+    return;
+  }}
+  const pad = 34, w = rect.width - pad*2, h = rect.height - pad*2;
+  ctx.strokeStyle = "#5f6e63";
+  ctx.strokeRect(pad, pad, w, h);
+  for (let i=0;i<=4;i++) {{
+    const y = pad + (i/4)*h;
+    ctx.strokeStyle = "rgba(132,148,136,0.25)";
+    ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(pad+w, y); ctx.stroke();
+  }}
+  const allVals = [];
+  series.forEach(s => points.forEach(p => allVals.push(Number(p[s.key] ?? 0))));
+  const maxV = Math.max(1, ...allVals);
+  const minV = 0;
+  series.forEach(s => {{
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    points.forEach((p, i) => {{
+      const v = Number(p[s.key] ?? 0);
+      const x = pad + (i / Math.max(1, points.length - 1)) * w;
+      const y = pad + (1 - ((v - minV) / (maxV - minV || 1))) * h;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }});
+    ctx.stroke();
+  }});
+  ctx.fillStyle = "#bfae86";
+  ctx.font = "11px Georgia, Times New Roman, serif";
+  ctx.fillText(`0${{yLabelSuffix}}`, 6, pad + h + 4);
+  ctx.fillText(`${{maxV.toFixed(0)}}${{yLabelSuffix}}`, 6, pad + 8);
+}}
+
+async function setupMemoryGrowth(rangeKey) {{
+  const controls = document.getElementById("memory-growth-controls");
+  controls.innerHTML = "";
+  controls.appendChild(rangeButtons(rangeKey, setupMemoryGrowth));
+  const data = await api("/brainstem/api/memory-growth?range=" + encodeURIComponent(rangeKey));
+  const canvas = document.getElementById("memory-growth-chart");
+  const points = data.points || [];
+  drawSimpleTrend(canvas, points, [
+    {{key: "active_count", color: "#FFA200"}},
+    {{key: "inserts", color: "#4dd4ac"}},
+    {{key: "deletes", color: "#ff6b6b"}},
+  ]);
+  const meta = document.getElementById("memory-growth-meta");
+  meta.textContent = `Current memory count: ${{Number(data.current_count || 0)}} • Baseline estimate: ${{Number(data.baseline_estimate || 0)}}`;
+}}
+
 async function renderMemory() {{
   const target = document.getElementById("section-memory");
   const data = await api("/brainstem/api/memory");
@@ -12078,6 +12285,12 @@ async function renderMemory() {{
   target.innerHTML = `
     <div class="grid">
       <div class="card span-12">
+        <div class="title">Cumulative Memory Graph</div>
+        <div id="memory-growth-controls"></div>
+        <div class="chart-wrap"><canvas id="memory-growth-chart"></canvas></div>
+        <div id="memory-growth-meta" class="muted" style="margin-top:8px;"></div>
+      </div>
+      <div class="card span-12">
         <div class="title">Memory Explorer</div>
         <div class="muted">Marking inaccurate queues deletion in 1 hour. Undo available before execution.</div>
         <table class="table"><thead><tr><th class="mem-id-col">Memory ID</th><th>Value</th><th class="confidence-col">Confidence</th><th class="feedback-col">Accuracy • Deletion Toggle</th></tr></thead><tbody>${{rows}}</tbody></table>
@@ -12088,6 +12301,7 @@ async function renderMemory() {{
       </div>
     </div>
   `;
+  setupMemoryGrowth("30d");
   startForgetCountdowns();
 }}
 
@@ -12215,6 +12429,7 @@ async function renderContextTone() {{
   const target = document.getElementById("section-context");
   const data = await api("/brainstem/api/context-tone");
   const sig = ((data.tone_vector||{{}}).signals || {{}});
+  const cal = ((data.context_snapshot || {{}}).calendar || {{}});
   const brevity = Number((data.tone_vector||{{}}).brevity ?? 0);
   const directness = Number((data.tone_vector||{{}}).directness ?? 0);
   const warmth = Number((data.tone_vector||{{}}).warmth ?? 0);
@@ -12230,6 +12445,7 @@ async function renderContextTone() {{
       <div class="card span-8">
         <div class="title">3D Context Vector</div>
         <div class="muted">Axes: Gmail load (G), Calendar load (C), Sleep/restedness (S). Drag to rotate.</div>
+        <div class="row" style="margin:6px 0 8px 0;"><button class="btn ghost" onclick="refreshContextToneNow()">Refresh Context Now</button></div>
         <div class="chart-wrap">
           <canvas id="ctx3d"></canvas>
           <div class="axis-legend">G = Gmail Inbox<br>C = Google Calendar<br>S = Sleep</div>
@@ -12251,6 +12467,9 @@ async function renderContextTone() {{
             <tr><td>Fatigue</td><td>${{(Number(sig.fatigue_score ?? 0.5)*100).toFixed(1)}}%</td></tr>
           </tbody>
         </table>
+        <div class="muted" style="margin-top:8px;">Calendar snapshot date: ${{esc(cal.local_date || "")}}</div>
+        <div class="muted">Calendar summary: ${{esc(cal.summary || "")}}</div>
+        <div class="muted">Calendar age: ${{esc(calendarAgeText(cal.updated_at))}}</div>
       </div>
       <div class="card span-12">
         <div class="title">Historical Signals</div>
@@ -12265,11 +12484,49 @@ async function renderContextTone() {{
   setupHistory("24h");
 }}
 
+function calendarAgeText(ts) {{
+  if (!ts) return "unknown";
+  const parsed = Date.parse(String(ts).replace(" ", "T"));
+  if (!Number.isFinite(parsed)) return "unknown";
+  const minutes = Math.max(0, Math.floor((Date.now() - parsed) / 60000));
+  return `${{minutes}}m`;
+}}
+
+async function refreshContextToneNow() {{
+  await api("/brainstem/api/context-tone?refresh=1");
+  await renderContextTone();
+}}
+
+let historySeriesEnabled = new Set([
+  "brevity","directness","warmth","seriousness","calendar_busy","inbox_busy","fatigue_score","restedness_score"
+]);
+
 async function setupHistory(rangeKey) {{
   const controls = document.getElementById("history-controls");
   controls.innerHTML = "";
   controls.appendChild(rangeButtons(rangeKey, setupHistory));
+  const quick = document.createElement("div");
+  quick.className = "row";
+  quick.innerHTML = `
+    <button class="btn ghost" id="hist-all">All</button>
+    <button class="btn ghost" id="hist-tone">Tone</button>
+    <button class="btn ghost" id="hist-load">Load</button>
+  `;
+  controls.appendChild(quick);
+  quick.querySelector("#hist-all").onclick = () => {{
+    historySeriesEnabled = new Set(["brevity","directness","warmth","seriousness","calendar_busy","inbox_busy","fatigue_score","restedness_score","stress_signal","anti_sycophancy"]);
+    setupHistory(rangeKey);
+  }};
+  quick.querySelector("#hist-tone").onclick = () => {{
+    historySeriesEnabled = new Set(["brevity","directness","warmth","seriousness"]);
+    setupHistory(rangeKey);
+  }};
+  quick.querySelector("#hist-load").onclick = () => {{
+    historySeriesEnabled = new Set(["calendar_busy","inbox_busy","fatigue_score","restedness_score","stress_signal"]);
+    setupHistory(rangeKey);
+  }};
   const data = await api("/brainstem/api/history?range="+encodeURIComponent(rangeKey));
+  data.enabled_series = Array.from(historySeriesEnabled);
   const canvas = document.getElementById("hist");
   drawHistory(canvas, data, document.getElementById("history-legend"), document.getElementById("history-note"));
 }}
@@ -12316,9 +12573,22 @@ function drawHistory(canvas, data, legendEl, noteEl) {{
     if (maxV - minV > 0.015) anyVariance = true;
   }});
   if (legendEl) {{
-    legendEl.innerHTML = series.filter(([name]) => enabled.has(name)).map(([name,color]) =>
-      `<span class="history-item"><span class="history-dot" style="background:${{color}}"></span>${{labels[name] || name}}</span>`
-    ).join("");
+    legendEl.innerHTML = series.map(([name,color]) => {{
+      const active = enabled.has(name);
+      return `<button class="btn ghost history-item" style="${{active ? "opacity:1" : "opacity:0.35"}}" data-series="${{name}}">
+        <span class="history-dot" style="background:${{color}}"></span>${{labels[name] || name}}
+      </button>`;
+    }}).join("");
+    legendEl.querySelectorAll("[data-series]").forEach(el => {{
+      el.onclick = () => {{
+        const key = el.getAttribute("data-series");
+        if (!key) return;
+        if (historySeriesEnabled.has(key)) historySeriesEnabled.delete(key);
+        else historySeriesEnabled.add(key);
+        const activeRange = (data.range || "24h");
+        setupHistory(activeRange);
+      }};
+    }});
   }}
   if (noteEl) {{
     noteEl.textContent = anyVariance
@@ -12522,7 +12792,7 @@ async function renderOps() {{
   target.innerHTML = `
     <div class="grid">
       <div class="card span-12">
-        <div class="title">Ops + Task Controls</div>
+        <div class="title">Live Operations Console</div>
         <div class="row">
           <button class="btn warn" onclick="runOp('poll')">Run Poll</button>
           <button class="btn warn" onclick="runOp('daily_brief')">Force Daily Brief</button>
@@ -12567,9 +12837,32 @@ async function renderUsage() {{
       <div class="card span-4"><div class="title">Interactions (30d)</div><div class="kpi">${{esc(rollups.interactions_30d ?? 0)}}</div></div>
       <div class="card span-4"><div class="title">Alerts (30d)</div><div class="kpi">${{esc(rollups.alerts_30d ?? 0)}}</div></div>
       <div class="card span-4"><div class="title">Outbound Msg (30d)</div><div class="kpi">${{esc(rollups.outbound_messages_30d ?? 0)}}</div></div>
+      <div class="card span-12">
+        <div class="title">Activity Graph</div>
+        <div id="usage-activity-controls"></div>
+        <div class="chart-wrap"><canvas id="usage-activity-chart"></canvas></div>
+        <div id="usage-activity-meta" class="muted" style="margin-top:8px;"></div>
+      </div>
       ${{providerCards}}
     </div>
   `;
+  setupUsageActivity("30d");
+}}
+
+async function setupUsageActivity(rangeKey) {{
+  const controls = document.getElementById("usage-activity-controls");
+  controls.innerHTML = "";
+  controls.appendChild(rangeButtons(rangeKey, setupUsageActivity));
+  const data = await api("/brainstem/api/usage-activity?range=" + encodeURIComponent(rangeKey));
+  const points = data.points || [];
+  const canvas = document.getElementById("usage-activity-chart");
+  drawSimpleTrend(canvas, points, [
+    {{key: "interactions", color: "#6bb7ff"}},
+    {{key: "outbound", color: "#4dd4ac"}},
+    {{key: "alerts", color: "#FFA200"}},
+  ]);
+  const meta = document.getElementById("usage-activity-meta");
+  meta.textContent = `Bucket: ${{esc(data.bucket || "")}} • points: ${{points.length}}`;
 }}
 
 async function renderWhitepaper() {{
@@ -12738,6 +13031,26 @@ def brainstem_api_history():
             "fatigue_score", "restedness_score", "stress_signal", "anti_sycophancy",
         ],
     }
+    return app.response_class(response=json.dumps(payload, indent=2), status=200, mimetype="application/json")
+
+
+@app.route("/brainstem/api/memory-growth", methods=["GET"])
+def brainstem_api_memory_growth():
+    denied = require_brainstem_access()
+    if denied:
+        return denied
+    range_key = (request.args.get("range") or "30d").strip().lower()
+    payload = get_memory_growth_points(range_key=range_key)
+    return app.response_class(response=json.dumps(payload, indent=2), status=200, mimetype="application/json")
+
+
+@app.route("/brainstem/api/usage-activity", methods=["GET"])
+def brainstem_api_usage_activity():
+    denied = require_brainstem_access()
+    if denied:
+        return denied
+    range_key = (request.args.get("range") or "30d").strip().lower()
+    payload = get_usage_activity_points(range_key=range_key)
     return app.response_class(response=json.dumps(payload, indent=2), status=200, mimetype="application/json")
 
 
