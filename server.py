@@ -11930,10 +11930,10 @@ def brainstem_home():
     .term-box {{ border:2px solid var(--outline); border-radius:10px; padding:8px; background:#2d3b31; }}
     .chart-wrap {{ height: 320px; border:2px solid var(--outline); border-radius:10px; background:#253128; position:relative; }}
     .chart-tooltip {{
-      position:absolute; pointer-events:none; z-index:10;
+      position:fixed; pointer-events:none; z-index:99999;
       background: rgba(7,10,8,0.92); color:#f6e4bf; border:1px solid #5b6c5f;
       border-radius:8px; padding:6px 8px; font-size:11px; line-height:1.25;
-      transform: translate(10px, -10px); white-space:nowrap;
+      transform: translate(10px, -12px); white-space:nowrap;
       box-shadow: 0 4px 12px rgba(0,0,0,0.35);
     }}
     canvas {{ width:100%; height:100%; display:block; }}
@@ -12283,14 +12283,13 @@ async function renderKeyPage() {{
 }}
 
 function ensureChartTooltip(canvas) {{
-  const wrap = canvas.closest(".chart-wrap");
-  if (!wrap) return null;
-  let tip = wrap.querySelector(".chart-tooltip");
+  let tip = document.getElementById("global-chart-tooltip");
   if (!tip) {{
     tip = document.createElement("div");
+    tip.id = "global-chart-tooltip";
     tip.className = "chart-tooltip";
     tip.style.display = "none";
-    wrap.appendChild(tip);
+    document.body.appendChild(tip);
   }}
   return tip;
 }}
@@ -12393,8 +12392,8 @@ function drawSimpleTrend(canvas, points, series, yLabelSuffix = "", opts = {{}})
       tip.style.display = "none";
       return;
     }}
-    tip.style.left = `${{mx}}px`;
-    tip.style.top = `${{my}}px`;
+    tip.style.left = `${{ev.clientX}}px`;
+    tip.style.top = `${{ev.clientY}}px`;
     tip.innerHTML = `<strong>${{esc(humanizeToken(best.line))}}</strong><br>x: ${{esc(formatGraphX(best.t))}}<br>y: ${{esc(Number(best.v).toFixed(3))}}`;
     tip.style.display = "block";
   }};
@@ -12822,8 +12821,8 @@ function drawHistory(canvas, data, legendEl, noteEl) {{
       tip.style.display = "none";
       return;
     }}
-    tip.style.left = `${{mx}}px`;
-    tip.style.top = `${{my}}px`;
+    tip.style.left = `${{ev.clientX}}px`;
+    tip.style.top = `${{ev.clientY}}px`;
     tip.innerHTML = `<strong>${{esc(labels[best.line] || humanizeToken(best.line))}}</strong><br>x: ${{esc(formatGraphX(best.t))}}<br>y: ${{esc((Number(best.v) * 100).toFixed(1))}}%`;
     tip.style.display = "block";
   }};
