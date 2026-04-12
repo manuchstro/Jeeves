@@ -1,5 +1,5 @@
 from openai import OpenAI
-from flask import Flask, request, has_request_context
+from flask import Flask, request, has_request_context, make_response, redirect
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.request_validator import RequestValidator
 import os
@@ -76,6 +76,8 @@ GRATITUDE_MINUTE = 15
 JOURNAL_RESPONSE_WINDOW_HOURS = 12
 BRAINSTEM_AUTH_MODE = (os.environ.get("BRAINSTEM_AUTH_MODE") or "internal_key").strip().lower()
 BRAINSTEM_PASSCODE = (os.environ.get("BRAINSTEM_PASSCODE") or "30410061402113").strip()
+BRAINSTEM_SESSION_COOKIE = "brainstem_session"
+BRAINSTEM_SESSION_HOURS = max(1, int(os.environ.get("BRAINSTEM_SESSION_HOURS", "24")))
 CALENDAR_CONTEXT_URL = os.environ.get("CALENDAR_CONTEXT_URL", "").strip()
 CALENDAR_CONTEXT_BEARER = os.environ.get("CALENDAR_CONTEXT_BEARER", "").strip()
 SLEEP_CONTEXT_URL = os.environ.get("SLEEP_CONTEXT_URL", "").strip()
@@ -3832,6 +3834,47 @@ def get_request_passcode():
     ).strip()
 
 
+def get_brainstem_session_signature():
+    secret = INTERNAL_API_KEY or "brainstem-fallback-secret"
+    message = f"{BRAINSTEM_PASSCODE}|brainstem-session-v1".encode("utf-8")
+    return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def has_brainstem_session():
+    cookie = (request.cookies.get(BRAINSTEM_SESSION_COOKIE) or "").strip()
+    if not cookie:
+        return False
+    expected = get_brainstem_session_signature()
+    return hmac.compare_digest(cookie, expected)
+
+
+def issue_brainstem_session_response(response):
+    response.set_cookie(
+        BRAINSTEM_SESSION_COOKIE,
+        get_brainstem_session_signature(),
+        max_age=60 * 60 * BRAINSTEM_SESSION_HOURS,
+        httponly=True,
+        secure=True,
+        samesite="Lax",
+        path="/",
+    )
+    return response
+
+
+def clear_brainstem_session_response(response):
+    response.set_cookie(
+        BRAINSTEM_SESSION_COOKIE,
+        "",
+        max_age=0,
+        expires=0,
+        httponly=True,
+        secure=True,
+        samesite="Lax",
+        path="/",
+    )
+    return response
+
+
 def get_brainstem_auth_querystring():
     key = (
         request.headers.get("X-Internal-Key")
@@ -3851,6 +3894,8 @@ def get_brainstem_auth_querystring():
 
 
 def require_brainstem_access():
+    if has_brainstem_session():
+        return None
     # Allow either internal API key or dedicated Brainstem passcode.
     denied = require_internal_api_key()
     if denied is None:
@@ -11227,13 +11272,49 @@ def debug_context_sleep_history():
     )
 
 
-@app.route("/brainstem", methods=["GET"])
+@app.route("/brainstem", methods=["GET", "POST"])
 def brainstem_home():
-    denied = require_brainstem_access()
-    if denied:
-        return denied
+    if (request.args.get("logout") or "").strip() == "1":
+        return clear_brainstem_session_response(redirect("/brainstem"))
+
+    if not has_brainstem_session():
+        if request.method == "POST":
+            posted_passcode = (request.form.get("passcode") or "").strip()
+            if BRAINSTEM_PASSCODE and hmac.compare_digest(posted_passcode, BRAINSTEM_PASSCODE):
+                return issue_brainstem_session_response(redirect("/brainstem"))
+        login_html = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Brainstem Login</title>
+  <style>
+    body { margin:0; font-family: "SF Pro Text", "Avenir Next", "Helvetica Neue", system-ui, sans-serif; background:#313631; color:#FFEBC4; display:flex; min-height:100vh; align-items:center; justify-content:center; }
+    .card { width:min(420px,92vw); border:2px solid #1A1712; border-radius:14px; background:#344237; padding:16px; }
+    .title { font-size:1.1rem; font-weight:800; margin-bottom:8px; }
+    .muted { color:#d7c8a8; font-size:.92rem; margin-bottom:10px; }
+    input { width:100%; border:2px solid #1A1712; border-radius:10px; padding:10px; background:#263129; color:#FFEBC4; }
+    button { margin-top:10px; width:100%; border:2px solid #1A1712; border-radius:10px; padding:10px; background:#6a4b13; color:#ffe5b3; font-weight:800; cursor:pointer; }
+  </style>
+</head>
+<body>
+  <form class="card" method="POST" action="/brainstem">
+    <div class="title">Brainstem Passcode</div>
+    <div class="muted">Enter passcode to continue.</div>
+    <input type="password" name="passcode" autocomplete="current-password" required />
+    <button type="submit">Unlock Brainstem</button>
+  </form>
+</body>
+</html>"""
+        response = app.response_class(response=login_html, status=200, mimetype="text/html")
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Content-Security-Policy"] = "default-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        return response
+
     base = get_public_base_url()
-    key_qs = get_brainstem_auth_querystring()
+    key_qs = ""
 
     html_page = f"""<!doctype html>
 <html lang="en">
@@ -11305,7 +11386,8 @@ def brainstem_home():
     <div class="topbar-inner">
       <div class="brand">Brainstem</div>
       <div class="tabs" id="tabs"></div>
-      <div class="muted" id="auth-note">secured via internal key</div>
+      <div class="muted" id="auth-note">secured via passcode session</div>
+      <a class="tab-btn" href="/brainstem?logout=1">Lock</a>
     </div>
   </div>
   <div class="container">
