@@ -3942,6 +3942,24 @@ def in_gratitude_journal_context():
     return count_interactions_since(latest.get("created_at")) == 0
 
 
+def get_journal_guard_status():
+    latest = get_latest_outbound_message("gratitude", hours=JOURNAL_RESPONSE_WINDOW_HOURS)
+    if not latest:
+        return {
+            "active": False,
+            "reason": "no_recent_gratitude_prompt",
+            "window_hours": JOURNAL_RESPONSE_WINDOW_HOURS,
+        }
+    interactions_since = count_interactions_since(latest.get("created_at"))
+    return {
+        "active": interactions_since == 0,
+        "window_hours": JOURNAL_RESPONSE_WINDOW_HOURS,
+        "gratitude_prompt_created_at": latest.get("created_at"),
+        "interactions_since_prompt": interactions_since,
+        "first_inbound_pending": interactions_since == 0,
+    }
+
+
 def recent_outbound_message_type_within(message_type, hours=6):
     conn = get_conn()
     cur = conn.cursor()
@@ -10355,6 +10373,24 @@ def debug_context():
             },
             indent=2,
         ),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.route("/debug/guards", methods=["GET"])
+def debug_guards():
+    denied = require_internal_api_key()
+    if denied:
+        return denied
+    payload = {
+        "local_date": get_local_date_string(),
+        "journal_guard": get_journal_guard_status(),
+        "feedback_context_allowed": feedback_context_allowed(),
+        "article_request_context_allowed": article_request_context_allowed(),
+    }
+    return app.response_class(
+        response=json.dumps(payload, indent=2),
         status=200,
         mimetype="application/json",
     )
