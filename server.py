@@ -11878,7 +11878,7 @@ def brainstem_home():
     .btn {{ border:2px solid var(--outline); background:#455646; color:var(--fg); border-radius:10px; padding:8px 12px; cursor:pointer; font-weight:520; }}
     .btn.warn {{ background: #6a4b13; color:#ffe5b3; }}
     .btn.acc {{ background: #2f5d3a; }}
-    .btn.err {{ background: #6a2d2d; }}
+    .btn.err {{ background: #b3261e; }}
     .btn.ghost {{ background: transparent; }}
     input, textarea, select {{
       background:#263129; color:var(--fg); border:2px solid var(--outline); border-radius:10px; padding:8px; width:100%;
@@ -11925,8 +11925,9 @@ def brainstem_home():
     .health-note {{ margin-top: 6px; font-size: 11px; color: #e8d6af; }}
     .landing-wrap {{ min-height: calc(100vh - 120px); display:flex; align-items:center; justify-content:center; }}
     .landing-card {{ position:relative; width:min(780px, 96%); min-height:320px; background: linear-gradient(160deg, #101310 0%, #161b16 100%); border:2px solid var(--outline); border-radius:16px; padding:28px; overflow:hidden; }}
+    .landing-copy {{ max-width: 610px; background: linear-gradient(160deg, #8f6a2a 0%, #7a5a22 100%); border: 2px solid #5c4318; border-radius: 12px; padding: 14px 16px; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06); }}
     .landing-title {{ font-size: clamp(1.3rem, 2.7vw, 2rem); font-weight:620; margin-bottom:10px; }}
-    .landing-text {{ max-width: 560px; color: #e8d6af; line-height:1.5; }}
+    .landing-text {{ max-width: 560px; color: #fff2d8; line-height:1.5; }}
     .landing-orb {{ position:absolute; border-radius:999px; filter: blur(1px); opacity:0.24; pointer-events:none; }}
     .landing-orb.a {{ width:220px; height:220px; right:-40px; top:-40px; background: radial-gradient(circle, #ffa200, transparent 70%); animation: floatA 6s ease-in-out infinite; }}
     .landing-orb.b {{ width:190px; height:190px; left:-30px; bottom:-50px; background: radial-gradient(circle, #7ea57d, transparent 68%); animation: floatB 7s ease-in-out infinite; }}
@@ -12152,16 +12153,25 @@ async function renderOverview() {{
   const target = document.getElementById("section-overview");
   const data = await api("/brainstem/api/overview");
   const health = data.health || {{}};
+  const ctx = data.context_snapshot || {{}};
+  const cal = ctx.calendar || {{}};
+  const inbox = ctx.inbox || {{}};
+  const calFeatures = cal.features || {{}};
+  const inboxFeatures = inbox.features || {{}};
+  const tv = data.tone_vector || {{}};
+  const sig = tv.signals || {{}};
   const commitClass = health.healthy ? "health-good" : "health-bad";
   const guard = data.journal_guard || {{}};
   const guardActive = Boolean(guard.active);
   const guardPill = guardActive ? `<span class="pill">Active</span>` : `<span class="pill">Idle</span>`;
   const guardSummary = guardActive
-    ? `Journal guard is active: your first inbound message after the latest gratitude prompt will be treated as the journal response.`
-    : `Journal guard is idle: no recent gratitude prompt is waiting for a first inbound response.`;
-  const guardDetail = guardActive
-    ? `Window: ${{esc(String(guard.window_hours || ""))}}h • Interactions since prompt: ${{esc(String(guard.interactions_since_prompt || 0))}}`
-    : `Reason: ${{esc(String(guard.reason || "none"))}}`;
+    ? `First inbound after gratitude prompt will be journal response.`
+    : `No journal response is currently waiting.`;
+  const point = {{
+    x: Math.max(0, Math.min(1, Number(sig.inbox_busy ?? 0.5))),
+    y: Math.max(0, Math.min(1, Number(sig.restedness_score ?? (1-Number(sig.fatigue_score ?? 0.5))))),
+    z: Math.max(0, Math.min(1, Number(sig.calendar_busy ?? 0.5))),
+  }};
   target.innerHTML = `
     <div class="grid">
       <div class="card span-3"><div class="title">Now</div><div class="muted">${{esc(data.now_local || "")}}</div></div>
@@ -12172,14 +12182,35 @@ async function renderOverview() {{
       </div>
       <div class="card span-3"><div class="title">Alerts 24h</div><div class="kpi">${{esc(((data.counts||{{}}).alerts_24h)||0)}}</div></div>
       <div class="card span-3"><div class="title">Memory Items</div><div class="kpi">${{esc(((data.counts||{{}}).memory_items)||0)}}</div></div>
-      <div class="card span-12">
-        <div class="title">Guard Status</div>
+      <div class="card span-3"><div class="title">Pending Forget Queue</div><div class="kpi">${{esc(((data.counts||{{}}).pending_memory_feedback)||0)}}</div></div>
+      <div class="card span-3"><div class="title">Gmail Unread</div><div class="kpi">${{esc((inboxFeatures.unread_count ?? 0))}}</div></div>
+      <div class="card span-3"><div class="title">Calendar Events Today</div><div class="kpi">${{esc((calFeatures.event_count ?? 0))}}</div></div>
+      <div class="card span-3"><div class="title">Calendar Load</div><div class="kpi">${{(Number(sig.calendar_busy ?? 0)*100).toFixed(1)}}%</div></div>
+      <div class="card span-3"><div class="title">Restedness</div><div class="kpi">${{(Number(sig.restedness_score ?? 0.5)*100).toFixed(1)}}%</div></div>
+      <div class="card span-3">
+        <div class="title">Journal Guard</div>
         <div class="row">${{guardPill}}</div>
-        <div>${{esc(guardSummary)}}</div>
-        <div class="muted" style="margin-top:6px;">${{guardDetail}}</div>
+        <div class="muted" style="margin-top:6px;">${{esc(guardSummary)}}</div>
+      </div>
+      <div class="card span-8">
+        <div class="title">3D Context Vector</div>
+        <div class="muted">G = Gmail load, C = Calendar load, S = Sleep/restedness.</div>
+        <div class="chart-wrap"><canvas id="ctx3d-overview"></canvas><div class="axis-legend">G = Gmail Inbox<br>C = Google Calendar<br>S = Sleep</div></div>
+      </div>
+      <div class="card span-4">
+        <div class="title">Current Tone Snapshot</div>
+        <table class="table">
+          <tbody>
+            <tr><td>Brevity</td><td>${{(Number(tv.brevity ?? 0)*100).toFixed(1)}}%</td></tr>
+            <tr><td>Directness</td><td>${{(Number(tv.directness ?? 0)*100).toFixed(1)}}%</td></tr>
+            <tr><td>Warmth</td><td>${{(Number(tv.warmth ?? 0)*100).toFixed(1)}}%</td></tr>
+            <tr><td>Style</td><td>${{esc(String(tv.style || "balanced"))}}</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
   `;
+  drawContext3D(document.getElementById("ctx3d-overview"), point);
 }}
 
 function renderLanding() {{
@@ -12189,9 +12220,11 @@ function renderLanding() {{
       <div class="landing-card">
         <div class="landing-orb a"></div>
         <div class="landing-orb b"></div>
-        <div class="landing-title">Welcome to Brainstem</div>
-        <div class="landing-text">Brainstem is Jeeves' internal control surface: memory state, context signals, tone dynamics, and operational diagnostics. Use the menu to navigate each subsystem and guide behavior safely.</div>
-        <div class="landing-small">Secure session active. Select a panel from the side menu to begin.</div>
+        <div class="landing-copy">
+          <div class="landing-title">Welcome to Brainstem</div>
+          <div class="landing-text">Brainstem is Jeeves' internal control surface: memory state, context signals, tone dynamics, and operational diagnostics. Use the menu to navigate each subsystem and guide behavior safely.</div>
+          <div class="landing-small">Secure session active. Select a panel from the side menu to begin.</div>
+        </div>
       </div>
     </div>
   `;
