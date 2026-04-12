@@ -3,6 +3,9 @@
 Last updated: 2026-04-12
 
 ## Recently Deployed (Completed)
+- ✅ Usage panel trust hardening
+  - removed estimated provider-cost fields to avoid inaccurate cost reporting
+  - usage now emphasizes exact local activity counts and provider configured state
 - ✅ Graph interaction + sampling improvements
   - increased hover hit radius for line-chart tooltips (easier mouse interaction)
   - memory-count snapshots continue to be sampled on context refresh cadence for smoother long-run memory trend lines
