@@ -97,6 +97,18 @@ Last updated: 2026-04-10
   - returns structured JSON error payload on failure instead of raw HTML 500 page
 - ✅ Fixed gratitude consolidation regression:
   - corrected nightly material builder argument name (`journal_limit`, not `gratitude_limit`) that caused `TypeError` in journal cron.
+- ✅ Calendar context enrichment + classification hardening:
+  - deterministic title-based classification added to calendar events (`domain`, `event_type`, `tags`)
+  - calendar query replies now support domain-aware filtering (`school` / `personal` / `extracurricular`) without AI fallback
+  - large-window calendar replies now include readable mix summaries and bounded preview formatting
+- ✅ Sleep context model upgrade:
+  - sleep ingest now treats quantity as primary signal and ignores provider fatigue hints for decisioning
+  - normalized sleep quantity pipeline aligned to your rule: seconds->minutes, halve duplicate, convert to hours, apply 10% discount
+  - added nuanced restedness scoring (non-linear, 8h cap) and 3d/7d trend features in context
+  - persisted sleep trend + restedness as memory signals (`behavior_trends.sleep_recent_trend`, `state.restedness_score`)
+- ✅ Inbox fullness signal upgrade:
+  - inbox counts now use full `in:inbox` size estimates (not last-day slice)
+  - relative busy score now blends global percentile + same-weekday baseline + surge factor
 
 1. **Stabilize Messaging Cost + Alert Discipline (Now)**
 - ✅ Keep `Tier 1 only` live-alert behavior hard-enforced (Tier 2 never pushed).

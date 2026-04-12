@@ -122,6 +122,21 @@ G_QUERY_CORE_TERMS = {
     "diplomatic", "military", "geopolitics",
 }
 
+CALENDAR_SCHOOL_TERMS = {
+    "lecture", "lectures", "class", "classes", "prof", "professor", "office hours",
+    "midterm", "exam", "discussion", "seminar", "econ", "math", "french", "persian",
+    "course", "homework", "review session",
+}
+CALENDAR_EXTRACURRICULAR_TERMS = {
+    "calsol", "battery", "shell", "electrical", "chassis", "strategy",
+    "business and operations", "race ops", "dynamics", "officers", "general meeting",
+    "team photo", "exec", "meeting",
+}
+CALENDAR_PERSONAL_TERMS = {
+    "miriam", "family", "doctor", "dentist", "birthday", "gym", "workout",
+    "dinner", "lunch", "personal", "friend", "date",
+}
+
 # ---------------- FILE NAVIGATION QUICK GUIDE ----------------
 # 1) Config/constants
 # 2) DB schema + helpers
@@ -2988,6 +3003,40 @@ def upsert_calendar_daily_context(local_date, payload):
 
 
 def normalize_calendar_events(events):
+    def classify_calendar_event_title(title):
+        t = (title or "").strip().lower()
+        tags = []
+        event_type = "other"
+        domain = "unknown"
+
+        if any(term in t for term in ("lecture", "class", "seminar")):
+            event_type = "lecture"
+            tags.append("lecture")
+        elif any(term in t for term in ("office hours", "oh")):
+            event_type = "office_hours"
+            tags.append("office_hours")
+        elif any(term in t for term in ("midterm", "exam", "quiz")):
+            event_type = "exam"
+            tags.append("exam")
+        elif any(term in t for term in ("meeting", "review session", "discussion", "ops", "exec")):
+            event_type = "meeting"
+            tags.append("meeting")
+
+        school_hits = sum(1 for term in CALENDAR_SCHOOL_TERMS if term in t)
+        extra_hits = sum(1 for term in CALENDAR_EXTRACURRICULAR_TERMS if term in t)
+        personal_hits = sum(1 for term in CALENDAR_PERSONAL_TERMS if term in t)
+
+        if school_hits >= max(extra_hits, personal_hits, 1):
+            domain = "school"
+        elif extra_hits >= max(school_hits, personal_hits, 1):
+            domain = "extracurricular"
+        elif personal_hits >= max(school_hits, extra_hits, 1):
+            domain = "personal"
+
+        if domain != "unknown":
+            tags.append(domain)
+        return {"domain": domain, "event_type": event_type, "tags": sorted(set(tags))}
+
     if not isinstance(events, list):
         return []
     out = []
@@ -3000,12 +3049,16 @@ def normalize_calendar_events(events):
         all_day = bool(raw.get("all_day"))
         if not title and not start_local and not end_local:
             continue
+        classification = classify_calendar_event_title(title)
         out.append(
             {
                 "title": title or "(untitled)",
                 "start_local": start_local,
                 "end_local": end_local,
                 "all_day": all_day,
+                "domain": classification["domain"],
+                "event_type": classification["event_type"],
+                "tags": classification["tags"],
             }
         )
     return out
@@ -3128,6 +3181,90 @@ def get_sleep_daily_context(local_date=None):
     return dict(row) if row else None
 
 
+def get_recent_sleep_series(lookback_days=14):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT local_date, sleep_hours
+        FROM sleep_daily_context
+        WHERE local_date >= date('now', ?)
+          AND sleep_hours IS NOT NULL
+        ORDER BY local_date DESC
+        """,
+        (f"-{max(3, int(lookback_days))} days",),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    cleaned = []
+    for row in rows:
+        try:
+            hours = float(row.get("sleep_hours"))
+        except:
+            continue
+        cleaned.append({"local_date": row.get("local_date"), "sleep_hours": hours})
+    return cleaned
+
+
+def compute_restedness_score(sleep_hours, recent_avg_7d=None):
+    try:
+        h = float(sleep_hours)
+    except:
+        return 0.5
+
+    if h <= 0:
+        base = 0.05
+    elif h < 4.5:
+        base = 0.08 + (h / 4.5) * 0.22
+    elif h < 6.0:
+        base = 0.30 + ((h - 4.5) / 1.5) * 0.25
+    elif h < 7.0:
+        base = 0.55 + ((h - 6.0) / 1.0) * 0.22
+    elif h < 8.0:
+        base = 0.77 + ((h - 7.0) / 1.0) * 0.23
+    else:
+        base = 1.0
+
+    try:
+        avg7 = float(recent_avg_7d) if recent_avg_7d is not None else None
+    except:
+        avg7 = None
+
+    debt_penalty = 0.0
+    if avg7 is not None:
+        # Sleep debt penalty ramps when recent baseline is low, but remains mild.
+        debt = max(0.0, 7.4 - avg7)
+        debt_penalty = min(0.22, debt * 0.07)
+
+    return clamp01(base - debt_penalty)
+
+
+def build_sleep_trend_features(lookback_days=14):
+    series = get_recent_sleep_series(lookback_days=lookback_days)
+    if not series:
+        return None
+    hours = [float(item["sleep_hours"]) for item in series]
+    avg_3d = sum(hours[:3]) / max(1, min(3, len(hours)))
+    avg_7d = sum(hours[:7]) / max(1, min(7, len(hours)))
+    latest = hours[0]
+    restedness = compute_restedness_score(latest, recent_avg_7d=avg_7d)
+    trend_delta = latest - avg_7d
+    trend_label = "steady"
+    if trend_delta >= 0.9:
+        trend_label = "rebounding"
+    elif trend_delta <= -0.9:
+        trend_label = "declining"
+    return {
+        "latest_hours": round(latest, 3),
+        "avg_3d_hours": round(avg_3d, 3),
+        "avg_7d_hours": round(avg_7d, 3),
+        "restedness_score": round(restedness, 3),
+        "trend_delta_vs_7d": round(trend_delta, 3),
+        "trend_label": trend_label,
+        "sample_days": len(hours),
+    }
+
+
 def upsert_inbox_daily_context(local_date, payload):
     conn = get_conn()
     cur = conn.cursor()
@@ -3182,12 +3319,12 @@ def compute_relative_inbox_busy_score(inbox_count, unread_count, lookback_days=1
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT inbox_count, unread_count
+        SELECT local_date, inbox_count, unread_count
         FROM inbox_daily_context
         WHERE local_date >= date('now', ?)
         ORDER BY local_date DESC
         """,
-        (f"-{max(3, int(lookback_days))} days",),
+        (f"-{max(14, int(lookback_days))} days",),
     )
     rows = [dict(row) for row in cur.fetchall()]
     conn.close()
@@ -3197,9 +3334,32 @@ def compute_relative_inbox_busy_score(inbox_count, unread_count, lookback_days=1
     if not samples:
         # cold start heuristic
         return clamp01(current / 30.0)
-    less_or_equal = sum(1 for value in samples if value <= current)
-    percentile = less_or_equal / max(1, len(samples))
-    return clamp01(percentile)
+
+    def percentile_rank(values, target):
+        if not values:
+            return 0.5
+        less_or_equal = sum(1 for value in values if value <= target)
+        return less_or_equal / max(1, len(values))
+
+    now_weekday = str(get_local_now().weekday())
+    weekday_samples = []
+    for item in rows:
+        local_date = str(item.get("local_date") or "")
+        try:
+            weekday = str(datetime.fromisoformat(local_date).weekday())
+        except:
+            weekday = ""
+        if weekday == now_weekday:
+            weekday_samples.append(int((item.get("inbox_count") or 0) + (item.get("unread_count") or 0) * 1.5))
+
+    global_pct = percentile_rank(samples, current)
+    weekday_pct = percentile_rank(weekday_samples, current) if len(weekday_samples) >= 4 else global_pct
+    blended_pct = (0.65 * weekday_pct) + (0.35 * global_pct)
+
+    sorted_samples = sorted(samples)
+    median = sorted_samples[len(sorted_samples) // 2] if sorted_samples else max(1, current)
+    surge = clamp01((current - median) / max(1, median))
+    return clamp01((0.85 * blended_pct) + (0.15 * surge))
 
 
 def fetch_gmail_inbox_daily_context(local_date=None):
@@ -3208,12 +3368,13 @@ def fetch_gmail_inbox_daily_context(local_date=None):
         return None
     try:
         day = local_date or get_local_date_string()
-        inbox_query = "in:inbox newer_than:1d"
-        unread_query = "in:inbox is:unread newer_than:1d"
-        inbox_resp = service.users().messages().list(userId="me", maxResults=100, q=inbox_query).execute()
-        unread_resp = service.users().messages().list(userId="me", maxResults=100, q=unread_query).execute()
-        inbox_count = len(inbox_resp.get("messages") or [])
-        unread_count = len(unread_resp.get("messages") or [])
+        # Full inbox fullness (not just last-day slice), using resultSizeEstimate for efficiency.
+        inbox_query = "in:inbox"
+        unread_query = "in:inbox is:unread"
+        inbox_resp = service.users().messages().list(userId="me", maxResults=1, q=inbox_query).execute()
+        unread_resp = service.users().messages().list(userId="me", maxResults=1, q=unread_query).execute()
+        inbox_count = int(inbox_resp.get("resultSizeEstimate") or len(inbox_resp.get("messages") or []))
+        unread_count = int(unread_resp.get("resultSizeEstimate") or len(unread_resp.get("messages") or []))
         busy_score = compute_relative_inbox_busy_score(inbox_count, unread_count, lookback_days=14)
         payload = {
             "inbox_count": inbox_count,
@@ -3278,7 +3439,7 @@ def refresh_sleep_context_from_provider(local_date=None):
 
     has_sleep_signal = any(
         payload.get(key) not in (None, "")
-        for key in ("sleep_hours", "sleep_quality", "steps", "resting_hr", "fatigue_score")
+        for key in ("sleep_hours", "sleep_quality", "steps", "resting_hr")
     )
     if not has_sleep_signal:
         return None
@@ -3290,22 +3451,22 @@ def refresh_sleep_context_from_provider(local_date=None):
             num = float(value)
         except:
             return None
-        # Heuristic unit normalization:
-        # - very large values are likely seconds
-        # - medium large values are likely minutes
-        # - otherwise already in hours
+        # Preferred path from your iPhone payload: seconds -> minutes -> halved -> hours -> 10% haircut.
         if num > 1000:
-            num = num / 3600.0
-        elif num > 48:
-            num = num / 60.0
-        # If total is implausibly high for a single-night window, assume
-        # duplicate/stage double-counting and halve once.
-        if num >= 12.0:
-            num = num / 2.0
-        # Apply a small calibration haircut for "time in bed"-style overcounting.
-        if num > 0:
-            num = num * 0.9
-        return round(num, 3)
+            minutes = num / 60.0
+            corrected_minutes = minutes / 2.0
+            hours = (corrected_minutes / 60.0) * 0.9
+            return round(max(0.0, hours), 3)
+        # Fallback if provider emits minutes.
+        if num > 48:
+            hours = ((num / 2.0) / 60.0) * 0.9
+            return round(max(0.0, hours), 3)
+        # Fallback if provider emits hours.
+        hours = num
+        if hours >= 12.0:
+            hours = hours / 2.0
+        hours = hours * 0.9 if hours > 0 else hours
+        return round(max(0.0, hours), 3)
 
     def norm_01(value, fallback=None):
         if value in (None, ""):
@@ -3324,12 +3485,33 @@ def refresh_sleep_context_from_provider(local_date=None):
         "sleep_quality": norm_01(payload.get("sleep_quality")),
         "steps": payload.get("steps"),
         "resting_hr": payload.get("resting_hr"),
-        "fatigue_score": norm_01(payload.get("fatigue_score"), fallback=0.5),
+        # Fatigue should be derived internally from sleep quantity/trend, not provider fatigue hints.
+        "fatigue_score": None,
         "summary_text": payload.get("summary_text") or "",
         "source": payload.get("source") or "sleep_provider",
         "confidence": norm_01(payload.get("confidence"), fallback=0.7),
     }
     upsert_sleep_daily_context(day, normalized)
+
+    # Persist trend as protected long-term behavior memory for Brainstem visibility.
+    trend = build_sleep_trend_features(lookback_days=14)
+    if trend:
+        upsert_memory(
+            "long_term",
+            "behavior_trends",
+            "sleep_recent_trend",
+            json.dumps(trend, ensure_ascii=True),
+            source_text="sleep_context_refresh",
+            confidence=0.82,
+        )
+        upsert_memory(
+            "working",
+            "state",
+            "restedness_score",
+            str(round(float(trend.get("restedness_score") or 0.5), 3)),
+            source_text="sleep_context_refresh",
+            confidence=0.8,
+        )
     return normalized
 
 
@@ -5118,7 +5300,7 @@ def get_sleep_context_snapshot():
         }
     has_sleep_signal = any(
         stored.get(key) not in (None, "")
-        for key in ("sleep_hours", "sleep_quality", "steps", "resting_hr", "fatigue_score")
+        for key in ("sleep_hours", "sleep_quality", "steps", "resting_hr")
     )
     if not has_sleep_signal:
         return {
@@ -5126,16 +5308,30 @@ def get_sleep_context_snapshot():
             "status": "not_connected",
             "summary": "",
         }
+    trend = build_sleep_trend_features(lookback_days=14)
+    sleep_hours = stored.get("sleep_hours")
+    restedness = compute_restedness_score(
+        sleep_hours,
+        recent_avg_7d=(trend or {}).get("avg_7d_hours"),
+    )
+    fatigue = clamp01(1.0 - restedness)
     return {
         "available": True,
         "status": "connected",
-        "summary": (stored.get("summary_text") or f"sleep {stored.get('sleep_hours')}h, fatigue {stored.get('fatigue_score')}"),
+        "summary": (
+            stored.get("summary_text")
+            or f"sleep {sleep_hours}h, restedness {round(restedness, 2)}"
+        ),
         "features": {
-            "sleep_hours": stored.get("sleep_hours"),
+            "sleep_hours": sleep_hours,
             "sleep_quality": stored.get("sleep_quality"),
             "steps": stored.get("steps"),
             "resting_hr": stored.get("resting_hr"),
-            "fatigue_score": stored.get("fatigue_score"),
+            "restedness_score": round(restedness, 3),
+            "fatigue_score": round(fatigue, 3),
+            "recent_avg_3d_hours": (trend or {}).get("avg_3d_hours"),
+            "recent_avg_7d_hours": (trend or {}).get("avg_7d_hours"),
+            "sleep_trend_label": (trend or {}).get("trend_label"),
             "confidence": stored.get("confidence"),
         },
     }
@@ -5327,21 +5523,21 @@ def build_tone_vector(journal_analysis, context_snapshot):
     calendar_busy = clamp01((calendar_features.get("busy_score") or 0.0))
     inbox_busy = clamp01((inbox_features.get("busy_score") or 0.0))
     busy_score = clamp01(max(calendar_busy, inbox_busy))
-    # Sleep-duration-driven fatigue model:
-    # - only sleep_hours influences fatigue
-    # - 8h or more is treated as fully-rested baseline (same effect)
-    # - below 8h scales fatigue impact linearly
     sleep_hours_raw = sleep_features.get("sleep_hours")
+    sleep_avg_7d_raw = sleep_features.get("recent_avg_7d_hours")
     try:
         sleep_hours = float(sleep_hours_raw) if sleep_hours_raw not in (None, "") else None
     except:
         sleep_hours = None
+    try:
+        sleep_avg_7d = float(sleep_avg_7d_raw) if sleep_avg_7d_raw not in (None, "") else None
+    except:
+        sleep_avg_7d = None
     if sleep_hours is None:
-        fatigue_score = 0.5
-    elif sleep_hours >= 8.0:
-        fatigue_score = 0.0
+        restedness_score = 0.5
     else:
-        fatigue_score = clamp01((8.0 - max(0.0, sleep_hours)) / 8.0)
+        restedness_score = compute_restedness_score(sleep_hours, recent_avg_7d=sleep_avg_7d)
+    fatigue_score = clamp01(1.0 - restedness_score)
     market_stress = compute_market_stress_signal()
 
     brevity = clamp01(0.22 + (0.35 * busy_score) + (0.22 * fatigue_score) + (0.18 * stress_signal))
@@ -5383,6 +5579,7 @@ def build_tone_vector(journal_analysis, context_snapshot):
             "calendar_busy": round(calendar_busy, 3),
             "inbox_busy": round(inbox_busy, 3),
             "fatigue_score": round(fatigue_score, 3),
+            "restedness_score": round(restedness_score, 3),
             "market_stress": round(market_stress, 3),
             "stress_signal": round(stress_signal, 3),
             "friction_signal": round(friction_signal, 3),
@@ -8983,6 +9180,14 @@ def build_calendar_query_reply(request_info):
 
     focus_text = str((request_info or {}).get("focus_text") or "").strip().lower()
     query_text = str((request_info or {}).get("query_text") or "").strip().lower()
+    requested_domain = None
+    if any(token in query_text for token in ("school", "class", "lecture", "lectures", "midterm", "exam")):
+        requested_domain = "school"
+    elif any(token in query_text for token in ("extracurricular", "club", "team", "calsol")):
+        requested_domain = "extracurricular"
+    elif any(token in query_text for token in ("personal", "family", "friend")):
+        requested_domain = "personal"
+
     # Only apply topic filtering when the user clearly requested a topic.
     # Generic planning prompts should return all events for the window.
     explicit_focus_patterns = [
@@ -9022,9 +9227,13 @@ def build_calendar_query_reply(request_info):
         event_day = start_local[:10] if len(start_local) >= 10 else ""
         if event_day not in target_days:
             continue
-        title = str(event.get("title") or "(untitled)")
-        if focus_terms and not any(term in title.lower() for term in focus_terms):
+        if requested_domain and str(event.get("domain") or "") != requested_domain:
             continue
+        title = str(event.get("title") or "(untitled)")
+        event_type = str(event.get("event_type") or "").lower()
+        if focus_terms and not any(term in title.lower() for term in focus_terms):
+            if not any(term in event_type for term in focus_terms):
+                continue
         filtered.append(event)
 
     filtered.sort(key=lambda item: str(item.get("start_local") or ""))
@@ -9069,7 +9278,18 @@ def build_calendar_query_reply(request_info):
             return f"{start_raw} to {end_raw}: {title}".strip()
 
     lines = [f"{idx}. {format_event_line(event)}" for idx, event in enumerate(filtered, start=1)]
-    return f"You have {len(filtered)} event(s) for {label}:\n" + "\n".join(lines)
+
+    domain_counts = Counter(str(item.get("domain") or "unknown") for item in filtered)
+    top_domains = ", ".join(f"{name}:{count}" for name, count in domain_counts.most_common(3))
+    header = f"You have {len(filtered)} event(s) for {label}."
+    if top_domains:
+        header += f" Mix: {top_domains}."
+
+    if len(lines) > 24:
+        preview = "\n".join(lines[:24])
+        remaining = len(lines) - 24
+        return f"{header}\n{preview}\n... and {remaining} more."
+    return f"{header}\n" + "\n".join(lines)
 
 # ---------------- MASSIVE ----------------
 
