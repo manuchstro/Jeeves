@@ -12706,9 +12706,18 @@ function calendarAgeText(ts) {{
 }}
 
 async function refreshContextToneNow() {{
-  const qs = KEY_QS.replace(/^\\?/, "");
-  const base = "https://jeeves-production-4d42.up.railway.app/tasks/context-refresh";
-  const url = base + (qs ? ("?" + qs) : "");
+  let url = "";
+  try {{
+    const links = await api("/brainstem/api/key-links");
+    url = (((links || {{}}).links || {{}}).memory_context || {{}}).context_refresh || "";
+  }} catch (e) {{
+    url = "";
+  }}
+  if (!url) {{
+    const qs = KEY_QS.replace(/^\\?/, "");
+    const base = "https://jeeves-production-4d42.up.railway.app/tasks/context-refresh";
+    url = base + (qs ? ("?" + qs) : "");
+  }}
   window.open(url, "_blank", "noopener,noreferrer");
 }}
 
