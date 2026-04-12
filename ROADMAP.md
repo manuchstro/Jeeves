@@ -3,6 +3,11 @@
 Last updated: 2026-04-12
 
 ## Recently Deployed (Completed)
+- ✅ Graph interaction + sampling improvements
+  - increased hover hit radius for line-chart tooltips (easier mouse interaction)
+  - memory-count snapshots continue to be sampled on context refresh cadence for smoother long-run memory trend lines
+- ✅ Usage panel clarity
+  - added explicit usage-accuracy annotation (`exact_local_db` vs approximate provider-cost view)
 - ✅ Memory graph telemetry hardening
   - memory count snapshots now persist on each `/tasks/context-refresh` run (15-minute cron path)
   - cumulative memory graph now reads from snapshot history for smoother growth line over time
