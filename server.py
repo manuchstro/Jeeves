@@ -12488,8 +12488,8 @@ def brainstem_api_context_tone():
     if denied:
         return denied
     process_due_memory_feedback_queue()
-    # Keep Context + Tone live and avoid stale day snapshots.
-    refresh_flag = (request.args.get("refresh") or "1").strip().lower()
+    # Passive by default: rely on scheduled refresh unless explicitly forced.
+    refresh_flag = (request.args.get("refresh") or "0").strip().lower()
     do_refresh = refresh_flag not in {"0", "false", "no"}
     if do_refresh:
         local_date = get_local_date_string()
