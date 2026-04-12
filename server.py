@@ -11856,9 +11856,10 @@ def brainstem_home():
     .sidebar-header {{ display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }}
     .brand {{ font-weight: 650; letter-spacing: 0.2px; font-size: 1.08rem; }}
     .tabs {{ display:flex; flex-direction:column; gap:8px; }}
-    .tab-btn {{ border:2px solid var(--outline); background: var(--panel); color: var(--fg); font-weight:520; border-radius: 10px; padding: 9px 11px; cursor:pointer; text-align:left; width:100%; transition: transform 140ms ease, background 140ms ease, opacity 140ms ease; }}
+    .tab-btn {{ border:2px solid var(--outline); background: var(--panel); color: var(--fg); font-weight:520; border-radius: 10px; padding: 9px 11px; cursor:pointer; text-align:left; width:100%; transition: transform 140ms ease, background 140ms ease, opacity 140ms ease, box-shadow 140ms ease, border-color 140ms ease; }}
     .tab-btn.active {{ outline: 2px solid var(--accent); }}
-    .tab-btn:hover {{ transform: translateY(-1px); }}
+    .tab-btn:hover {{ transform: translateY(-1px); border-color:#2a241b; box-shadow: 0 4px 14px rgba(0,0,0,0.28); }}
+    .tab-btn:active {{ transform: translateY(0); }}
     .app-shell.nav-collapsed .sidebar {{
       width: 0;
       flex-basis: 0;
@@ -11873,7 +11874,9 @@ def brainstem_home():
     .main-area {{ flex:1; min-width:0; display:flex; flex-direction:column; }}
     .topbar {{ position: sticky; top:0; z-index:20; border-bottom: 2px solid var(--outline); background: rgba(0,0,0,0.93); backdrop-filter: blur(6px); }}
     .topbar-inner {{ padding: 10px 14px; display:flex; align-items:center; justify-content:space-between; gap:10px; }}
-    .menu-btn {{ border:2px solid var(--outline); background:#222; color:var(--fg); border-radius:8px; padding:7px 10px; cursor:pointer; font-weight:520; }}
+    .menu-btn {{ border:2px solid var(--outline); background:#222; color:var(--fg); border-radius:8px; padding:7px 10px; cursor:pointer; font-weight:520; transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease, border-color 120ms ease; }}
+    .menu-btn:hover {{ background:#2a2a2a; border-color:#2b251d; box-shadow: 0 3px 10px rgba(0,0,0,0.25); transform: translateY(-1px); }}
+    .menu-btn:active {{ transform: translateY(0); }}
     .topbar-right {{ display:flex; align-items:center; gap:10px; }}
     .container {{ max-width: 1200px; width:100%; margin: 0 auto; padding: 14px; }}
     .section {{ display:none; }}
@@ -11888,7 +11891,9 @@ def brainstem_home():
       border-radius:14px;
       padding:12px;
       animation: cardIn 210ms ease both;
+      transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
     }}
+    .card:hover {{ border-color:#28231a; box-shadow: 0 8px 22px rgba(0,0,0,0.26); transform: translateY(-1px); }}
     .span-12 {{ grid-column: span 12; }}
     .span-8 {{ grid-column: span 8; }}
     .span-6 {{ grid-column: span 6; }}
@@ -11899,14 +11904,20 @@ def brainstem_home():
     .kpi {{ font-size: 1.35rem; font-weight:620; }}
     .row {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
     .pill {{ border: 1px solid var(--outline); border-radius:999px; padding:4px 10px; font-size:0.82rem; background:#3a4a3e; }}
-    .btn {{ border:2px solid var(--outline); background:#455646; color:var(--fg); border-radius:10px; padding:8px 12px; cursor:pointer; font-weight:520; }}
+    .btn {{ border:2px solid var(--outline); background:#455646; color:var(--fg); border-radius:10px; padding:8px 12px; cursor:pointer; font-weight:520; transition: transform 110ms ease, box-shadow 130ms ease, filter 130ms ease, border-color 130ms ease; }}
     .btn.warn {{ background: #6a4b13; color:#ffe5b3; }}
     .btn.acc {{ background: #2f5d3a; }}
     .btn.err {{ background: #b3261e; }}
     .btn.ghost {{ background: transparent; }}
+    .btn:hover {{ transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.24); filter: brightness(1.04); border-color:#2b251c; }}
+    .btn:active {{ transform: translateY(0); filter: brightness(0.98); }}
+    .btn:disabled {{ opacity:0.58; cursor:not-allowed; box-shadow:none; transform:none; filter:none; }}
     input, textarea, select {{
       background:#263129; color:var(--fg); border:2px solid var(--outline); border-radius:10px; padding:8px; width:100%;
+      transition: border-color 130ms ease, box-shadow 130ms ease, background 130ms ease;
     }}
+    input:hover, textarea:hover, select:hover {{ border-color:#2a261f; }}
+    input:focus, textarea:focus, select:focus {{ outline:none; border-color:#7b5b23; box-shadow: 0 0 0 2px rgba(255,162,0,0.2); background:#2a352d; }}
     .table {{ width:100%; border-collapse: collapse; font-size:0.9rem; }}
     .table th, .table td {{ border-bottom:1px solid #253128; padding:8px; text-align:left; vertical-align:top; overflow-wrap:anywhere; word-break:break-word; }}
     .table th {{ color: var(--muted); font-size:0.82rem; }}
@@ -11966,7 +11977,23 @@ def brainstem_home():
     .landing-text {{ max-width: 560px; color: #fff4dd; line-height:1.5; }}
     .landing-orb {{ display:none; }}
     .landing-small {{ margin-top:18px; color:#b6aa8d; font-size: 0.88rem; }}
-    .expandable summary {{ cursor:pointer; font-weight:700; }}
+    .expandable summary {{ cursor:pointer; font-weight:700; transition: color 120ms ease, letter-spacing 120ms ease; }}
+    .expandable summary:hover {{ color:#ffd58f; letter-spacing: 0.15px; }}
+
+    :focus-visible {{
+      outline: 2px solid rgba(255,162,0,0.65);
+      outline-offset: 2px;
+      border-radius: 8px;
+    }}
+
+    @media (prefers-reduced-motion: reduce) {{
+      *, *::before, *::after {{
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+      }}
+    }}
     @keyframes fadeIn {{ from {{ opacity: 0; transform: translateY(4px); }} to {{ opacity:1; transform: translateY(0); }} }}
     @keyframes cardIn {{ from {{ opacity: 0; transform: translateY(6px); }} to {{ opacity:1; transform: translateY(0); }} }}
     @keyframes floatA {{ 0%{{transform:translateY(0)}}50%{{transform:translateY(8px)}}100%{{transform:translateY(0)}} }}
