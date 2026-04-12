@@ -4654,14 +4654,14 @@ def get_cost_usage_snapshot():
     alerts_30d = int(row["c"] if row and row["c"] is not None else 0)
     conn.close()
     return {
-        "disclaimer": "Cost projection is approximate and may be inaccurate.",
+        "disclaimer": "Provider cost estimates are intentionally disabled to avoid inaccurate reporting.",
         "accuracy": {
             "activity_counts": "exact_local_db",
-            "provider_costs": "approximate_unless_provider_billing_connected",
+            "provider_costs": "not_reported",
         },
         "providers": {
-            "openai": {"configured": bool(os.environ.get("OPENAI_API_KEY")), "estimated_30d_calls_proxy": interactions_30d},
-            "twilio": {"configured": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN), "outbound_messages_30d": outbound_30d},
+            "openai": {"configured": bool(os.environ.get("OPENAI_API_KEY"))},
+            "twilio": {"configured": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN)},
             "massive": {"configured": bool(MASSIVE_API_KEY)},
             "twelvedata": {"configured": bool(TWELVEDATA_API_KEY)},
             "nyt": {"configured": bool(NYT_API_KEY)},
@@ -12956,7 +12956,7 @@ async function renderUsage() {{
   const accuracy = data.accuracy || {{}};
   target.innerHTML = `
     <div class="grid">
-      <div class="card span-12"><div class="title">Usage + Cost</div><div class="muted">${{esc(data.disclaimer || "")}}</div></div>
+      <div class="card span-12"><div class="title">Usage</div><div class="muted">${{esc(data.disclaimer || "")}}</div></div>
       <div class="card span-12"><div class="muted">Accuracy: activity counts = <strong>${{esc(accuracy.activity_counts || "unknown")}}</strong>; provider costs = <strong>${{esc(accuracy.provider_costs || "unknown")}}</strong></div></div>
       <div class="card span-4"><div class="title">Interactions (30d)</div><div class="kpi">${{esc(rollups.interactions_30d ?? 0)}}</div></div>
       <div class="card span-4"><div class="title">Alerts (30d)</div><div class="kpi">${{esc(rollups.alerts_30d ?? 0)}}</div></div>
