@@ -12292,7 +12292,7 @@ function drawSimpleTrend(canvas, points, series, yLabelSuffix = "") {{
       const d = Math.hypot(pt.x - mx, pt.y - my);
       if (d < bestD) {{ bestD = d; best = pt; }}
     }}
-    if (!best || bestD > 16) {{
+    if (!best || bestD > 30) {{
       tip.style.display = "none";
       return;
     }}
@@ -12707,7 +12707,7 @@ function drawHistory(canvas, data, legendEl, noteEl) {{
       const d = Math.hypot(pt.x - mx, pt.y - my);
       if (d < bestD) {{ bestD = d; best = pt; }}
     }}
-    if (!best || bestD > 16) {{
+    if (!best || bestD > 30) {{
       tip.style.display = "none";
       return;
     }}
