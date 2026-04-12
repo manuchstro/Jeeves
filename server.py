@@ -75,6 +75,7 @@ GRATITUDE_HOUR = 22
 GRATITUDE_MINUTE = 15
 JOURNAL_RESPONSE_WINDOW_HOURS = 12
 BRAINSTEM_AUTH_MODE = (os.environ.get("BRAINSTEM_AUTH_MODE") or "internal_key").strip().lower()
+BRAINSTEM_PASSCODE = (os.environ.get("BRAINSTEM_PASSCODE") or "30410061402113").strip()
 CALENDAR_CONTEXT_URL = os.environ.get("CALENDAR_CONTEXT_URL", "").strip()
 CALENDAR_CONTEXT_BEARER = os.environ.get("CALENDAR_CONTEXT_BEARER", "").strip()
 SLEEP_CONTEXT_URL = os.environ.get("SLEEP_CONTEXT_URL", "").strip()
@@ -697,6 +698,22 @@ def init_db():
         action TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending',
         execute_after DATETIME NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        undone_at DATETIME
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS memory_feedback_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL,
+        category TEXT NOT NULL,
+        memory_key TEXT NOT NULL,
+        action TEXT NOT NULL,
+        previous_confidence REAL,
+        previous_stability TEXT,
+        new_confidence REAL,
+        new_stability TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         undone_at DATETIME
     )
@@ -3801,10 +3818,51 @@ def append_internal_key(url):
     return f"{url}{separator}key={quote_plus(INTERNAL_API_KEY)}"
 
 
+def get_request_passcode():
+    try:
+        payload = request.get_json(silent=True) if request.method in {"POST", "PUT", "PATCH"} else None
+    except Exception:
+        payload = None
+    return (
+        request.headers.get("X-Brainstem-Passcode")
+        or request.args.get("passcode")
+        or request.form.get("passcode")
+        or ((payload or {}).get("passcode") if isinstance(payload, dict) else None)
+        or ""
+    ).strip()
+
+
+def get_brainstem_auth_querystring():
+    key = (
+        request.headers.get("X-Internal-Key")
+        or request.args.get("key")
+        or request.form.get("key")
+        or ""
+    ).strip()
+    passcode = get_request_passcode()
+    parts = []
+    if key:
+        parts.append(f"key={quote_plus(key)}")
+    elif INTERNAL_API_KEY:
+        parts.append(f"key={quote_plus(INTERNAL_API_KEY)}")
+    if passcode:
+        parts.append(f"passcode={quote_plus(passcode)}")
+    return ("?" + "&".join(parts)) if parts else ""
+
+
 def require_brainstem_access():
-    # For now, Brainstem uses the same internal-key gate as debug/task routes.
-    # This keeps execution deterministic and avoids exposing action endpoints.
-    return require_internal_api_key()
+    # Allow either internal API key or dedicated Brainstem passcode.
+    denied = require_internal_api_key()
+    if denied is None:
+        return None
+    provided_passcode = get_request_passcode()
+    if BRAINSTEM_PASSCODE and provided_passcode and hmac.compare_digest(provided_passcode, BRAINSTEM_PASSCODE):
+        return None
+    return app.response_class(
+        response=json.dumps({"ok": False, "reason": "unauthorized"}, indent=2),
+        status=401,
+        mimetype="application/json",
+    )
 
 
 def get_brainstem_setting(key, default=None):
@@ -3932,7 +3990,7 @@ def queue_memory_feedback_forget(scope, category, memory_key, delay_minutes=60):
 
 
 def undo_memory_feedback_forget(scope, category, memory_key):
-    execute_write_with_retry(
+    result = execute_write_with_retry(
         """
         UPDATE memory_feedback_queue
         SET status = 'undone', undone_at = CURRENT_TIMESTAMP
@@ -3944,6 +4002,85 @@ def undo_memory_feedback_forget(scope, category, memory_key):
         """,
         (scope, category, memory_key),
     )
+    return int(result.get("rowcount") or 0)
+
+
+def record_memory_feedback_history(scope, category, memory_key, action, previous_confidence=None, previous_stability=None, new_confidence=None, new_stability=None):
+    execute_write_with_retry(
+        """
+        INSERT INTO memory_feedback_history (
+            scope, category, memory_key, action,
+            previous_confidence, previous_stability, new_confidence, new_stability
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            scope, category, memory_key, action,
+            previous_confidence, previous_stability, new_confidence, new_stability,
+        ),
+    )
+
+
+def undo_last_accurate_feedback(scope, category, memory_key):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, previous_confidence, previous_stability, new_confidence, new_stability
+        FROM memory_feedback_history
+        WHERE scope = ?
+          AND category = ?
+          AND memory_key = ?
+          AND action = 'accurate'
+          AND undone_at IS NULL
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (scope, category, memory_key),
+    )
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return {"ok": False, "reason": "no_accurate_feedback_to_undo"}
+
+    prev_conf = float(row["previous_confidence"]) if row["previous_confidence"] is not None else None
+    prev_stability = row["previous_stability"] or "situational"
+    cur.execute(
+        """
+        UPDATE memory_items
+        SET confidence = COALESCE(?, confidence),
+            stability = COALESCE(?, stability),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE scope = ? AND category = ? AND memory_key = ?
+        """,
+        (prev_conf, prev_stability, scope, category, memory_key),
+    )
+    cur.execute(
+        """
+        UPDATE memory_feedback_history
+        SET undone_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (row["id"],),
+    )
+    conn.commit()
+    conn.close()
+
+    add_memory_provenance_event(
+        scope,
+        category,
+        memory_key,
+        action="feedback_accurate_undo",
+        source_text="brainstem_feedback_undo",
+        source_trust="direct_user",
+        confidence=prev_conf if prev_conf is not None else 0.5,
+        stability=prev_stability,
+    )
+    return {
+        "ok": True,
+        "restored_confidence": prev_conf,
+        "restored_stability": prev_stability,
+    }
 
 
 def adjust_memory_confidence(scope, category, memory_key, delta=0.07, source_text="brainstem_feedback"):
@@ -3963,8 +4100,9 @@ def adjust_memory_confidence(scope, category, memory_key, delta=0.07, source_tex
         conn.close()
         return None
     old_conf = float(row["confidence"] or 0.5)
+    old_stability = row["stability"] or "situational"
     new_conf = max(0.01, min(MEMORY_CONFIDENCE_MAX, old_conf + float(delta)))
-    stability = row["stability"] or "situational"
+    stability = old_stability
     if delta > 0 and stability == "situational":
         stability = "emerging"
     cur.execute(
@@ -3989,7 +4127,12 @@ def adjust_memory_confidence(scope, category, memory_key, delta=0.07, source_tex
         old_value=row["value"],
         new_value=row["value"],
     )
-    return {"old_confidence": old_conf, "new_confidence": new_conf, "stability": stability}
+    return {
+        "old_confidence": old_conf,
+        "new_confidence": new_conf,
+        "old_stability": old_stability,
+        "new_stability": stability,
+    }
 
 
 def record_tone_snapshot(context_snapshot, tone_vector):
@@ -11090,9 +11233,7 @@ def brainstem_home():
     if denied:
         return denied
     base = get_public_base_url()
-    key_qs = ""
-    if INTERNAL_API_KEY:
-        key_qs = f"?key={quote_plus(INTERNAL_API_KEY)}"
+    key_qs = get_brainstem_auth_querystring()
 
     html_page = f"""<!doctype html>
 <html lang="en">
@@ -11102,7 +11243,7 @@ def brainstem_home():
   <title>Brainstem</title>
   <style>
     :root {{
-      --bg: #2E3A31;
+      --bg: #313631;
       --fg: #FFEBC4;
       --outline: #1A1712;
       --accent: #FFA200;
@@ -11110,7 +11251,7 @@ def brainstem_home():
       --panel: #344237;
     }}
     * {{ box-sizing: border-box; }}
-    body {{ margin:0; font-family: "SF Pro Display", "Avenir Next", "Inter", system-ui, sans-serif; background: var(--bg); color: var(--fg); }}
+    body {{ margin:0; font-family: "SF Pro Text", "Avenir Next", "Helvetica Neue", system-ui, sans-serif; background: var(--bg); color: var(--fg); }}
     .topbar {{ position: sticky; top:0; z-index:10; border-bottom: 2px solid var(--outline); background: rgba(46,58,49,0.95); backdrop-filter: blur(6px); }}
     .topbar-inner {{ max-width: 1200px; margin:0 auto; padding: 12px; display:flex; align-items:center; gap:10px; flex-wrap: wrap; }}
     .brand {{ font-weight: 800; letter-spacing: 0.3px; font-size: 1.1rem; }}
@@ -11255,7 +11396,13 @@ async function renderKeyPage() {{
     ).join("");
     return `<div class="card span-12"><div class="title">${{esc(group)}}</div><table class="table"><tbody>${{rows}}</tbody></table></div>`;
   }}).join("");
-  target.innerHTML = `<div class="grid">${{blocks}}</div>`;
+  target.innerHTML = `<div class="grid">
+    <div class="card span-12">
+      <div class="title">Command Keywords</div>
+      <pre>${{esc(data.command_key_keywords || "")}}</pre>
+    </div>
+    ${{blocks}}
+  </div>`;
 }}
 
 async function renderMemory() {{
@@ -11293,7 +11440,11 @@ async function renderMemory() {{
 }}
 
 async function memoryFeedback(scope, category, memory_key, action) {{
-  const confirmText = action === "accurate" ? "mark this memory accurate?" : (action === "inaccurate" ? "mark this memory inaccurate and queue forget in 1 hour?" : "undo queued forget?");
+  const confirmText = action === "accurate"
+    ? "mark this memory accurate?"
+    : (action === "inaccurate"
+      ? "mark this memory inaccurate and queue forget in 1 hour?"
+      : "undo last memory feedback?");
   if (!confirm("Are you sure you want to " + confirmText)) return;
   await api("/brainstem/api/memory/feedback", {{
     method: "POST",
@@ -11618,7 +11769,7 @@ def brainstem_api_key_links():
     if denied:
         return denied
     return app.response_class(
-        response=json.dumps({"links": get_operator_links_map()}, indent=2),
+        response=json.dumps({"links": get_operator_links_map(), "command_key_keywords": COMMAND_KEY_REPLY}, indent=2),
         status=200,
         mimetype="application/json",
     )
@@ -11656,11 +11807,28 @@ def brainstem_api_memory_feedback():
     if action == "accurate":
         adjusted = adjust_memory_confidence(scope, category, memory_key, delta=0.08, source_text="brainstem_feedback_accurate")
         result["adjusted"] = adjusted
+        if adjusted:
+            record_memory_feedback_history(
+                scope,
+                category,
+                memory_key,
+                action="accurate",
+                previous_confidence=adjusted.get("old_confidence"),
+                previous_stability=adjusted.get("old_stability"),
+                new_confidence=adjusted.get("new_confidence"),
+                new_stability=adjusted.get("new_stability"),
+            )
     elif action == "inaccurate":
         execute_after = queue_memory_feedback_forget(scope, category, memory_key, delay_minutes=60)
         result["execute_after"] = execute_after
     else:
-        undo_memory_feedback_forget(scope, category, memory_key)
+        undone_forget = undo_memory_feedback_forget(scope, category, memory_key)
+        if undone_forget > 0:
+            result["undo_target"] = "queued_forget"
+            result["undone_count"] = undone_forget
+        else:
+            result["undo_target"] = "accurate_reinforcement"
+            result["undo_result"] = undo_last_accurate_feedback(scope, category, memory_key)
 
     audit_brainstem_action("memory_feedback", f"{scope}:{category}:{memory_key}", payload)
     return app.response_class(response=json.dumps(result, indent=2), status=200, mimetype="application/json")
