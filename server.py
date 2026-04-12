@@ -3460,6 +3460,10 @@ def get_inbox_daily_context(local_date=None):
 
 
 def compute_relative_inbox_busy_score(inbox_count, unread_count, lookback_days=14):
+    # Explicit zero baseline: if inbox is empty, load is 0%.
+    if int(inbox_count or 0) <= 0 and int(unread_count or 0) <= 0:
+        return 0.0
+
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -12484,6 +12488,14 @@ def brainstem_api_context_tone():
     if denied:
         return denied
     process_due_memory_feedback_queue()
+    # Keep Context + Tone live and avoid stale day snapshots.
+    refresh_flag = (request.args.get("refresh") or "1").strip().lower()
+    do_refresh = refresh_flag not in {"0", "false", "no"}
+    if do_refresh:
+        local_date = get_local_date_string()
+        fetch_gmail_inbox_daily_context(local_date=local_date)
+        refresh_calendar_context_from_provider(local_date=local_date)
+        refresh_sleep_context_from_provider(local_date=local_date)
     snapshot = build_journal_context_snapshot()
     tone_vector = build_tone_vector({}, snapshot)
     record_tone_snapshot(snapshot, tone_vector)
