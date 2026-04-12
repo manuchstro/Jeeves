@@ -12472,11 +12472,11 @@ async function renderMemory() {{
         <div class="chart-wrap"><canvas id="memory-growth-chart"></canvas></div>
         <div id="memory-growth-meta" class="muted" style="margin-top:8px;"></div>
       </div>
-      <div class="card span-12">
-        <div class="title">Memory Explorer</div>
-        <div class="muted">Marking inaccurate queues deletion in 1 hour. Undo available before execution.</div>
+      <details class="card span-12 expandable" open>
+        <summary>Memory Explorer</summary>
+        <div class="muted" style="margin-top:8px;">Marking inaccurate queues deletion in 1 hour. Undo available before execution.</div>
         <table class="table"><thead><tr><th class="mem-id-col">Memory ID</th><th>Value</th><th class="confidence-col">Confidence</th><th class="feedback-col">Accuracy • Deletion Toggle</th></tr></thead><tbody>${{rows}}</tbody></table>
-      </div>
+      </details>
       <div class="card span-12">
         <div class="title">Pending Forget Queue</div>
         <ul>${{pending || "<li class='muted'>none</li>"}}</ul>
