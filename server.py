@@ -11924,10 +11924,23 @@ def brainstem_home():
     .health-bad {{ background: #5f3434 !important; }}
     .health-note {{ margin-top: 6px; font-size: 11px; color: #e8d6af; }}
     .landing-wrap {{ min-height: calc(100vh - 120px); display:flex; align-items:center; justify-content:center; }}
-    .landing-card {{ position:relative; width:min(780px, 96%); min-height:320px; background: linear-gradient(160deg, #101310 0%, #161b16 100%); border:2px solid var(--outline); border-radius:16px; padding:28px; overflow:hidden; }}
-    .landing-copy {{ max-width: 610px; background: linear-gradient(160deg, #8f6a2a 0%, #7a5a22 100%); border: 2px solid #5c4318; border-radius: 12px; padding: 14px 16px; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06); }}
+    .landing-card {{ position:relative; width:min(860px, 98%); min-height:320px; border-radius:16px; padding:20px; overflow:hidden; display:flex; align-items:center; justify-content:center; }}
+    .landing-copy {{
+      max-width: 660px;
+      width: min(660px, 96%);
+      background:
+        radial-gradient(circle at 12% 15%, rgba(255,230,185,0.14) 0 10%, transparent 45%),
+        radial-gradient(circle at 86% 78%, rgba(70,110,78,0.18) 0 14%, transparent 50%),
+        repeating-linear-gradient(145deg, rgba(255,235,205,0.07) 0 2px, transparent 2px 14px),
+        repeating-linear-gradient(35deg, rgba(20,28,22,0.15) 0 1px, transparent 1px 16px),
+        linear-gradient(165deg, #ff9f2f 0%, #e07a1a 55%, #ba5c13 100%);
+      border: 2px solid #7a4612;
+      border-radius: 14px;
+      padding: 20px 22px;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08), 0 10px 28px rgba(0,0,0,0.35);
+    }}
     .landing-title {{ font-size: clamp(1.3rem, 2.7vw, 2rem); font-weight:620; margin-bottom:10px; }}
-    .landing-text {{ max-width: 560px; color: #fff2d8; line-height:1.5; }}
+    .landing-text {{ max-width: 560px; color: #fff4dd; line-height:1.5; }}
     .landing-orb {{ position:absolute; border-radius:999px; filter: blur(1px); opacity:0.24; pointer-events:none; }}
     .landing-orb.a {{ width:220px; height:220px; right:-40px; top:-40px; background: radial-gradient(circle, #ffa200, transparent 70%); animation: floatA 6s ease-in-out infinite; }}
     .landing-orb.b {{ width:190px; height:190px; left:-30px; bottom:-50px; background: radial-gradient(circle, #7ea57d, transparent 68%); animation: floatB 7s ease-in-out infinite; }}
@@ -11977,7 +11990,7 @@ const sections = [
   {{id:"key", label:"Key"}},
   {{id:"memory", label:"Memory"}},
   {{id:"context", label:"Context + Tone"}},
-  {{id:"news", label:"News/Poll"}},
+  {{id:"news", label:"Live News Polls"}},
   {{id:"ops", label:"Live Operations Console"}},
   {{id:"usage", label:"Usage"}},
   {{id:"whitepaper", label:"Whitepaper"}},
@@ -12585,7 +12598,10 @@ async function renderContextTone() {{
       <div class="card span-8">
         <div class="title">3D Context Vector</div>
         <div class="muted">Axes: Gmail load (G), Calendar load (C), Sleep/restedness (S). Drag to rotate.</div>
-        <div class="row" style="margin:6px 0 8px 0;"><button class="btn ghost" onclick="refreshContextToneNow()">Refresh Context Now</button></div>
+        <div class="row" style="margin:6px 0 8px 0;">
+          <button class="btn ghost" id="ctx-refresh-btn" onclick="refreshContextToneNow()">Refresh Context Now</button>
+          <span class="muted" id="ctx-refresh-status"></span>
+        </div>
         <div class="chart-wrap">
           <canvas id="ctx3d"></canvas>
           <div class="axis-legend">G = Gmail Inbox<br>C = Google Calendar<br>S = Sleep</div>
@@ -12633,8 +12649,19 @@ function calendarAgeText(ts) {{
 }}
 
 async function refreshContextToneNow() {{
-  await api("/brainstem/api/context-tone?refresh=1");
-  await renderContextTone();
+  const btn = document.getElementById("ctx-refresh-btn");
+  const status = document.getElementById("ctx-refresh-status");
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = "Refreshing...";
+  try {{
+    const out = await api("/tasks/context-refresh");
+    await renderContextTone();
+    if (status) status.textContent = out && out.ok ? "Context refreshed" : "Refresh ran with warnings";
+  }} catch (e) {{
+    if (status) status.textContent = "Refresh failed";
+  }} finally {{
+    if (btn) btn.disabled = false;
+  }}
 }}
 
 let historySeriesEnabled = new Set([
@@ -12792,6 +12819,10 @@ async function renderNewsPoll() {{
   }}).join("");
   target.innerHTML = `
     <div class="grid">
+      <div class="card span-12">
+        <div class="title">Live News Polls</div>
+        <div class="muted">Currents due toggles true only when its cooldown window is due or forced.</div>
+      </div>
       <div class="card span-4"><div class="title">Candidates</div><div class="kpi">${{Object.values(groups).reduce((n,arr)=>n+(arr||[]).length,0)}}</div></div>
       <div class="card span-4"><div class="title">Currents Due</div><div class="kpi">${{String(Boolean(src.currents_due))}}</div></div>
       <div class="card span-4"><div class="title">Currents Added</div><div class="kpi">${{Number(src.currents_added || 0)}}</div></div>
