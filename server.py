@@ -4321,7 +4321,12 @@ def get_active_accurate_feedback_count(scope, category, memory_key, lookback_day
         )
     row = cur.fetchone()
     conn.close()
-    return int((row or {}).get("c") or 0)
+    if not row:
+        return 0
+    try:
+        return int(row["c"] or 0)
+    except Exception:
+        return 0
 
 
 def get_active_accurate_feedback_counts_map(scope="long_term", lookback_days=90):
