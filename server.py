@@ -1,5 +1,5 @@
 from openai import OpenAI
-from flask import Flask, request, has_request_context, make_response, redirect
+from flask import Flask, request, has_request_context, make_response, redirect, send_from_directory
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.request_validator import RequestValidator
 import os
@@ -47,6 +47,7 @@ app = Flask(__name__)
 
 MY_NUMBER = os.environ.get("MY_NUMBER")
 DB_PATH = os.environ.get("DB_PATH", "jeeves.db")
+ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
 NYT_API_KEY = os.environ.get("NYT_API_KEY")
 MASSIVE_API_KEY = os.environ.get("MASSIVE_API_KEY")
@@ -11789,6 +11790,14 @@ def debug_context_sleep_history():
     )
 
 
+@app.route("/brainstem/assets/<path:filename>", methods=["GET"])
+def brainstem_assets(filename):
+    safe_name = os.path.basename(filename or "")
+    if not safe_name:
+        return app.response_class(response="Not found", status=404, mimetype="text/plain")
+    return send_from_directory(ASSETS_DIR, safe_name)
+
+
 @app.route("/brainstem", methods=["GET", "POST"])
 def brainstem_home():
     if (request.args.get("logout") or "").strip() == "1":
@@ -11818,25 +11827,27 @@ def brainstem_home():
       inset: 0;
       pointer-events: none;
       z-index: 0;
-      background-repeat: repeat;
-      animation: loginTwinkle 6.4s ease-in-out infinite alternate;
     }
     body::before {
-      background-image:
-        radial-gradient(circle, rgba(255,255,255,0.95) 0 0.7px, transparent 1.1px),
-        radial-gradient(circle, rgba(255,255,255,0.75) 0 0.6px, transparent 1.0px);
-      background-size: 42px 42px, 58px 58px;
-      background-position: 0 0, 17px 23px;
-      opacity: 0.58;
+      inset: -18vh -18vw;
+      background-image: url('/brainstem/assets/login-bg.avif');
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+      transform: rotate(90deg) scale(1.18);
+      transform-origin: center;
+      opacity: 0.80;
+      filter: brightness(0.42) contrast(1.02);
     }
     body::after {
       background-image:
-        radial-gradient(circle, rgba(255,255,255,0.88) 0 0.7px, transparent 1.1px),
-        radial-gradient(circle, rgba(255,255,255,0.70) 0 0.5px, transparent 0.95px);
-      background-size: 64px 64px, 78px 78px;
-      background-position: 11px 7px, 29px 41px;
-      opacity: 0.34;
-      animation-duration: 4.9s;
+        radial-gradient(circle, rgba(255,255,255,0.95) 0 0.7px, transparent 1.1px),
+        radial-gradient(circle, rgba(255,255,255,0.80) 0 0.55px, transparent 0.95px),
+        radial-gradient(circle, rgba(255,255,255,0.72) 0 0.45px, transparent 0.9px);
+      background-size: 36px 36px, 54px 54px, 74px 74px;
+      background-position: 0 0, 17px 23px, 31px 9px;
+      opacity: 0.46;
+      animation: loginTwinkle 5.8s ease-in-out infinite alternate;
     }
     @keyframes loginTwinkle {
       0% { opacity: 0.28; }
@@ -12656,7 +12667,7 @@ function drawContext3D(canvas, point) {{
       return seed / 4294967296;
     }}
     const out = [];
-    for (let i = 0; i < 860; i++) {{
+    for (let i = 0; i < 1380; i++) {{
       const u = (rnd() * 2) - 1;
       const theta = rnd() * Math.PI * 2;
       const ring = Math.sqrt(Math.max(0, 1 - (u * u)));
@@ -12667,8 +12678,8 @@ function drawContext3D(canvas, point) {{
         z: 0.5 + (radius * ring * Math.sin(theta)),
         tw: rnd() * Math.PI * 2,
         tws: 0.8 + (rnd() * 1.6),
-        base: 0.18 + (rnd() * 0.32),
-        size: 0.18 + (rnd() * 0.28),
+        base: 0.28 + (rnd() * 0.36),
+        size: 0.09 + (rnd() * 0.14),
       }});
     }}
     return out;
@@ -12729,7 +12740,7 @@ function drawContext3D(canvas, point) {{
         y: rect.height / 2 - (t3.yz * scale * 1.4),
       }};
       if (p.x < -8 || p.x > rect.width + 8 || p.y < -8 || p.y > rect.height + 8) continue;
-      const alpha = Math.max(0.10, Math.min(0.66, s.base + (0.18 * Math.sin((t * s.tws) + s.tw))));
+      const alpha = Math.max(0.20, Math.min(0.88, s.base + (0.24 * Math.sin((t * s.tws) + s.tw))));
       ctx.fillStyle = `rgba(255,255,255,${{alpha.toFixed(3)}})`;
       ctx.beginPath();
       ctx.arc(p.x, p.y, s.size, 0, Math.PI * 2);
