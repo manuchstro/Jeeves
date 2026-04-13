@@ -11978,6 +11978,7 @@ def brainstem_home():
     .sidebar {{
       width: 250px; flex: 0 0 250px; border-right: 2px solid var(--outline); background: #0a0a0a;
       padding: 14px 10px; transition: transform 220ms ease, opacity 220ms ease; overflow-y:auto; z-index: 25;
+      position: sticky; top: 0; align-self: flex-start; height: 100vh;
     }}
     .sidebar {{
       background:
