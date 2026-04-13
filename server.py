@@ -80,6 +80,7 @@ BRAINSTEM_PASSCODE = (os.environ.get("BRAINSTEM_PASSCODE") or "").strip()
 BRAINSTEM_SESSION_COOKIE = "brainstem_session"
 BRAINSTEM_SESSION_HOURS = max(1, int(os.environ.get("BRAINSTEM_SESSION_HOURS", "24")))
 JOURNAL_EXPORT_PATH = (os.environ.get("JOURNAL_EXPORT_PATH") or "/Users/manustromberg/Documents/Jeeves Journal Export").strip()
+WHITEPAPER_PATH = (os.environ.get("WHITEPAPER_PATH") or os.path.join(ASSETS_DIR, "JEEVES_WHITEPAPER.md")).strip()
 CALENDAR_CONTEXT_URL = os.environ.get("CALENDAR_CONTEXT_URL", "").strip()
 CALENDAR_CONTEXT_BEARER = os.environ.get("CALENDAR_CONTEXT_BEARER", "").strip()
 SLEEP_CONTEXT_URL = os.environ.get("SLEEP_CONTEXT_URL", "").strip()
@@ -4598,6 +4599,7 @@ def get_operator_links_map():
             "memory_view": link("/debug/memory/view"),
             "context_debug": link("/debug/context"),
             "context_refresh": link("/tasks/context-refresh"),
+            "context_refresh_compact": link("/tasks/context-refresh?compact=1"),
             "inbox_refresh": link("/debug/context/inbox/refresh"),
             "calendar_refresh": link("/debug/context/calendar/refresh"),
             "sleep_refresh": link("/debug/context/sleep/refresh"),
@@ -4647,6 +4649,7 @@ def build_command_key_reply():
         f"memory debug view: {memory_context.get('memory_view', '')}",
         f"context debug: {memory_context.get('context_debug', '')}",
         f"context refresh (all): {memory_context.get('context_refresh', '')}",
+        f"context refresh (compact): {memory_context.get('context_refresh_compact', '')}",
         f"inbox refresh: {memory_context.get('inbox_refresh', '')}",
         f"calendar refresh: {memory_context.get('calendar_refresh', '')}",
         f"sleep refresh: {memory_context.get('sleep_refresh', '')}",
@@ -4655,6 +4658,31 @@ def build_command_key_reply():
         f"daily brief debug: {memory_context.get('daily_brief_debug', '')}",
         f"gmail debug: {memory_context.get('gmail_debug', '')}",
     ])
+
+
+def load_whitepaper_text():
+    fallback = (
+        "Jeeves whitepaper source missing.\n\n"
+        f"Expected file: {WHITEPAPER_PATH}\n"
+    )
+    try:
+        path = os.path.abspath(os.path.expanduser(WHITEPAPER_PATH))
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        stat = os.stat(path)
+        return {
+            "ok": True,
+            "path": path,
+            "updated_at_epoch": int(stat.st_mtime),
+            "text": text,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "path": os.path.abspath(os.path.expanduser(WHITEPAPER_PATH)),
+            "error_type": type(exc).__name__,
+            "text": fallback,
+        }
 
 
 def get_tone_signal_snapshots(range_key="24h"):
@@ -12388,6 +12416,13 @@ def brainstem_home():
     .landing-orb {{ display:none; }}
     .landing-small {{ margin-top:18px; color:#b6aa8d; font-size: 0.88rem; }}
     .query-scroll {{ max-height: 220px; overflow: auto; border: 2px solid var(--outline); border-radius: 10px; }}
+    .whitepaper-doc {{
+      white-space: pre-wrap;
+      font-size: 0.94rem;
+      line-height: 1.62;
+      color: #f3e5c7;
+      letter-spacing: 0.08px;
+    }}
     .topbar-right a.tab-btn {{ text-decoration: none; }}
     .topbar-right a.tab-btn:hover {{ text-decoration: none; }}
     .expandable summary {{ cursor:pointer; font-weight:700; transition: color 120ms ease, letter-spacing 120ms ease; }}
@@ -13710,11 +13745,18 @@ async function setupUsageActivity(rangeKey) {{
 
 async function renderWhitepaper() {{
   const target = document.getElementById("section-whitepaper");
+  const data = await api("/brainstem/api/whitepaper");
+  const text = String((data && data.text) || "");
+  const updated = data && data.updated_at ? fmtTs(data.updated_at) : "";
   target.innerHTML = `
     <div class="grid">
       <div class="card span-12">
-        <div class="title">Whitepaper (Scaffold)</div>
-        <div class="muted">Blank for now. This page will include search, section navigation, and project narrative.</div>
+        <div class="title">Jeeves Whitepaper</div>
+        <div class="muted">Static document loaded from source file. Non-interactive by design.</div>
+        <div class="muted" style="margin-top:4px;">Source: ${{esc((data && data.path) || "")}}${{updated ? " • updated: " + esc(updated) : ""}}</div>
+      </div>
+      <div class="card span-12">
+        <div class="whitepaper-doc">${{esc(text)}}</div>
       </div>
     </div>
   `;
@@ -14114,15 +14156,23 @@ def brainstem_api_whitepaper():
     denied = require_brainstem_access()
     if denied:
         return denied
+    loaded = load_whitepaper_text()
+    payload = {
+        "ok": bool(loaded.get("ok")),
+        "path": loaded.get("path"),
+        "updated_at": datetime.fromtimestamp(loaded.get("updated_at_epoch"), tz=LOCAL_TZ).isoformat() if loaded.get("updated_at_epoch") else None,
+        "text": loaded.get("text") or "",
+    }
+    if not loaded.get("ok"):
+        payload["error_type"] = loaded.get("error_type")
     return app.response_class(
-        response=json.dumps({"ok": True, "status": "blank_scaffold", "sections": []}, indent=2),
-        status=200,
+        response=json.dumps(payload, indent=2),
+        status=200 if payload.get("ok") else 500,
         mimetype="application/json",
     )
 
 
-@app.route("/tasks/context-refresh", methods=["GET", "POST"])
-def task_context_refresh():
+def _run_context_refresh(compact_mode=False):
     denied = require_internal_api_key()
     if denied:
         return denied
@@ -14163,6 +14213,7 @@ def task_context_refresh():
     record_tone_snapshot(snapshot, tone_vector)
     memory_count = record_memory_count_snapshot()
     ok = len(failures) == 0
+    compact_mode = compact_mode or (request.args.get("compact") or request.form.get("compact") or "").strip() == "1"
     response_payload = {
         "ok": ok,
         "local_date": local_date,
@@ -14173,15 +14224,34 @@ def task_context_refresh():
         "failures": failures,
         "calendar_age_minutes": round(calendar_age_minutes, 1) if calendar_age_minutes is not None else None,
         "memory_count": memory_count,
-        "context_snapshot": snapshot,
-        "tone_vector": tone_vector,
     }
+    if not compact_mode:
+        response_payload["context_snapshot"] = snapshot
+        response_payload["tone_vector"] = tone_vector
+    else:
+        response_payload["compact"] = True
+        response_payload["summary"] = {
+            "calendar_busy": ((snapshot.get("calendar") or {}).get("features") or {}).get("busy_score"),
+            "inbox_busy": ((snapshot.get("inbox") or {}).get("features") or {}).get("busy_score"),
+            "restedness": ((snapshot.get("sleep") or {}).get("features") or {}).get("restedness_score"),
+            "tone_style": tone_vector.get("style"),
+        }
     status_code = 200 if (ok or not wants_strict_task_status()) else 500
     return app.response_class(
         response=json.dumps(response_payload, indent=2),
         status=status_code,
         mimetype="application/json",
     )
+
+
+@app.route("/tasks/context-refresh", methods=["GET", "POST"])
+def task_context_refresh():
+    return _run_context_refresh(compact_mode=False)
+
+
+@app.route("/tasks/context-refresh-lite", methods=["GET", "POST"])
+def task_context_refresh_lite():
+    return _run_context_refresh(compact_mode=True)
 
 
 @app.route("/tasks/poll", methods=["GET", "POST"])

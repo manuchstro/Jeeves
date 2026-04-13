@@ -12,6 +12,15 @@ Last updated: 2026-04-12
   - repeat this loop until zero known bugs/UI fixes remain
 
 ## Recently Deployed (Completed)
+- ✅ Brainstem whitepaper implementation (static, editable source)
+  - Whitepaper tab now loads full text from one file: `/Users/manustromberg/Documents/Jeeves/assets/JEEVES_WHITEPAPER.md`
+  - replaced scaffold endpoint with real document delivery at `/brainstem/api/whitepaper`
+  - rendering is non-interactive text by design (single static document view)
+- ✅ Context-refresh cron transport hardening
+  - added compact refresh mode: `/tasks/context-refresh?compact=1`
+  - added lite alias: `/tasks/context-refresh-lite`
+  - compact mode omits heavy snapshot blocks and returns scheduler-safe summary payload
+  - key links now include compact context-refresh endpoint
 - ✅ Automatic journal export on ingest (no AI in export path)
   - every ingested journal response is now appended verbatim to a single local file (`Jeeves Journal Export`)
   - each exported block includes a local timestamp (`America/Los_Angeles`)
