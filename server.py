@@ -784,6 +784,12 @@ def init_db():
         "ALTER TABLE memory_observations ADD COLUMN subtype TEXT",
         "ALTER TABLE memory_observations ADD COLUMN stability TEXT DEFAULT 'situational'",
         "ALTER TABLE memory_observations ADD COLUMN source_trust TEXT DEFAULT 'inferred'",
+        "ALTER TABLE memory_feedback_queue ADD COLUMN undone_at DATETIME",
+        "ALTER TABLE memory_feedback_history ADD COLUMN previous_confidence REAL",
+        "ALTER TABLE memory_feedback_history ADD COLUMN previous_stability TEXT",
+        "ALTER TABLE memory_feedback_history ADD COLUMN new_confidence REAL",
+        "ALTER TABLE memory_feedback_history ADD COLUMN new_stability TEXT",
+        "ALTER TABLE memory_feedback_history ADD COLUMN undone_at DATETIME",
     ]:
         try:
             cur.execute(statement)
@@ -4117,38 +4123,63 @@ def undo_memory_feedback_forget(scope, category, memory_key):
 
 
 def record_memory_feedback_history(scope, category, memory_key, action, previous_confidence=None, previous_stability=None, new_confidence=None, new_stability=None):
-    execute_write_with_retry(
-        """
-        INSERT INTO memory_feedback_history (
-            scope, category, memory_key, action,
-            previous_confidence, previous_stability, new_confidence, new_stability
+    try:
+        execute_write_with_retry(
+            """
+            INSERT INTO memory_feedback_history (
+                scope, category, memory_key, action,
+                previous_confidence, previous_stability, new_confidence, new_stability
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                scope, category, memory_key, action,
+                previous_confidence, previous_stability, new_confidence, new_stability,
+            ),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            scope, category, memory_key, action,
-            previous_confidence, previous_stability, new_confidence, new_stability,
-        ),
-    )
+    except sqlite3.OperationalError:
+        # Backward-compat fallback for older schemas.
+        execute_write_with_retry(
+            """
+            INSERT INTO memory_feedback_history (scope, category, memory_key, action, previous_confidence, new_confidence)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (scope, category, memory_key, action, previous_confidence, new_confidence),
+        )
 
 
 def undo_last_accurate_feedback(scope, category, memory_key):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT id, previous_confidence, previous_stability, new_confidence, new_stability
-        FROM memory_feedback_history
-        WHERE scope = ?
-          AND category = ?
-          AND memory_key = ?
-          AND action = 'accurate'
-          AND undone_at IS NULL
-        ORDER BY id DESC
-        LIMIT 1
-        """,
-        (scope, category, memory_key),
-    )
+    try:
+        cur.execute(
+            """
+            SELECT id, previous_confidence, previous_stability, new_confidence, new_stability
+            FROM memory_feedback_history
+            WHERE scope = ?
+              AND category = ?
+              AND memory_key = ?
+              AND action = 'accurate'
+              AND undone_at IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (scope, category, memory_key),
+        )
+    except sqlite3.OperationalError:
+        cur.execute(
+            """
+            SELECT id, previous_confidence, NULL AS previous_stability, new_confidence, NULL AS new_stability
+            FROM memory_feedback_history
+            WHERE scope = ?
+              AND category = ?
+              AND memory_key = ?
+              AND action = 'accurate'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (scope, category, memory_key),
+        )
     row = cur.fetchone()
     if not row:
         conn.close()
@@ -4166,14 +4197,17 @@ def undo_last_accurate_feedback(scope, category, memory_key):
         """,
         (prev_conf, prev_stability, scope, category, memory_key),
     )
-    cur.execute(
-        """
-        UPDATE memory_feedback_history
-        SET undone_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-        """,
-        (row["id"],),
-    )
+    try:
+        cur.execute(
+            """
+            UPDATE memory_feedback_history
+            SET undone_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (row["id"],),
+        )
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
 
@@ -4235,19 +4269,33 @@ def _stability_slowdown_multiplier(stability):
 def get_active_accurate_feedback_count(scope, category, memory_key, lookback_days=90):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT COUNT(*) AS c
-        FROM memory_feedback_history
-        WHERE scope = ?
-          AND category = ?
-          AND memory_key = ?
-          AND action = 'accurate'
-          AND undone_at IS NULL
-          AND datetime(created_at) >= datetime('now', ?)
-        """,
-        (scope, category, memory_key, f"-{max(1, int(lookback_days))} days"),
-    )
+    try:
+        cur.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM memory_feedback_history
+            WHERE scope = ?
+              AND category = ?
+              AND memory_key = ?
+              AND action = 'accurate'
+              AND undone_at IS NULL
+              AND datetime(created_at) >= datetime('now', ?)
+            """,
+            (scope, category, memory_key, f"-{max(1, int(lookback_days))} days"),
+        )
+    except sqlite3.OperationalError:
+        # Backward-compat fallback for older schemas without undo/stability columns.
+        cur.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM memory_feedback_history
+            WHERE scope = ?
+              AND category = ?
+              AND memory_key = ?
+              AND action = 'accurate'
+            """,
+            (scope, category, memory_key),
+        )
     row = cur.fetchone()
     conn.close()
     return int((row or {}).get("c") or 0)
@@ -12025,15 +12073,8 @@ def brainstem_home():
       overflow: hidden;
       border-radius: 16px;
     }}
-    .landing-wrap::after {{
-      content: "";
-      position: absolute;
-      inset: 0;
-      background: linear-gradient(180deg, rgba(0,0,0,0.22) 0%, rgba(0,0,0,0.45) 100%);
-      pointer-events: none;
-      z-index: 0;
-    }}
-    .landing-card {{ position:relative; z-index:1; width:min(860px, 98%); min-height:320px; border-radius:16px; padding:20px; overflow:hidden; display:flex; align-items:center; justify-content:center; }}
+    .landing-wrap::after {{ content: none; }}
+    .landing-card {{ position:relative; z-index:1; width:min(860px, 98%); min-height:320px; border-radius:16px; padding:20px; overflow:hidden; display:flex; align-items:center; justify-content:center; background: transparent; }}
     .landing-copy {{
       max-width: 660px;
       width: min(660px, 96%);
@@ -13458,47 +13499,62 @@ def brainstem_api_memory_feedback():
     if not all([scope, category, memory_key]) or action not in {"accurate", "inaccurate", "undo_inaccurate"}:
         return app.response_class(response=json.dumps({"ok": False, "reason": "invalid_payload"}, indent=2), status=400, mimetype="application/json")
 
-    result = {"ok": True, "action": action}
-    if action == "accurate":
-        adjusted = reinforce_memory_from_feedback(scope, category, memory_key, source_text="brainstem_feedback_accurate")
-        if not adjusted:
-            return app.response_class(
-                response=json.dumps({"ok": False, "reason": "memory_not_found"}, indent=2),
-                status=404,
-                mimetype="application/json",
+    try:
+        result = {"ok": True, "action": action}
+        if action == "accurate":
+            adjusted = reinforce_memory_from_feedback(scope, category, memory_key, source_text="brainstem_feedback_accurate")
+            if not adjusted:
+                return app.response_class(
+                    response=json.dumps({"ok": False, "reason": "memory_not_found"}, indent=2),
+                    status=404,
+                    mimetype="application/json",
+                )
+            next_reinforcement_count = int(adjusted.get("reinforcement_count") or 1)
+            stability_multiplier = _stability_slowdown_multiplier(adjusted.get("new_stability") or "situational")
+            reinforcement_multiplier = _reinforcement_slowdown_multiplier(next_reinforcement_count)
+            slowdown_pct = round((1.0 - (stability_multiplier * reinforcement_multiplier)) * 100.0, 1)
+            record_memory_feedback_history(
+                scope,
+                category,
+                memory_key,
+                action="accurate",
+                previous_confidence=adjusted.get("old_confidence"),
+                previous_stability=adjusted.get("old_stability"),
+                new_confidence=adjusted.get("new_confidence"),
+                new_stability=adjusted.get("new_stability"),
             )
-        next_reinforcement_count = int(adjusted.get("reinforcement_count") or 1)
-        stability_multiplier = _stability_slowdown_multiplier(adjusted.get("new_stability") or "situational")
-        reinforcement_multiplier = _reinforcement_slowdown_multiplier(next_reinforcement_count)
-        slowdown_pct = round((1.0 - (stability_multiplier * reinforcement_multiplier)) * 100.0, 1)
-        record_memory_feedback_history(
-            scope,
-            category,
-            memory_key,
-            action="accurate",
-            previous_confidence=adjusted.get("old_confidence"),
-            previous_stability=adjusted.get("old_stability"),
-            new_confidence=adjusted.get("new_confidence"),
-            new_stability=adjusted.get("new_stability"),
-        )
-        result["reinforcement_count"] = next_reinforcement_count
-        result["decay_slowdown_percent"] = slowdown_pct
-        result["adjusted"] = adjusted
-    elif action == "inaccurate":
-        queued = queue_memory_feedback_forget(scope, category, memory_key, delay_minutes=60)
-        result["execute_after"] = queued.get("execute_after")
-        result["already_pending"] = bool(queued.get("already_pending"))
-    else:
-        undone_forget = undo_memory_feedback_forget(scope, category, memory_key)
-        if undone_forget > 0:
-            result["undo_target"] = "queued_forget"
-            result["undone_count"] = undone_forget
+            result["reinforcement_count"] = next_reinforcement_count
+            result["decay_slowdown_percent"] = slowdown_pct
+            result["adjusted"] = adjusted
+        elif action == "inaccurate":
+            queued = queue_memory_feedback_forget(scope, category, memory_key, delay_minutes=60)
+            result["execute_after"] = queued.get("execute_after")
+            result["already_pending"] = bool(queued.get("already_pending"))
         else:
-            result["undo_target"] = "accurate_reinforcement"
-            result["undo_result"] = undo_last_accurate_feedback(scope, category, memory_key)
+            undone_forget = undo_memory_feedback_forget(scope, category, memory_key)
+            if undone_forget > 0:
+                result["undo_target"] = "queued_forget"
+                result["undone_count"] = undone_forget
+            else:
+                result["undo_target"] = "accurate_reinforcement"
+                result["undo_result"] = undo_last_accurate_feedback(scope, category, memory_key)
 
-    audit_brainstem_action("memory_feedback", f"{scope}:{category}:{memory_key}", payload)
-    return app.response_class(response=json.dumps(result, indent=2), status=200, mimetype="application/json")
+        audit_brainstem_action("memory_feedback", f"{scope}:{category}:{memory_key}", payload)
+        return app.response_class(response=json.dumps(result, indent=2), status=200, mimetype="application/json")
+    except Exception as exc:
+        return app.response_class(
+            response=json.dumps(
+                {
+                    "ok": False,
+                    "reason": "memory_feedback_failed",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+                indent=2,
+            ),
+            status=500,
+            mimetype="application/json",
+        )
 
 
 @app.route("/brainstem/api/context-tone", methods=["GET"])
