@@ -790,6 +790,11 @@ def init_db():
         "ALTER TABLE memory_feedback_history ADD COLUMN new_confidence REAL",
         "ALTER TABLE memory_feedback_history ADD COLUMN new_stability TEXT",
         "ALTER TABLE memory_feedback_history ADD COLUMN undone_at DATETIME",
+        "ALTER TABLE memory_provenance_events ADD COLUMN source_trust TEXT DEFAULT 'inferred'",
+        "ALTER TABLE memory_provenance_events ADD COLUMN confidence REAL",
+        "ALTER TABLE memory_provenance_events ADD COLUMN stability TEXT",
+        "ALTER TABLE memory_provenance_events ADD COLUMN old_value TEXT",
+        "ALTER TABLE memory_provenance_events ADD COLUMN new_value TEXT",
     ]:
         try:
             cur.execute(statement)
@@ -2674,27 +2679,45 @@ def add_memory_provenance_event(scope, category, memory_key, action, source_text
         if cur.fetchone():
             conn.close()
             return
-    cur.execute(
-        """
-        INSERT INTO memory_provenance_events (
-            scope, category, memory_key, action, source_text, source_trust,
-            confidence, stability, old_value, new_value
+    try:
+        cur.execute(
+            """
+            INSERT INTO memory_provenance_events (
+                scope, category, memory_key, action, source_text, source_trust,
+                confidence, stability, old_value, new_value
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                scope,
+                category,
+                memory_key,
+                action,
+                source_text or "",
+                source_trust or "inferred",
+                confidence,
+                stability,
+                old_value,
+                new_value,
+            ),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            scope,
-            category,
-            memory_key,
-            action,
-            source_text or "",
-            source_trust or "inferred",
-            confidence,
-            stability,
-            old_value,
-            new_value,
-        ),
-    )
+    except sqlite3.OperationalError:
+        # Backward-compat fallback for older schemas that only had base columns.
+        cur.execute(
+            """
+            INSERT INTO memory_provenance_events (
+                scope, category, memory_key, action, source_text
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                scope,
+                category,
+                memory_key,
+                action,
+                source_text or "",
+            ),
+        )
     conn.commit()
     conn.close()
 
@@ -12727,7 +12750,9 @@ async function memoryFeedback(scope, category, memory_key, action) {{
       body: JSON.stringify({{scope, category, memory_key, action}})
     }}).then((res) => {{
       if (!res || res.ok === false) {{
-        const why = (res && (res.reason || res.error || res.raw)) ? String(res.reason || res.error || res.raw) : "unknown error";
+        const why = res
+          ? [res.reason, res.error_type, res.error, res.raw].filter(Boolean).join(" | ")
+          : "unknown error";
         throw new Error(why);
       }}
     }});
