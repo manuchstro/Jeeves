@@ -11794,11 +11794,23 @@ def brainstem_home():
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Brainstem Login</title>
   <style>
-    body { margin:0; font-family: Georgia, "Times New Roman", serif; background:#080808; color:#ffffff; display:flex; min-height:100vh; align-items:center; justify-content:center; }
-    .card { width:min(420px,92vw); border:1px solid #2a2a2a; border-radius:14px; background:#111111; padding:18px; display:flex; flex-direction:column; align-items:center; }
+    body {
+      margin:0; font-family: Georgia, "Times New Roman", serif; color:#ffffff; display:flex; min-height:100vh; align-items:center; justify-content:center;
+      background:
+        radial-gradient(circle at 12% 18%, rgba(255,255,255,0.55) 0 1px, transparent 1.5px),
+        radial-gradient(circle at 84% 26%, rgba(255,255,255,0.5) 0 1px, transparent 1.4px),
+        radial-gradient(circle at 34% 74%, rgba(255,255,255,0.42) 0 1px, transparent 1.6px),
+        radial-gradient(circle at 68% 82%, rgba(255,255,255,0.48) 0 1px, transparent 1.4px),
+        radial-gradient(circle at 20% 42%, rgba(255,255,255,0.35) 0 1px, transparent 1.7px),
+        radial-gradient(circle at 76% 58%, rgba(255,255,255,0.38) 0 1px, transparent 1.8px),
+        #000000;
+      background-size: 240px 240px, 260px 260px, 280px 280px, 300px 300px, 320px 320px, 340px 340px, auto;
+      background-repeat: repeat;
+    }
+    .card { width:min(420px,92vw); border:1px solid #3a3a3a; border-radius:14px; background:#000000; padding:18px; display:flex; flex-direction:column; align-items:center; box-shadow: 0 10px 28px rgba(0,0,0,0.45); }
     .title { font-size:1.05rem; font-weight:600; margin-bottom:6px; text-align:center; }
-    .muted { color:#a8a8a8; font-size:.86rem; margin-bottom:10px; text-align:center; }
-    input { display:block; width:100%; border:1px solid #2f2f2f; border-radius:10px; padding:11px; background:#000000; color:#ffffff; text-align:center; }
+    .muted { color:#d9d9d9; font-size:.86rem; margin-bottom:10px; text-align:center; }
+    input { display:block; width:100%; border:1px solid #4a4a4a; border-radius:10px; padding:11px; background:#000000; color:#ffffff; text-align:center; }
     button { margin-top:10px; width:100%; border:1px solid #333333; border-radius:10px; padding:10px; background:#171717; color:#f7f7f7; font-weight:500; cursor:pointer; }
   </style>
 </head>
@@ -11948,6 +11960,7 @@ def brainstem_home():
     }}
     .term-box {{ border:2px solid var(--outline); border-radius:10px; padding:8px; background: linear-gradient(to bottom right, var(--panel) 0%, var(--panel-deep) 100%); }}
     .chart-wrap {{ height: 320px; border:2px solid var(--outline); border-radius:10px; background: linear-gradient(to bottom right, #2b362f 0%, #202822 100%); position:relative; }}
+    .chart-wrap.spacefield {{ background: linear-gradient(160deg, #08100c 0%, #050907 68%, #030504 100%); }}
     .chart-tooltip {{
       position:fixed; pointer-events:none; z-index:99999;
       background: rgba(7,10,8,0.92); color:#f6e4bf; border:1px solid #5b6c5f;
@@ -12273,7 +12286,7 @@ async function renderOverview() {{
       <div class="card span-8">
         <div class="title">3D Context Vector</div>
         <div class="muted">G = Gmail load, C = Calendar load, S = Sleep/restedness.</div>
-        <div class="chart-wrap"><canvas id="ctx3d-overview"></canvas><div class="axis-legend">G = Gmail Inbox<br>C = Google Calendar<br>S = Sleep</div></div>
+        <div class="chart-wrap spacefield"><canvas id="ctx3d-overview"></canvas><div class="axis-legend">G = Gmail Inbox<br>C = Google Calendar<br>S = Sleep</div></div>
       </div>
       <div class="card span-4">
         <div class="title">Tone Matrix Live Summary</div>
@@ -12584,6 +12597,29 @@ function drawContext3D(canvas, point) {{
   const state = {{yaw:-0.6,pitch:0.5,drag:false,lastX:0,lastY:0}};
   const ideal = {{x:0, y:1, z:0}}; // emptiest inbox, high sleep, free calendar
   const current = point || {{x:0.5,y:0.5,z:0.5}};
+  const stars = (() => {{
+    let seed = 1337;
+    function rnd() {{
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed / 4294967296;
+    }}
+    const out = [];
+    for (let i = 0; i < 220; i++) {{
+      const u = (rnd() * 2) - 1;
+      const theta = rnd() * Math.PI * 2;
+      const ring = Math.sqrt(Math.max(0, 1 - (u * u)));
+      const radius = 1.5 + (rnd() * 0.35);
+      out.push({{
+        x: 0.5 + (radius * ring * Math.cos(theta)),
+        y: 0.5 + (radius * u),
+        z: 0.5 + (radius * ring * Math.sin(theta)),
+        tw: rnd() * Math.PI * 2,
+        base: 0.14 + (rnd() * 0.36),
+        size: 0.7 + (rnd() * 1.0),
+      }});
+    }}
+    return out;
+  }})();
 
   function project(p, w, h) {{
     const cy = Math.cos(state.yaw), sy = Math.sin(state.yaw);
@@ -12618,6 +12654,18 @@ function drawContext3D(canvas, point) {{
     canvas.height = rect.height * devicePixelRatio;
     ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
     ctx.clearRect(0,0,rect.width,rect.height);
+    ctx.fillStyle = "#060d09";
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    const t = Date.now() / 1000;
+    for (const s of stars) {{
+      const p = project(s, rect.width, rect.height);
+      if (p.x < -8 || p.x > rect.width + 8 || p.y < -8 || p.y > rect.height + 8) continue;
+      const alpha = Math.max(0.08, Math.min(0.62, s.base + (0.14 * Math.sin((t * 1.1) + s.tw))));
+      ctx.fillStyle = `rgba(244,248,255,${{alpha.toFixed(3)}})`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, s.size, 0, Math.PI * 2);
+      ctx.fill();
+    }}
     const verts = [
       {{x:0,y:0,z:0}},{{x:1,y:0,z:0}},{{x:1,y:1,z:0}},{{x:0,y:1,z:0}},
       {{x:0,y:0,z:1}},{{x:1,y:0,z:1}},{{x:1,y:1,z:1}},{{x:0,y:1,z:1}},
@@ -12648,17 +12696,40 @@ function drawContext3D(canvas, point) {{
     labelAt(project({{x:0.5,y:0,z:0.5}},rect.width,rect.height), "-S");
   }}
 
-  canvas.onpointerdown = e => {{ state.drag=true; state.lastX=e.clientX; state.lastY=e.clientY; }};
-  window.addEventListener("pointerup", ()=>state.drag=false);
-  window.addEventListener("pointermove", e => {{
+  canvas.onpointerdown = e => {{
+    state.drag = true;
+    state.lastX = e.clientX;
+    state.lastY = e.clientY;
+    if (canvas.setPointerCapture) canvas.setPointerCapture(e.pointerId);
+  }};
+  canvas.onpointermove = e => {{
     if (!state.drag) return;
-    const dx = e.clientX - state.lastX, dy = e.clientY - state.lastY;
-    state.lastX = e.clientX; state.lastY = e.clientY;
-    state.yaw += dx*0.01; state.pitch += dy*0.01;
+    const dx = e.clientX - state.lastX;
+    const dy = e.clientY - state.lastY;
+    state.lastX = e.clientX;
+    state.lastY = e.clientY;
+    state.yaw += dx * 0.01;
+    state.pitch += dy * 0.01;
     render();
-  }});
+  }};
+  canvas.onpointerup = () => {{ state.drag = false; }};
+  canvas.onlostpointercapture = () => {{ state.drag = false; }};
+  if (canvas.__ctx3dFlickerTimer) clearInterval(canvas.__ctx3dFlickerTimer);
+  canvas.__ctx3dFlickerTimer = setInterval(() => {{
+    if (!document.body.contains(canvas)) {{
+      clearInterval(canvas.__ctx3dFlickerTimer);
+      canvas.__ctx3dFlickerTimer = null;
+      return;
+    }}
+    render();
+  }}, 160);
   render();
-  window.addEventListener("resize", render);
+  canvas.__ctx3dRender = render;
+  setTimeout(() => {{ if (canvas.__ctx3dRender) canvas.__ctx3dRender(); }}, 60);
+  if (!canvas.__ctx3dResizeBound) {{
+    canvas.__ctx3dResizeBound = true;
+    window.addEventListener("resize", () => {{ if (canvas.__ctx3dRender) canvas.__ctx3dRender(); }});
+  }}
 }}
 
 async function renderContextTone() {{
@@ -12685,7 +12756,7 @@ async function renderContextTone() {{
           <button class="btn ghost" id="ctx-refresh-btn" onclick="refreshContextToneNow()">Refresh Context Now</button>
           <span class="muted" id="ctx-refresh-status"></span>
         </div>
-        <div class="chart-wrap">
+        <div class="chart-wrap spacefield">
           <canvas id="ctx3d"></canvas>
           <div class="axis-legend">G = Gmail Inbox<br>C = Google Calendar<br>S = Sleep</div>
         </div>
