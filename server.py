@@ -11808,18 +11808,45 @@ def brainstem_home():
   <style>
     body {
       margin:0; font-family: Georgia, "Times New Roman", serif; color:#ffffff; display:flex; min-height:100vh; align-items:center; justify-content:center;
-      background:
-        radial-gradient(circle at 12% 18%, rgba(255,255,255,0.55) 0 1px, transparent 1.5px),
-        radial-gradient(circle at 84% 26%, rgba(255,255,255,0.5) 0 1px, transparent 1.4px),
-        radial-gradient(circle at 34% 74%, rgba(255,255,255,0.42) 0 1px, transparent 1.6px),
-        radial-gradient(circle at 68% 82%, rgba(255,255,255,0.48) 0 1px, transparent 1.4px),
-        radial-gradient(circle at 20% 42%, rgba(255,255,255,0.35) 0 1px, transparent 1.7px),
-        radial-gradient(circle at 76% 58%, rgba(255,255,255,0.38) 0 1px, transparent 1.8px),
-        #000000;
-      background-size: 240px 240px, 260px 260px, 280px 280px, 300px 300px, 320px 320px, 340px 340px, auto;
+      background: #000000;
+      position: relative;
+      overflow: hidden;
+    }
+    body::before, body::after {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
       background-repeat: repeat;
+      animation: loginTwinkle 6.4s ease-in-out infinite alternate;
+    }
+    body::before {
+      background-image:
+        radial-gradient(circle, rgba(255,255,255,0.95) 0 0.7px, transparent 1.1px),
+        radial-gradient(circle, rgba(255,255,255,0.75) 0 0.6px, transparent 1.0px);
+      background-size: 42px 42px, 58px 58px;
+      background-position: 0 0, 17px 23px;
+      opacity: 0.58;
+    }
+    body::after {
+      background-image:
+        radial-gradient(circle, rgba(255,255,255,0.88) 0 0.7px, transparent 1.1px),
+        radial-gradient(circle, rgba(255,255,255,0.70) 0 0.5px, transparent 0.95px);
+      background-size: 64px 64px, 78px 78px;
+      background-position: 11px 7px, 29px 41px;
+      opacity: 0.34;
+      animation-duration: 4.9s;
+    }
+    @keyframes loginTwinkle {
+      0% { opacity: 0.28; }
+      25% { opacity: 0.44; }
+      50% { opacity: 0.33; }
+      75% { opacity: 0.52; }
+      100% { opacity: 0.38; }
     }
     .card { width:min(420px,92vw); border:1px solid #3a3a3a; border-radius:14px; background:#000000; padding:18px; display:flex; flex-direction:column; align-items:center; box-shadow: 0 10px 28px rgba(0,0,0,0.45); }
+    .card { position: relative; z-index: 1; }
     .title { font-size:1.05rem; font-weight:600; margin-bottom:6px; text-align:center; }
     .muted { color:#d9d9d9; font-size:.86rem; margin-bottom:10px; text-align:center; }
     input { display:block; width:100%; border:1px solid #4a4a4a; border-radius:10px; padding:11px; background:#000000; color:#ffffff; text-align:center; }
@@ -12629,29 +12656,38 @@ function drawContext3D(canvas, point) {{
       return seed / 4294967296;
     }}
     const out = [];
-    for (let i = 0; i < 220; i++) {{
+    for (let i = 0; i < 860; i++) {{
       const u = (rnd() * 2) - 1;
       const theta = rnd() * Math.PI * 2;
       const ring = Math.sqrt(Math.max(0, 1 - (u * u)));
-      const radius = 1.5 + (rnd() * 0.35);
+      const radius = 2.35 + (rnd() * 0.42);
       out.push({{
         x: 0.5 + (radius * ring * Math.cos(theta)),
         y: 0.5 + (radius * u),
         z: 0.5 + (radius * ring * Math.sin(theta)),
         tw: rnd() * Math.PI * 2,
-        base: 0.14 + (rnd() * 0.36),
-        size: 0.7 + (rnd() * 1.0),
+        tws: 0.8 + (rnd() * 1.6),
+        base: 0.18 + (rnd() * 0.32),
+        size: 0.18 + (rnd() * 0.28),
       }});
     }}
     return out;
   }})();
 
-  function project(p, w, h) {{
+  function project3D(p) {{
     const cy = Math.cos(state.yaw), sy = Math.sin(state.yaw);
     const cp = Math.cos(state.pitch), sp = Math.sin(state.pitch);
     let x = p.x-0.5, y = p.y-0.5, z = p.z-0.5;
-    const xz = x*cy - z*sy; const zz = x*sy + z*cy;
-    const yz = y*cp - zz*sp; const zz2 = y*sp + zz*cp;
+    const xz = x*cy - z*sy;
+    const zz = x*sy + z*cy;
+    const yz = y*cp - zz*sp;
+    const zz2 = y*sp + zz*cp;
+    return {{ xz, yz, zz2 }};
+  }}
+
+  function project(p, w, h) {{
+    const t3 = project3D(p);
+    const xz = t3.xz, yz = t3.yz, zz2 = t3.zz2;
     const s = 220/(zz2+3);
     return {{x: w/2 + xz*s*1.4, y: h/2 - yz*s*1.4}};
   }}
@@ -12683,10 +12719,18 @@ function drawContext3D(canvas, point) {{
     ctx.fillRect(0, 0, rect.width, rect.height);
     const t = Date.now() / 1000;
     for (const s of stars) {{
-      const p = project(s, rect.width, rect.height);
+      const t3 = project3D(s);
+      // Keep stars in the distant hemisphere so viewer feels "inside" a globe
+      // without foreground occlusion on the cube.
+      if (t3.zz2 < 0.05) continue;
+      const scale = 220 / (t3.zz2 + 3);
+      const p = {{
+        x: rect.width / 2 + (t3.xz * scale * 1.4),
+        y: rect.height / 2 - (t3.yz * scale * 1.4),
+      }};
       if (p.x < -8 || p.x > rect.width + 8 || p.y < -8 || p.y > rect.height + 8) continue;
-      const alpha = Math.max(0.08, Math.min(0.62, s.base + (0.14 * Math.sin((t * 1.1) + s.tw))));
-      ctx.fillStyle = `rgba(244,248,255,${{alpha.toFixed(3)}})`;
+      const alpha = Math.max(0.10, Math.min(0.66, s.base + (0.18 * Math.sin((t * s.tws) + s.tw))));
+      ctx.fillStyle = `rgba(255,255,255,${{alpha.toFixed(3)}})`;
       ctx.beginPath();
       ctx.arc(p.x, p.y, s.size, 0, Math.PI * 2);
       ctx.fill();
