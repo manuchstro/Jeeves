@@ -7425,16 +7425,31 @@ def has_seen_event_hash(event_hash):
     cur.execute(
         """
         SELECT id
-        FROM alert_log
+        FROM alert_outcomes
         WHERE event_hash = ?
-          AND sent_to_user = 1
+          AND stage = 'delivery'
+          AND outcome = 'sent'
           AND datetime(created_at) >= datetime('now', '-36 hours')
+        LIMIT 1
         """,
         (event_hash,),
     )
     row = cur.fetchone()
     conn.close()
     return row is not None
+
+
+def mark_alert_sent_to_user(event_hash):
+    if not event_hash:
+        return
+    execute_write_with_retry(
+        """
+        UPDATE alert_log
+        SET sent_to_user = 1
+        WHERE event_hash = ?
+        """,
+        (event_hash,),
+    )
 
 
 def get_recent_event_embeddings(category, limit=20):
@@ -10035,7 +10050,7 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False
                 effective_category,
                 effective_tier,
                 candidate["headline"],
-                sent_to_user=1 if should_push else 0,
+                sent_to_user=0,
                 candidate=effective_candidate,
             )
             result["alert_result"] = alert_result
@@ -10051,6 +10066,7 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False
                     details={"alert_id": alert_result.get("alert_id"), "headline": candidate["headline"]},
                 )
                 if send_result.get("ok"):
+                    mark_alert_sent_to_user(alert_result.get("event_hash"))
                     log_outbound_message("alert", alert_message)
                     if int(effective_tier or 3) == 2:
                         tier2_pushed_today += 1
