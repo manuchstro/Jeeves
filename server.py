@@ -11880,8 +11880,25 @@ def brainstem_home():
       color: var(--fg);
       font-weight: 430;
       letter-spacing: 0.1px;
+      position: relative;
+    }}
+    body::before {{
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      background:
+        repeating-linear-gradient(0deg, rgba(255,255,255,0.035) 0 1px, transparent 1px 24px),
+        repeating-linear-gradient(90deg, rgba(255,255,255,0.03) 0 1px, transparent 1px 28px),
+        repeating-linear-gradient(32deg, rgba(255,240,210,0.08) 0 1px, transparent 1px 22px),
+        repeating-linear-gradient(148deg, rgba(255,162,0,0.08) 0 1px, transparent 1px 34px),
+        repeating-linear-gradient(62deg, rgba(68,86,76,0.17) 0 2px, transparent 2px 40px),
+        linear-gradient(140deg, #020303 0%, #1e2a23 42%, #0f1512 65%, #020303 100%);
+      animation: landingPlaidFade 4.6s ease forwards;
     }}
     .app-shell {{ min-height: 100vh; display:flex; }}
+    .app-shell {{ position: relative; z-index: 1; }}
     .sidebar {{
       width: 250px; flex: 0 0 250px; border-right: 2px solid var(--outline); background: #0a0a0a;
       padding: 14px 10px; transition: transform 220ms ease, opacity 220ms ease; overflow-y:auto; z-index: 25;
@@ -12008,21 +12025,6 @@ def brainstem_home():
       overflow: hidden;
       border-radius: 16px;
     }}
-    .landing-wrap::before {{
-      content: "";
-      position: absolute;
-      inset: 0;
-      background:
-        repeating-linear-gradient(0deg, rgba(255,255,255,0.035) 0 1px, transparent 1px 24px),
-        repeating-linear-gradient(90deg, rgba(255,255,255,0.03) 0 1px, transparent 1px 28px),
-        repeating-linear-gradient(32deg, rgba(255,240,210,0.08) 0 1px, transparent 1px 22px),
-        repeating-linear-gradient(148deg, rgba(255,162,0,0.08) 0 1px, transparent 1px 34px),
-        repeating-linear-gradient(62deg, rgba(68,86,76,0.17) 0 2px, transparent 2px 40px),
-        linear-gradient(140deg, #020303 0%, #1e2a23 42%, #0f1512 65%, #020303 100%);
-      animation: landingPlaidFade 2.8s ease forwards;
-      pointer-events: none;
-      z-index: 0;
-    }}
     .landing-wrap::after {{
       content: "";
       position: absolute;
@@ -12121,10 +12123,23 @@ const sections = [
 ];
 
 function api(path, opts={{}}) {{
-  const url = path + (path.includes("?") ? "&" : "?") + KEY_QS.replace(/^\\?/, "");
-  return fetch(url, opts).then(async r => {{
+  const method = String((opts && opts.method) || "GET").toUpperCase();
+  let url = path + (path.includes("?") ? "&" : "?") + KEY_QS.replace(/^\\?/, "");
+  if (method === "GET") {{
+    url += (url.includes("?") ? "&" : "?") + "_cb=" + Date.now();
+  }}
+  const finalOpts = Object.assign({{cache: "no-store"}}, opts || {{}});
+  return fetch(url, finalOpts).then(async r => {{
     const text = await r.text();
-    try {{ return JSON.parse(text); }} catch {{ return {{ok:r.ok, raw:text}}; }}
+    try {{
+      const parsed = JSON.parse(text);
+      if (typeof parsed === "object" && parsed && parsed.ok === undefined) {{
+        parsed.ok = r.ok;
+      }}
+      return parsed;
+    }} catch {{
+      return {{ok:r.ok, raw:text}};
+    }}
   }});
 }}
 
@@ -12664,12 +12679,21 @@ async function memoryFeedback(scope, category, memory_key, action) {{
   if (!confirm("Are you sure you want to " + confirmText)) return;
   const details = document.querySelector("#section-memory details.expandable");
   if (details) window.__memoryExpanded = details.open;
-  await api("/brainstem/api/memory/feedback", {{
-    method: "POST",
-    headers: {{"Content-Type":"application/json"}},
-    body: JSON.stringify({{scope, category, memory_key, action}})
-  }});
-  await renderMemory();
+  try {{
+    await api("/brainstem/api/memory/feedback", {{
+      method: "POST",
+      headers: {{"Content-Type":"application/json"}},
+      body: JSON.stringify({{scope, category, memory_key, action}})
+    }}).then((res) => {{
+      if (!res || res.ok === false) {{
+        const why = (res && (res.reason || res.error || res.raw)) ? String(res.reason || res.error || res.raw) : "unknown error";
+        throw new Error(why);
+      }}
+    }});
+    await renderMemory();
+  }} catch (err) {{
+    alert("Memory feedback failed: " + String((err && err.message) || err || "unknown error"));
+  }}
 }}
 
 let forgetTimerTicker = null;
@@ -13437,23 +13461,28 @@ def brainstem_api_memory_feedback():
     result = {"ok": True, "action": action}
     if action == "accurate":
         adjusted = reinforce_memory_from_feedback(scope, category, memory_key, source_text="brainstem_feedback_accurate")
-        if adjusted:
-            next_reinforcement_count = int(adjusted.get("reinforcement_count") or 1)
-            stability_multiplier = _stability_slowdown_multiplier(adjusted.get("new_stability") or "situational")
-            reinforcement_multiplier = _reinforcement_slowdown_multiplier(next_reinforcement_count)
-            slowdown_pct = round((1.0 - (stability_multiplier * reinforcement_multiplier)) * 100.0, 1)
-            record_memory_feedback_history(
-                scope,
-                category,
-                memory_key,
-                action="accurate",
-                previous_confidence=adjusted.get("old_confidence"),
-                previous_stability=adjusted.get("old_stability"),
-                new_confidence=adjusted.get("new_confidence"),
-                new_stability=adjusted.get("new_stability"),
+        if not adjusted:
+            return app.response_class(
+                response=json.dumps({"ok": False, "reason": "memory_not_found"}, indent=2),
+                status=404,
+                mimetype="application/json",
             )
-            result["reinforcement_count"] = next_reinforcement_count
-            result["decay_slowdown_percent"] = slowdown_pct
+        next_reinforcement_count = int(adjusted.get("reinforcement_count") or 1)
+        stability_multiplier = _stability_slowdown_multiplier(adjusted.get("new_stability") or "situational")
+        reinforcement_multiplier = _reinforcement_slowdown_multiplier(next_reinforcement_count)
+        slowdown_pct = round((1.0 - (stability_multiplier * reinforcement_multiplier)) * 100.0, 1)
+        record_memory_feedback_history(
+            scope,
+            category,
+            memory_key,
+            action="accurate",
+            previous_confidence=adjusted.get("old_confidence"),
+            previous_stability=adjusted.get("old_stability"),
+            new_confidence=adjusted.get("new_confidence"),
+            new_stability=adjusted.get("new_stability"),
+        )
+        result["reinforcement_count"] = next_reinforcement_count
+        result["decay_slowdown_percent"] = slowdown_pct
         result["adjusted"] = adjusted
     elif action == "inaccurate":
         queued = queue_memory_feedback_forget(scope, category, memory_key, delay_minutes=60)
