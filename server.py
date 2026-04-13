@@ -6633,6 +6633,11 @@ def build_tone_vector(journal_analysis, context_snapshot):
     outlook_signal = ((1.0 - memory_profile["outlook"]["confidence"]) * outlook_signal) + (memory_profile["outlook"]["confidence"] * memory_outlook)
 
     calendar_busy = clamp01((calendar_features.get("busy_score") or 0.0))
+    # Some calendar providers emit a small "free-day" baseline (e.g. 0.05).
+    # Treat truly empty days as zero load in tone/overview.
+    event_count = int(calendar_features.get("event_count") or 0)
+    if event_count <= 0 and calendar_busy <= 0.05:
+        calendar_busy = 0.0
     inbox_busy = clamp01((inbox_features.get("busy_score") or 0.0))
     # Weighted additive blend: inbox contributes at 60% of calendar weight.
     calendar_weight = 1.0
@@ -11825,10 +11830,10 @@ def brainstem_home():
   <style>
     :root {{
       --bg: #000000;
-      --fg: #FFEBC4;
+      --fg: #FFF0D2;
       --outline: #1A1712;
       --accent: #FFA200;
-      --muted: #d7c8a8;
+      --muted: #ddd2bc;
       --panel: #313a34;
       --panel-deep: #272f2a;
     }}
@@ -11977,7 +11982,7 @@ def brainstem_home():
         linear-gradient(132deg, rgba(255,241,214,0.08) 0%, rgba(255,255,255,0) 42%),
         linear-gradient(48deg, rgba(30,22,12,0.15) 0%, rgba(30,22,12,0) 45%),
         repeating-linear-gradient(150deg, rgba(255,238,210,0.055) 0 1px, transparent 1px 18px),
-        linear-gradient(165deg, #f2952d 0%, #d87418 56%, #af5310 100%);
+        linear-gradient(165deg, #f2952d 0%, #d06f17 56%, #9f430c 100%);
       border: 2px solid #7a4612;
       border-radius: 14px;
       padding: 20px 22px;
@@ -12262,7 +12267,7 @@ async function renderOverview() {{
       <div class="card span-3"><div class="title">Calendar Load</div><div class="kpi">${{(Number(sig.calendar_busy ?? 0)*100).toFixed(1)}}%</div></div>
       <div class="card span-3"><div class="title">Restedness</div><div class="kpi">${{(Number(sig.restedness_score ?? 0.5)*100).toFixed(1)}}%</div></div>
       <div class="card span-3">
-        <div class="title">Journal Guard</div>
+        <div class="title">Awaiting Journal Response</div>
         <div class="row">${{guardPill}}</div>
         <div class="muted" style="margin-top:6px;">${{esc(guardSummary)}}</div>
       </div>
@@ -12272,7 +12277,7 @@ async function renderOverview() {{
         <div class="chart-wrap"><canvas id="ctx3d-overview"></canvas><div class="axis-legend">G = Gmail Inbox<br>C = Google Calendar<br>S = Sleep</div></div>
       </div>
       <div class="card span-4">
-        <div class="title">Current Tone Snapshot</div>
+        <div class="title">Tone Matrix Live Summary</div>
         <table class="table">
           <tbody>
             <tr><td>Brevity</td><td>${{(Number(tv.brevity ?? 0)*100).toFixed(1)}}%</td></tr>
