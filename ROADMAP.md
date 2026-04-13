@@ -12,6 +12,16 @@ Last updated: 2026-04-12
   - repeat this loop until zero known bugs/UI fixes remain
 
 ## Recently Deployed (Completed)
+- ✅ Alert delivery integrity + auto-retry hardening
+  - dedupe now keys off **confirmed delivery** (`alert_outcomes` stage=`delivery`, outcome=`sent`) instead of optimistic pre-send state
+  - `sent_to_user` is now marked only after Twilio send success
+  - added persistent `alert_delivery_retry_queue` with automatic retry processing during `/tasks/poll`
+  - retry backoff ladder: `3m → 6m → 12m → 24m → 48m → 60m` (up to 6 attempts)
+  - failed Tier-1 deliveries are now queued automatically for retry instead of silently dropping
+- ✅ Brainstem memory-feedback reliability hardening
+  - fixed `sqlite3.Row` access bug in reinforcement counter path (`row.get(...)` -> safe row access)
+  - added schema-compat safeguards for legacy `memory_feedback_*` and `memory_provenance_events` columns
+  - upgraded feedback error surfacing for faster root-cause diagnosis
 - ✅ Usage panel trust hardening
   - removed estimated provider-cost fields to avoid inaccurate cost reporting
   - usage now emphasizes exact local activity counts and provider configured state
@@ -278,3 +288,9 @@ Last updated: 2026-04-12
   - `p_symbols_used`
   - `p_symbols_count`
   - `p_query_mode`
+
+14. **Journal Verbatim Export (Next Item)**
+- Build a secure export function for **all journal entries verbatim** (no summarization/truncation), including local date + time per entry.
+- Export target should be local and easily accessible on laptop (single canonical file path, versioned/append-safe).
+- Add export trigger in Brainstem/ops with confirmation guard and success/failure report.
+- Add optional encrypted-at-rest output mode for local archive copy.
