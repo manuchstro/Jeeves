@@ -771,6 +771,24 @@ def init_db():
     )
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS alert_delivery_retry_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_hash TEXT NOT NULL UNIQUE,
+        alert_id TEXT,
+        headline TEXT,
+        message_body TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 6,
+        next_attempt_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_error TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        sent_at DATETIME
+    )
+    """)
+
     conn.commit()
 
     for statement in [
@@ -7452,6 +7470,183 @@ def mark_alert_sent_to_user(event_hash):
     )
 
 
+def _retry_backoff_minutes(next_attempt_number):
+    attempt_n = max(1, int(next_attempt_number or 1))
+    # 3, 6, 12, 24, 48, 60...
+    return min(60, int(3 * (2 ** max(0, attempt_n - 1))))
+
+
+def queue_alert_delivery_retry(event_hash, alert_id, headline, message_body, error_reason="", max_attempts=6):
+    if not event_hash or not message_body:
+        return {"ok": False, "reason": "invalid_retry_payload"}
+    max_attempts = max(1, int(max_attempts or 6))
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, attempts, status
+        FROM alert_delivery_retry_queue
+        WHERE event_hash = ?
+        LIMIT 1
+        """,
+        (event_hash,),
+    )
+    row = cur.fetchone()
+    if row:
+        cur.execute(
+            """
+            UPDATE alert_delivery_retry_queue
+            SET alert_id = COALESCE(?, alert_id),
+                headline = COALESCE(?, headline),
+                message_body = ?,
+                status = CASE WHEN status = 'sent' THEN 'sent' ELSE 'pending' END,
+                max_attempts = ?,
+                next_attempt_at = CASE WHEN status = 'sent' THEN next_attempt_at ELSE datetime('now', '+3 minutes') END,
+                last_error = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                alert_id or None,
+                headline or None,
+                message_body,
+                max_attempts,
+                (error_reason or "")[:500],
+                row["id"],
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return {"ok": True, "queued": True, "already_exists": True}
+
+    cur.execute(
+        """
+        INSERT INTO alert_delivery_retry_queue (
+            event_hash, alert_id, headline, message_body, status, attempts, max_attempts, next_attempt_at, last_error
+        )
+        VALUES (?, ?, ?, ?, 'pending', 0, ?, datetime('now', '+3 minutes'), ?)
+        """,
+        (
+            event_hash,
+            alert_id or "",
+            headline or "",
+            message_body,
+            max_attempts,
+            (error_reason or "")[:500],
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "queued": True, "already_exists": False}
+
+
+def process_alert_delivery_retries(batch_limit=12):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, event_hash, alert_id, headline, message_body, attempts, max_attempts
+        FROM alert_delivery_retry_queue
+        WHERE status = 'pending'
+          AND datetime(next_attempt_at) <= datetime('now')
+        ORDER BY id ASC
+        LIMIT ?
+        """,
+        (max(1, int(batch_limit or 12)),),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+
+    summary = {"checked": len(rows), "sent": 0, "failed": 0, "skipped": 0}
+    for row in rows:
+        row_id = int(row["id"])
+        event_hash = row.get("event_hash")
+        alert_id = row.get("alert_id")
+        headline = row.get("headline")
+        message_body = row.get("message_body") or ""
+        attempts = int(row.get("attempts") or 0)
+        max_attempts = max(1, int(row.get("max_attempts") or 6))
+
+        # If already delivered by another path, retire retry row.
+        if has_seen_event_hash(event_hash):
+            execute_write_with_retry(
+                """
+                UPDATE alert_delivery_retry_queue
+                SET status = 'skipped_delivered',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (row_id,),
+            )
+            summary["skipped"] += 1
+            continue
+
+        send_result = send_whatsapp_message(message_body)
+        if send_result.get("ok"):
+            mark_alert_sent_to_user(event_hash)
+            log_outbound_message("alert_retry", message_body)
+            log_alert_outcome(
+                stage="delivery",
+                outcome="sent",
+                reason="retry_success",
+                event_hash=event_hash,
+                details={"alert_id": alert_id, "headline": headline},
+            )
+            execute_write_with_retry(
+                """
+                UPDATE alert_delivery_retry_queue
+                SET status = 'sent',
+                    attempts = ?,
+                    sent_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP,
+                    last_error = ''
+                WHERE id = ?
+                """,
+                (attempts + 1, row_id),
+            )
+            summary["sent"] += 1
+            continue
+
+        next_attempt_number = attempts + 1
+        failed_permanently = next_attempt_number >= max_attempts
+        backoff_min = _retry_backoff_minutes(next_attempt_number)
+        error_reason = (
+            send_result.get("reason")
+            or send_result.get("error")
+            or send_result.get("response")
+            or "retry_failed"
+        )
+        log_alert_outcome(
+            stage="delivery",
+            outcome="failed",
+            reason=f"retry_failed_attempt_{next_attempt_number}",
+            event_hash=event_hash,
+            details={"alert_id": alert_id, "headline": headline, "error": str(error_reason)[:300]},
+        )
+        execute_write_with_retry(
+            """
+            UPDATE alert_delivery_retry_queue
+            SET status = ?,
+                attempts = ?,
+                next_attempt_at = CASE WHEN ? THEN next_attempt_at ELSE datetime('now', ?) END,
+                last_error = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                "failed_permanent" if failed_permanently else "pending",
+                next_attempt_number,
+                1 if failed_permanently else 0,
+                f"+{backoff_min} minutes",
+                str(error_reason)[:500],
+                row_id,
+            ),
+        )
+        summary["failed"] += 1
+
+    return summary
+
+
 def get_recent_event_embeddings(category, limit=20):
     conn = get_conn()
     cur = conn.cursor()
@@ -10061,7 +10256,7 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False
                 log_alert_outcome(
                     stage="delivery",
                     outcome="sent" if send_result.get("ok") else "failed",
-                    reason=send_result.get("error"),
+                    reason=send_result.get("reason") or send_result.get("error"),
                     event_hash=alert_result.get("event_hash"),
                     details={"alert_id": alert_result.get("alert_id"), "headline": candidate["headline"]},
                 )
@@ -10070,6 +10265,15 @@ def run_poll_cycle(log_to_alerts=True, send_messages=False, force_currents=False
                     log_outbound_message("alert", alert_message)
                     if int(effective_tier or 3) == 2:
                         tier2_pushed_today += 1
+                else:
+                    queue_alert_delivery_retry(
+                        event_hash=alert_result.get("event_hash"),
+                        alert_id=alert_result.get("alert_id"),
+                        headline=candidate.get("headline"),
+                        message_body=alert_message,
+                        error_reason=send_result.get("reason") or send_result.get("error") or send_result.get("response") or "delivery_failed",
+                        max_attempts=6,
+                    )
             elif send_messages and alert_result.get("ok"):
                 log_alert_outcome(
                     stage="delivery",
@@ -13941,7 +14145,9 @@ def task_poll():
         return denied
     force_currents = (request.args.get("force_currents") or request.form.get("force_currents") or "").strip() == "1"
     readable = (request.args.get("readable") or request.form.get("readable") or "").strip() == "1"
+    retry_summary = process_alert_delivery_retries(batch_limit=12)
     payload = run_poll_cycle(log_to_alerts=True, send_messages=True, force_currents=force_currents)
+    payload["delivery_retry"] = retry_summary
     if readable:
         return app.response_class(
             response=build_readable_poll_summary(payload, limit=25),
