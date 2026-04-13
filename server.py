@@ -12773,7 +12773,7 @@ function renderLanding() {{
         <div class="landing-orb b"></div>
         <div class="landing-copy">
           <div class="landing-title">Welcome to Brainstem</div>
-          <div class="landing-text">Brainstem is Jeeves' internal control surface. Jeeves has the ability to operate completely autonomously. Brainstem simply simply accelerates the "getting to know you" part and gives you a greater level of input. Use the menu to navigate each subsystem and safely guide behavior.</div>
+          <div class="landing-text">Brainstem is Jeeves' internal control surface. Jeeves has the ability to operate completely autonomously. Brainstem simply simply accelerates the "getting to know you" part and gives you a crucial level of input and insight into Jeeves' key functions. Use the menu to navigate each subsystem and safely guide behavior.</div>
           <div class="landing-small">Secure Session Active</div>
         </div>
       </div>
