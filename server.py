@@ -4611,6 +4611,13 @@ def get_brainstem_overview_payload():
     if calendar_connected and calendar_age_minutes is not None and calendar_age_minutes > 20:
         reasons.append(f"calendar stale {int(calendar_age_minutes)}m")
     healthy = len(reasons) == 0
+    latest_consolidation = None
+    recent_logs = get_recent_nightly_consolidation_logs(limit=1)
+    if recent_logs:
+        latest_consolidation = recent_logs[0]
+    today_local = get_local_date_string()
+    latest_local_date = str((latest_consolidation or {}).get("local_date") or "").strip()
+    awaiting_memory_consolidation = (latest_local_date != today_local)
     return {
         "now_local": now.isoformat(),
         "deploy": {
@@ -4627,6 +4634,11 @@ def get_brainstem_overview_payload():
             "calendar_age_minutes": round(calendar_age_minutes, 1) if calendar_age_minutes is not None else None,
         },
         "journal_guard": get_journal_guard_status(),
+        "memory_consolidation_guard": {
+            "awaiting": awaiting_memory_consolidation,
+            "latest_local_date": latest_local_date or None,
+            "latest_created_at": (latest_consolidation or {}).get("created_at"),
+        },
         "feedback_context_allowed": feedback_context_allowed(),
         "article_request_context_allowed": article_request_context_allowed(),
         "counts": {
@@ -12245,8 +12257,10 @@ async function renderOverview() {{
   const ctx = data.context_snapshot || {{}};
   const cal = ctx.calendar || {{}};
   const inbox = ctx.inbox || {{}};
+  const sleep = ctx.sleep || {{}};
   const calFeatures = cal.features || {{}};
   const inboxFeatures = inbox.features || {{}};
+  const sleepFeatures = sleep.features || {{}};
   const tv = data.tone_vector || {{}};
   const sig = tv.signals || {{}};
   const commitClass = health.healthy ? "health-good" : "health-bad";
@@ -12256,6 +12270,11 @@ async function renderOverview() {{
   const guardSummary = guardActive
     ? `First inbound after gratitude prompt will be journal response.`
     : `No journal response is currently waiting.`;
+  const mc = data.memory_consolidation_guard || {{}};
+  const mcAwaiting = Boolean(mc.awaiting);
+  const mcPill = mcAwaiting ? `<span class="pill">Awaiting</span>` : `<span class="pill">Up To Date</span>`;
+  const sleepHours = Number(sleepFeatures.sleep_hours);
+  const sleepHoursDisplay = Number.isFinite(sleepHours) ? `${{sleepHours.toFixed(2)}}h` : "n/a";
   const point = {{
     x: Math.max(0, Math.min(1, Number(sig.inbox_busy ?? 0.5))),
     y: Math.max(0, Math.min(1, Number(sig.restedness_score ?? (1-Number(sig.fatigue_score ?? 0.5))))),
@@ -12278,10 +12297,16 @@ async function renderOverview() {{
       <div class="card span-3"><div class="title">Calendar Events Today</div><div class="kpi">${{esc((calFeatures.event_count ?? 0))}}</div></div>
       <div class="card span-3"><div class="title">Calendar Load</div><div class="kpi">${{(Number(sig.calendar_busy ?? 0)*100).toFixed(1)}}%</div></div>
       <div class="card span-3"><div class="title">Restedness</div><div class="kpi">${{(Number(sig.restedness_score ?? 0.5)*100).toFixed(1)}}%</div></div>
+      <div class="card span-3"><div class="title">Hours Slept</div><div class="kpi">${{sleepHoursDisplay}}</div></div>
       <div class="card span-3">
         <div class="title">Awaiting Journal Response</div>
         <div class="row">${{guardPill}}</div>
         <div class="muted" style="margin-top:6px;">${{esc(guardSummary)}}</div>
+      </div>
+      <div class="card span-3">
+        <div class="title">Awaiting Memory Consolidation</div>
+        <div class="row">${{mcPill}}</div>
+        <div class="muted" style="margin-top:6px;">Latest: ${{esc(String(mc.latest_local_date || "none"))}}</div>
       </div>
       <div class="card span-8">
         <div class="title">3D Context Vector</div>
