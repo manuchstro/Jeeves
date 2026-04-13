@@ -11835,7 +11835,7 @@ def brainstem_home():
       --accent: #FFA200;
       --muted: #ddd2bc;
       --panel: #313a34;
-      --panel-deep: #272f2a;
+      --panel-deep: #232924;
     }}
     * {{ box-sizing: border-box; }}
     body {{
@@ -11862,7 +11862,7 @@ def brainstem_home():
     .sidebar-header {{ display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }}
     .brand {{ font-weight: 650; letter-spacing: 0.2px; font-size: 1.08rem; }}
     .tabs {{ display:flex; flex-direction:column; gap:8px; }}
-    .tab-btn {{ border:2px solid var(--outline); background: var(--panel); color: var(--fg); font-weight:520; border-radius: 10px; padding: 9px 11px; cursor:pointer; text-align:left; width:100%; transition: transform 140ms ease, background 140ms ease, opacity 140ms ease, box-shadow 140ms ease, border-color 140ms ease; }}
+    .tab-btn {{ border:2px solid var(--outline); background: linear-gradient(to bottom right, var(--panel) 0%, var(--panel-deep) 100%); color: var(--fg); font-weight:520; border-radius: 10px; padding: 9px 11px; cursor:pointer; text-align:left; width:100%; transition: transform 140ms ease, background 140ms ease, opacity 140ms ease, box-shadow 140ms ease, border-color 140ms ease; }}
     .tab-btn.active {{ outline: 2px solid var(--accent); }}
     .tab-btn:hover {{ transform: translateY(-1px); border-color:#2a241b; box-shadow: 0 4px 14px rgba(0,0,0,0.28); }}
     .tab-btn:active {{ transform: translateY(0); }}
@@ -11889,10 +11889,9 @@ def brainstem_home():
     .section.active {{ display:block; animation: fadeIn 180ms ease both; }}
     .grid {{ display:grid; grid-template-columns: repeat(12, 1fr); gap:12px; }}
     .card {{
-      --card-angle: 142deg;
       border:2px solid var(--outline);
       background:
-        linear-gradient(var(--card-angle), var(--panel) 0%, var(--panel-deep) 100%),
+        linear-gradient(to bottom right, var(--panel) 0%, var(--panel-deep) 100%),
         linear-gradient(180deg, rgba(255,255,255,0.015) 0%, rgba(0,0,0,0.03) 100%),
         repeating-linear-gradient(135deg, rgba(255,255,255,0.012) 0 1px, transparent 1px 22px),
         transparent;
@@ -11901,13 +11900,6 @@ def brainstem_home():
       animation: cardIn 210ms ease both;
       transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
     }}
-    /* Easy-to-edit gradient angles for subtle per-card variation */
-    .grid > .card:nth-child(6n+1) {{ --card-angle: 138deg; }}
-    .grid > .card:nth-child(6n+2) {{ --card-angle: 146deg; }}
-    .grid > .card:nth-child(6n+3) {{ --card-angle: 154deg; }}
-    .grid > .card:nth-child(6n+4) {{ --card-angle: 132deg; }}
-    .grid > .card:nth-child(6n+5) {{ --card-angle: 160deg; }}
-    .grid > .card:nth-child(6n+6) {{ --card-angle: 124deg; }}
     .card:hover {{ border-color:#28231a; box-shadow: 0 8px 22px rgba(0,0,0,0.26); transform: translateY(-1px); }}
     .span-12 {{ grid-column: span 12; }}
     .span-8 {{ grid-column: span 8; }}
@@ -11928,7 +11920,8 @@ def brainstem_home():
     .btn:active {{ transform: translateY(0); filter: brightness(0.98); }}
     .btn:disabled {{ opacity:0.58; cursor:not-allowed; box-shadow:none; transform:none; filter:none; }}
     input, textarea, select {{
-      background:#263129; color:var(--fg); border:2px solid var(--outline); border-radius:10px; padding:8px; width:100%;
+      background: linear-gradient(to bottom right, #2b362f 0%, #202822 100%);
+      color:var(--fg); border:2px solid var(--outline); border-radius:10px; padding:8px; width:100%;
       transition: border-color 130ms ease, box-shadow 130ms ease, background 130ms ease;
     }}
     input:hover, textarea:hover, select:hover {{ border-color:#2a261f; }}
@@ -11953,8 +11946,8 @@ def brainstem_home():
       background:#111; color:#9efc9e; border:2px solid var(--outline); border-radius:10px; min-height:180px;
       padding:10px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; overflow:auto; white-space:pre-wrap;
     }}
-    .term-box {{ border:2px solid var(--outline); border-radius:10px; padding:8px; background:#2d3b31; }}
-    .chart-wrap {{ height: 320px; border:2px solid var(--outline); border-radius:10px; background:#253128; position:relative; }}
+    .term-box {{ border:2px solid var(--outline); border-radius:10px; padding:8px; background: linear-gradient(to bottom right, var(--panel) 0%, var(--panel-deep) 100%); }}
+    .chart-wrap {{ height: 320px; border:2px solid var(--outline); border-radius:10px; background: linear-gradient(to bottom right, #2b362f 0%, #202822 100%); position:relative; }}
     .chart-tooltip {{
       position:fixed; pointer-events:none; z-index:99999;
       background: rgba(7,10,8,0.92); color:#f6e4bf; border:1px solid #5b6c5f;
@@ -11992,6 +11985,7 @@ def brainstem_home():
     .landing-text {{ max-width: 560px; color: #fff4dd; line-height:1.5; }}
     .landing-orb {{ display:none; }}
     .landing-small {{ margin-top:18px; color:#b6aa8d; font-size: 0.88rem; }}
+    .query-scroll {{ max-height: 220px; overflow: auto; border: 2px solid var(--outline); border-radius: 10px; }}
     .topbar-right a.tab-btn {{ text-decoration: none; }}
     .topbar-right a.tab-btn:hover {{ text-decoration: none; }}
     .expandable summary {{ cursor:pointer; font-weight:700; transition: color 120ms ease, letter-spacing 120ms ease; }}
@@ -12054,7 +12048,7 @@ const sections = [
   {{id:"overview", label:"Overview"}},
   {{id:"key", label:"Key"}},
   {{id:"memory", label:"Memory"}},
-  {{id:"context", label:"Context + Tone"}},
+  {{id:"context", label:"Tone Matrix Dashboard"}},
   {{id:"news", label:"Live News Polls"}},
   {{id:"ops", label:"Live Operations Console"}},
   {{id:"usage", label:"Usage"}},
@@ -12230,7 +12224,10 @@ function formatValueReadable(value) {{
 
 async function renderOverview() {{
   const target = document.getElementById("section-overview");
-  const data = await api("/brainstem/api/overview");
+  const [data, poll] = await Promise.all([
+    api("/brainstem/api/overview"),
+    api("/brainstem/api/poll?force_currents=0"),
+  ]);
   const health = data.health || {{}};
   const ctx = data.context_snapshot || {{}};
   const cal = ctx.calendar || {{}};
@@ -12251,6 +12248,8 @@ async function renderOverview() {{
     y: Math.max(0, Math.min(1, Number(sig.restedness_score ?? (1-Number(sig.fatigue_score ?? 0.5))))),
     z: Math.max(0, Math.min(1, Number(sig.calendar_busy ?? 0.5))),
   }};
+  const generatedQueries = (((poll || {{}}).source_debug || {{}}).generated_queries || []);
+  const queryRows = generatedQueries.map(q => `<tr><td>${{esc(String(q[1] || ""))}}</td><td>${{esc(String(q[0] || ""))}}</td></tr>`).join("");
   target.innerHTML = `
     <div class="grid">
       <div class="card span-3"><div class="title">Now</div><div class="muted">${{esc(data.now_local || "")}}</div></div>
@@ -12286,6 +12285,15 @@ async function renderOverview() {{
             <tr><td>Style</td><td>${{esc(String(tv.style || "balanced"))}}</td></tr>
           </tbody>
         </table>
+      </div>
+      <div class="card span-12">
+        <div class="title">Generated Queries (Live View)</div>
+        <div class="query-scroll">
+          <table class="table">
+            <thead><tr><th>Category</th><th>Query</th></tr></thead>
+            <tbody>${{queryRows || "<tr><td colspan='2' class='muted'>No queries returned.</td></tr>"}}</tbody>
+          </table>
+        </div>
       </div>
     </div>
   `;
@@ -12684,7 +12692,7 @@ async function renderContextTone() {{
       </div>
       <div class="card span-4">
         <div class="title">Why This Tone</div>
-        <p class="muted">Like human tone, response style shifts subtly with energy, workload, and cognitive load. Busy inbox/calendar pushes brevity and directness. Better rest raises warmth and lowers unnecessary hardness.</p>
+        <p class="muted">Like human tone, Jeeves' responses shift subtly according to your energy, workload, and cognitive load. Busy inbox/calendar pushes brevity and directness. Better rest raises warmth and lowers hardness. Jeeves' tone matrix is nothing but simulated empathy.</p>
         <div class="row"><span class="pill">Style: ${{esc(style)}}</span></div>
         <table class="table" style="margin-top:8px">
           <tbody>
