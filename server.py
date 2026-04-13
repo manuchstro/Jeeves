@@ -11973,7 +11973,7 @@ def brainstem_home():
       padding: 20px 22px;
       box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08), 0 10px 28px rgba(0,0,0,0.35);
     }}
-    .landing-title {{ font-size: clamp(1.3rem, 2.7vw, 2rem); font-weight:620; margin-bottom:10px; }}
+    .landing-title {{ font-size: clamp(1.3rem, 2.7vw, 2rem); font-weight:620; margin-bottom:10px; text-align:center; }}
     .landing-text {{ max-width: 560px; color: #fff4dd; line-height:1.5; }}
     .landing-orb {{ display:none; }}
     .landing-small {{ margin-top:18px; color:#b6aa8d; font-size: 0.88rem; }}
@@ -12283,8 +12283,8 @@ function renderLanding() {{
         <div class="landing-orb b"></div>
         <div class="landing-copy">
           <div class="landing-title">Welcome to Brainstem</div>
-          <div class="landing-text">Brainstem is Jeeves' internal control surface: memory state, context signals, tone dynamics, and operational diagnostics. Use the menu to navigate each subsystem and guide behavior safely.</div>
-          <div class="landing-small">Secure session active. Select a panel from the side menu to begin.</div>
+          <div class="landing-text">Brainstem is Jeeves' internal control surface. Jeeves has the ability to operate completely autonomously. Brainstem simply simply accelerates the "getting to know you" part and gives you a greater level of input. Use the menu to navigate each subsystem and safely guide behavior.</div>
+          <div class="landing-small">Secure Session Active</div>
         </div>
       </div>
     </div>
