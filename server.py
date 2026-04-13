@@ -11830,6 +11830,7 @@ def brainstem_home():
       --accent: #FFA200;
       --muted: #d7c8a8;
       --panel: #313a34;
+      --panel-deep: #272f2a;
     }}
     * {{ box-sizing: border-box; }}
     body {{
@@ -11883,16 +11884,25 @@ def brainstem_home():
     .section.active {{ display:block; animation: fadeIn 180ms ease both; }}
     .grid {{ display:grid; grid-template-columns: repeat(12, 1fr); gap:12px; }}
     .card {{
+      --card-angle: 142deg;
       border:2px solid var(--outline);
       background:
+        linear-gradient(var(--card-angle), var(--panel) 0%, var(--panel-deep) 100%),
         linear-gradient(180deg, rgba(255,255,255,0.015) 0%, rgba(0,0,0,0.03) 100%),
         repeating-linear-gradient(135deg, rgba(255,255,255,0.012) 0 1px, transparent 1px 22px),
-        var(--panel);
+        transparent;
       border-radius:14px;
       padding:12px;
       animation: cardIn 210ms ease both;
       transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
     }}
+    /* Easy-to-edit gradient angles for subtle per-card variation */
+    .grid > .card:nth-child(6n+1) {{ --card-angle: 138deg; }}
+    .grid > .card:nth-child(6n+2) {{ --card-angle: 146deg; }}
+    .grid > .card:nth-child(6n+3) {{ --card-angle: 154deg; }}
+    .grid > .card:nth-child(6n+4) {{ --card-angle: 132deg; }}
+    .grid > .card:nth-child(6n+5) {{ --card-angle: 160deg; }}
+    .grid > .card:nth-child(6n+6) {{ --card-angle: 124deg; }}
     .card:hover {{ border-color:#28231a; box-shadow: 0 8px 22px rgba(0,0,0,0.26); transform: translateY(-1px); }}
     .span-12 {{ grid-column: span 12; }}
     .span-8 {{ grid-column: span 8; }}
@@ -11977,6 +11987,8 @@ def brainstem_home():
     .landing-text {{ max-width: 560px; color: #fff4dd; line-height:1.5; }}
     .landing-orb {{ display:none; }}
     .landing-small {{ margin-top:18px; color:#b6aa8d; font-size: 0.88rem; }}
+    .topbar-right a.tab-btn {{ text-decoration: none; }}
+    .topbar-right a.tab-btn:hover {{ text-decoration: none; }}
     .expandable summary {{ cursor:pointer; font-weight:700; transition: color 120ms ease, letter-spacing 120ms ease; }}
     .expandable summary:hover {{ color:#ffd58f; letter-spacing: 0.15px; }}
 
@@ -12058,12 +12070,9 @@ function makeTabs() {{
   const shell = document.querySelector(".app-shell");
   const sidebar = document.getElementById("sidebar");
   const menuBtn = document.getElementById("menu-toggle");
-  if (window.innerWidth <= 900) {{
-    sidebar.classList.add("collapsed");
-    if (shell) shell.classList.add("nav-collapsed");
-  }} else {{
-    if (shell) shell.classList.remove("nav-collapsed");
-  }}
+  // Default: menu starts hidden on first load (all viewports).
+  if (shell) shell.classList.add("nav-collapsed");
+  if (window.innerWidth <= 900) sidebar.classList.add("collapsed");
   menuBtn.onclick = () => {{
     if (window.innerWidth <= 900) {{
       sidebar.classList.toggle("collapsed");
@@ -12074,7 +12083,11 @@ function makeTabs() {{
   window.addEventListener("resize", () => {{
     if (window.innerWidth > 900) {{
       sidebar.classList.remove("collapsed");
-      if (shell) shell.classList.remove("nav-collapsed");
+      if (shell && !shell.classList.contains("nav-collapsed")) {{
+        // keep user-selected state
+      }} else if (shell) {{
+        shell.classList.add("nav-collapsed");
+      }}
     }} else if (!sidebar.classList.contains("collapsed")) {{
       // keep current state on mobile
     }}
