@@ -11817,21 +11817,16 @@ def brainstem_home():
   <style>
     body {
       margin:0; font-family: Georgia, "Times New Roman", serif; color:#ffffff; display:flex; min-height:100vh; align-items:center; justify-content:center;
-      background: #060d09;
-      position: relative;
-      overflow: hidden;
-    }
-    .star-canvas {
-      position: fixed;
-      inset: 0;
-      width: 100vw;
-      height: 100vh;
-      display: block;
-      z-index: 0;
-      pointer-events: auto;
+      background:
+        repeating-linear-gradient(0deg, rgba(255,255,255,0.035) 0 1px, transparent 1px 24px),
+        repeating-linear-gradient(90deg, rgba(255,255,255,0.03) 0 1px, transparent 1px 28px),
+        repeating-linear-gradient(32deg, rgba(255,240,210,0.08) 0 1px, transparent 1px 22px),
+        repeating-linear-gradient(148deg, rgba(255,162,0,0.08) 0 1px, transparent 1px 34px),
+        repeating-linear-gradient(62deg, rgba(68,86,76,0.17) 0 2px, transparent 2px 40px),
+        linear-gradient(140deg, #020303 0%, #1e2a23 42%, #0f1512 65%, #020303 100%);
+      background-color: #000000;
     }
     .card { width:min(420px,92vw); border:1px solid #3a3a3a; border-radius:14px; background:#000000; padding:18px; display:flex; flex-direction:column; align-items:center; box-shadow: 0 10px 28px rgba(0,0,0,0.45); }
-    .card { position: relative; z-index: 1; }
     .title { font-size:1.05rem; font-weight:600; margin-bottom:6px; text-align:center; }
     .muted { color:#d9d9d9; font-size:.86rem; margin-bottom:10px; text-align:center; }
     input { display:block; width:100%; border:1px solid #4a4a4a; border-radius:10px; padding:11px; background:#000000; color:#ffffff; text-align:center; }
@@ -11839,95 +11834,12 @@ def brainstem_home():
   </style>
 </head>
 <body>
-  <canvas id="login-stars" class="star-canvas" aria-hidden="true"></canvas>
   <form class="card" method="POST" action="/brainstem">
     <div class="title">Brainstem Passcode</div>
     <div class="muted">Enter passcode to continue.</div>
     <input type="password" name="passcode" autocomplete="current-password" required />
     <button type="submit">Unlock Brainstem</button>
   </form>
-  <script>
-    (function () {
-      const canvas = document.getElementById("login-stars");
-      if (!canvas) return;
-      const ctx = canvas.getContext("2d");
-      const state = { yaw: -0.5, pitch: 0.35, drag: false, lx: 0, ly: 0 };
-      let seed = 1337;
-      function rnd() {
-        seed = (seed * 1664525 + 1013904223) >>> 0;
-        return seed / 4294967296;
-      }
-      const stars = [];
-      for (let i = 0; i < 1300; i++) {
-        const u = (rnd() * 2) - 1;
-        const th = rnd() * Math.PI * 2;
-        const ring = Math.sqrt(Math.max(0, 1 - (u * u)));
-        const r = 2.3 + (rnd() * 0.4);
-        stars.push({
-          x: r * ring * Math.cos(th),
-          y: r * u,
-          z: r * ring * Math.sin(th),
-          tw: rnd() * Math.PI * 2,
-          tws: 0.8 + (rnd() * 1.6),
-          base: 0.25 + (rnd() * 0.38),
-          size: 0.1 + (rnd() * 0.16),
-        });
-      }
-      function resize() {
-        canvas.width = Math.floor(window.innerWidth * devicePixelRatio);
-        canvas.height = Math.floor(window.innerHeight * devicePixelRatio);
-        ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
-      }
-      function project(p, w, h) {
-        const cy = Math.cos(state.yaw), sy = Math.sin(state.yaw);
-        const cp = Math.cos(state.pitch), sp = Math.sin(state.pitch);
-        const xz = (p.x * cy) - (p.z * sy);
-        const zz = (p.x * sy) + (p.z * cy);
-        const yz = (p.y * cp) - (zz * sp);
-        const zz2 = (p.y * sp) + (zz * cp);
-        const s = 240 / (zz2 + 3.3);
-        return { x: (w / 2) + (xz * s), y: (h / 2) - (yz * s), z: zz2 };
-      }
-      function draw() {
-        const w = window.innerWidth, h = window.innerHeight;
-        ctx.clearRect(0, 0, w, h);
-        ctx.fillStyle = "#060d09";
-        ctx.fillRect(0, 0, w, h);
-        const t = Date.now() / 1000;
-        for (const s of stars) {
-          const p = project(s, w, h);
-          if (p.z < 0.02) continue;
-          if (p.x < -8 || p.x > w + 8 || p.y < -8 || p.y > h + 8) continue;
-          const a = Math.max(0.2, Math.min(0.9, s.base + (0.22 * Math.sin((t * s.tws) + s.tw))));
-          ctx.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`;
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, s.size, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      }
-      canvas.addEventListener("pointerdown", (e) => {
-        state.drag = true;
-        state.lx = e.clientX;
-        state.ly = e.clientY;
-        if (canvas.setPointerCapture) canvas.setPointerCapture(e.pointerId);
-      });
-      canvas.addEventListener("pointermove", (e) => {
-        if (!state.drag) return;
-        const dx = e.clientX - state.lx;
-        const dy = e.clientY - state.ly;
-        state.lx = e.clientX;
-        state.ly = e.clientY;
-        state.yaw += dx * 0.007;
-        state.pitch += dy * 0.007;
-      });
-      canvas.addEventListener("pointerup", () => { state.drag = false; });
-      canvas.addEventListener("lostpointercapture", () => { state.drag = false; });
-      resize();
-      draw();
-      window.addEventListener("resize", resize);
-      setInterval(draw, 130);
-    })();
-  </script>
 </body>
 </html>"""
         response = app.response_class(response=login_html, status=200, mimetype="text/html")
@@ -12516,6 +12428,7 @@ function drawSimpleTrend(canvas, points, series, yLabelSuffix = "", opts = {{}})
   const minV = 0;
   const hitRadius = Number(opts.hitRadius || 30);
   const showPointMarkers = Boolean(opts.showPointMarkers);
+  const integerTooltip = Boolean(opts.integerTooltip);
   const plot = [];
   series.forEach(s => {{
     ctx.strokeStyle = s.color;
@@ -12580,7 +12493,8 @@ function drawSimpleTrend(canvas, points, series, yLabelSuffix = "", opts = {{}})
     }}
     tip.style.left = `${{ev.clientX}}px`;
     tip.style.top = `${{ev.clientY}}px`;
-    tip.innerHTML = `<strong>${{esc(humanizeToken(best.line))}}</strong><br>x: ${{esc(formatGraphX(best.t))}}<br>y: ${{esc(Number(best.v).toFixed(3))}}`;
+    const yVal = integerTooltip ? String(Math.round(Number(best.v || 0))) : Number(best.v || 0).toFixed(3);
+    tip.innerHTML = `<strong>${{esc(humanizeToken(best.line))}}</strong><br>x: ${{esc(formatGraphX(best.t))}}<br>y: ${{esc(yVal)}}`;
     tip.style.display = "block";
   }};
   canvas.onmouseleave = () => {{ tip.style.display = "none"; }};
@@ -12596,7 +12510,7 @@ async function setupMemoryGrowth(rangeKey) {{
   const points = data.points || [];
   drawSimpleTrend(canvas, points, [
     {{key: "active_count", color: "#FFA200"}},
-  ]);
+  ], "", {{integerTooltip: true}});
   const meta = document.getElementById("memory-growth-meta");
   meta.textContent = `Total memories over time (auto-refresh): current count ${{Number(data.current_count || 0)}}`;
 }}
@@ -12615,11 +12529,19 @@ function startMemoryGrowthAutoRefresh() {{
 async function renderMemory() {{
   const target = document.getElementById("section-memory");
   const data = await api("/brainstem/api/memory");
+  const sortMode = (window.__memorySortMode || "recency_desc");
+  const sorters = {{
+    recency_desc: (a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")),
+    recency_asc: (a, b) => String(a.updated_at || "").localeCompare(String(b.updated_at || "")),
+    confidence_desc: (a, b) => Number(b.confidence ?? 0) - Number(a.confidence ?? 0),
+    confidence_asc: (a, b) => Number(a.confidence ?? 0) - Number(b.confidence ?? 0),
+  }};
+  const items = [...(data.items || [])].sort(sorters[sortMode] || sorters.recency_desc);
   const pendingMap = new Map((data.pending_feedback || []).map(item => [
     `${{item.scope}}::${{item.category}}::${{item.memory_key}}`,
     item.execute_after
   ]));
-  const rows = (data.items || []).map(item => {{
+  const rows = items.map(item => {{
     const key = `${{item.scope}}::${{item.category}}::${{item.memory_key}}`;
     const pendingUntil = pendingMap.get(key);
     const pendingTimer = pendingUntil
@@ -12658,8 +12580,17 @@ async function renderMemory() {{
         <div class="chart-wrap"><canvas id="memory-growth-chart"></canvas></div>
         <div id="memory-growth-meta" class="muted" style="margin-top:8px;"></div>
       </div>
-      <details class="card span-12 expandable" open>
+      <details class="card span-12 expandable">
         <summary>Memory Explorer</summary>
+        <div class="row" style="margin-top:8px;">
+          <label for="memory-sort" class="muted" style="min-width:110px;">Sort by</label>
+          <select id="memory-sort" style="max-width:260px;" onchange="setMemorySort(this.value)">
+            <option value="recency_desc" ${{sortMode === "recency_desc" ? "selected" : ""}}>Recency (newest first)</option>
+            <option value="recency_asc" ${{sortMode === "recency_asc" ? "selected" : ""}}>Recency (oldest first)</option>
+            <option value="confidence_desc" ${{sortMode === "confidence_desc" ? "selected" : ""}}>Confidence (highest first)</option>
+            <option value="confidence_asc" ${{sortMode === "confidence_asc" ? "selected" : ""}}>Confidence (lowest first)</option>
+          </select>
+        </div>
         <div class="muted" style="margin-top:8px;">Marking inaccurate queues deletion in 1 hour. Undo available before execution.</div>
         <table class="table"><thead><tr><th class="mem-id-col">Memory ID</th><th>Value</th><th class="confidence-col">Confidence</th><th class="feedback-col">Accuracy • Deletion Toggle</th></tr></thead><tbody>${{rows}}</tbody></table>
       </details>
@@ -12672,6 +12603,11 @@ async function renderMemory() {{
   setupMemoryGrowth("30d");
   startMemoryGrowthAutoRefresh();
   startForgetCountdowns();
+}}
+
+function setMemorySort(mode) {{
+  window.__memorySortMode = String(mode || "recency_desc");
+  renderMemory();
 }}
 
 async function memoryFeedback(scope, category, memory_key, action) {{
@@ -13358,7 +13294,7 @@ async function setupUsageActivity(rangeKey) {{
     {{key: "interactions_cum", color: "#6bb7ff"}},
     {{key: "outbound_cum", color: "#4dd4ac"}},
     {{key: "alerts_cum", color: "#FFA200"}},
-  ], "", {{hitRadius: 56, showPointMarkers: true}});
+  ], "", {{hitRadius: 56, showPointMarkers: true, integerTooltip: true}});
   const meta = document.getElementById("usage-activity-meta");
   meta.textContent = `Cumulative by bucket: ${{esc(data.bucket || "")}} • points: ${{points.length}}`;
 }}
