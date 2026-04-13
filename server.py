@@ -11817,44 +11817,18 @@ def brainstem_home():
   <style>
     body {
       margin:0; font-family: Georgia, "Times New Roman", serif; color:#ffffff; display:flex; min-height:100vh; align-items:center; justify-content:center;
-      background: #000000;
+      background: #060d09;
       position: relative;
       overflow: hidden;
     }
-    body::before, body::after {
-      content: "";
+    .star-canvas {
       position: fixed;
       inset: 0;
-      pointer-events: none;
+      width: 100vw;
+      height: 100vh;
+      display: block;
       z-index: 0;
-    }
-    body::before {
-      inset: -18vh -18vw;
-      background-image: url('/brainstem/assets/login-bg.avif');
-      background-size: cover;
-      background-position: center;
-      background-repeat: no-repeat;
-      transform: rotate(90deg) scale(1.18);
-      transform-origin: center;
-      opacity: 0.80;
-      filter: brightness(0.42) contrast(1.02);
-    }
-    body::after {
-      background-image:
-        radial-gradient(circle, rgba(255,255,255,0.95) 0 0.7px, transparent 1.1px),
-        radial-gradient(circle, rgba(255,255,255,0.80) 0 0.55px, transparent 0.95px),
-        radial-gradient(circle, rgba(255,255,255,0.72) 0 0.45px, transparent 0.9px);
-      background-size: 36px 36px, 54px 54px, 74px 74px;
-      background-position: 0 0, 17px 23px, 31px 9px;
-      opacity: 0.46;
-      animation: loginTwinkle 5.8s ease-in-out infinite alternate;
-    }
-    @keyframes loginTwinkle {
-      0% { opacity: 0.28; }
-      25% { opacity: 0.44; }
-      50% { opacity: 0.33; }
-      75% { opacity: 0.52; }
-      100% { opacity: 0.38; }
+      pointer-events: auto;
     }
     .card { width:min(420px,92vw); border:1px solid #3a3a3a; border-radius:14px; background:#000000; padding:18px; display:flex; flex-direction:column; align-items:center; box-shadow: 0 10px 28px rgba(0,0,0,0.45); }
     .card { position: relative; z-index: 1; }
@@ -11865,12 +11839,95 @@ def brainstem_home():
   </style>
 </head>
 <body>
+  <canvas id="login-stars" class="star-canvas" aria-hidden="true"></canvas>
   <form class="card" method="POST" action="/brainstem">
     <div class="title">Brainstem Passcode</div>
     <div class="muted">Enter passcode to continue.</div>
     <input type="password" name="passcode" autocomplete="current-password" required />
     <button type="submit">Unlock Brainstem</button>
   </form>
+  <script>
+    (function () {
+      const canvas = document.getElementById("login-stars");
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const state = { yaw: -0.5, pitch: 0.35, drag: false, lx: 0, ly: 0 };
+      let seed = 1337;
+      function rnd() {
+        seed = (seed * 1664525 + 1013904223) >>> 0;
+        return seed / 4294967296;
+      }
+      const stars = [];
+      for (let i = 0; i < 1300; i++) {
+        const u = (rnd() * 2) - 1;
+        const th = rnd() * Math.PI * 2;
+        const ring = Math.sqrt(Math.max(0, 1 - (u * u)));
+        const r = 2.3 + (rnd() * 0.4);
+        stars.push({
+          x: r * ring * Math.cos(th),
+          y: r * u,
+          z: r * ring * Math.sin(th),
+          tw: rnd() * Math.PI * 2,
+          tws: 0.8 + (rnd() * 1.6),
+          base: 0.25 + (rnd() * 0.38),
+          size: 0.1 + (rnd() * 0.16),
+        });
+      }
+      function resize() {
+        canvas.width = Math.floor(window.innerWidth * devicePixelRatio);
+        canvas.height = Math.floor(window.innerHeight * devicePixelRatio);
+        ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+      }
+      function project(p, w, h) {
+        const cy = Math.cos(state.yaw), sy = Math.sin(state.yaw);
+        const cp = Math.cos(state.pitch), sp = Math.sin(state.pitch);
+        const xz = (p.x * cy) - (p.z * sy);
+        const zz = (p.x * sy) + (p.z * cy);
+        const yz = (p.y * cp) - (zz * sp);
+        const zz2 = (p.y * sp) + (zz * cp);
+        const s = 240 / (zz2 + 3.3);
+        return { x: (w / 2) + (xz * s), y: (h / 2) - (yz * s), z: zz2 };
+      }
+      function draw() {
+        const w = window.innerWidth, h = window.innerHeight;
+        ctx.clearRect(0, 0, w, h);
+        ctx.fillStyle = "#060d09";
+        ctx.fillRect(0, 0, w, h);
+        const t = Date.now() / 1000;
+        for (const s of stars) {
+          const p = project(s, w, h);
+          if (p.z < 0.02) continue;
+          if (p.x < -8 || p.x > w + 8 || p.y < -8 || p.y > h + 8) continue;
+          const a = Math.max(0.2, Math.min(0.9, s.base + (0.22 * Math.sin((t * s.tws) + s.tw))));
+          ctx.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, s.size, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      canvas.addEventListener("pointerdown", (e) => {
+        state.drag = true;
+        state.lx = e.clientX;
+        state.ly = e.clientY;
+        if (canvas.setPointerCapture) canvas.setPointerCapture(e.pointerId);
+      });
+      canvas.addEventListener("pointermove", (e) => {
+        if (!state.drag) return;
+        const dx = e.clientX - state.lx;
+        const dy = e.clientY - state.ly;
+        state.lx = e.clientX;
+        state.ly = e.clientY;
+        state.yaw += dx * 0.007;
+        state.pitch += dy * 0.007;
+      });
+      canvas.addEventListener("pointerup", () => { state.drag = false; });
+      canvas.addEventListener("lostpointercapture", () => { state.drag = false; });
+      resize();
+      draw();
+      window.addEventListener("resize", resize);
+      setInterval(draw, 130);
+    })();
+  </script>
 </body>
 </html>"""
         response = app.response_class(response=login_html, status=200, mimetype="text/html")
