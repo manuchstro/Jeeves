@@ -79,6 +79,7 @@ BRAINSTEM_AUTH_MODE = (os.environ.get("BRAINSTEM_AUTH_MODE") or "internal_key").
 BRAINSTEM_PASSCODE = (os.environ.get("BRAINSTEM_PASSCODE") or "").strip()
 BRAINSTEM_SESSION_COOKIE = "brainstem_session"
 BRAINSTEM_SESSION_HOURS = max(1, int(os.environ.get("BRAINSTEM_SESSION_HOURS", "24")))
+JOURNAL_EXPORT_PATH = (os.environ.get("JOURNAL_EXPORT_PATH") or "/Users/manustromberg/Documents/Jeeves Journal Export").strip()
 CALENDAR_CONTEXT_URL = os.environ.get("CALENDAR_CONTEXT_URL", "").strip()
 CALENDAR_CONTEXT_BEARER = os.environ.get("CALENDAR_CONTEXT_BEARER", "").strip()
 SLEEP_CONTEXT_URL = os.environ.get("SLEEP_CONTEXT_URL", "").strip()
@@ -2864,8 +2865,47 @@ def add_journal_entry(entry_text):
         "INSERT INTO journal_entries (entry_text) VALUES (?)",
         (entry_text.strip(),),
     )
+    entry_id = cur.lastrowid
+    cur.execute("SELECT created_at FROM journal_entries WHERE id = ?", (entry_id,))
+    created_row = cur.fetchone()
     conn.commit()
     conn.close()
+    return {
+        "id": entry_id,
+        "created_at": (created_row["created_at"] if created_row else None),
+    }
+
+
+def append_journal_export(entry_text, created_at=None):
+    path_raw = (JOURNAL_EXPORT_PATH or "").strip()
+    if not path_raw:
+        return {"ok": False, "reason": "journal_export_path_missing"}
+
+    try:
+        path = os.path.abspath(os.path.expanduser(path_raw))
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
+        dt = parse_sqlite_timestamp(created_at) if created_at else None
+        if dt is None:
+            dt = get_local_now()
+        else:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+            dt = dt.astimezone(LOCAL_TZ)
+
+        timestamp = dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+        body = str(entry_text or "")
+        block = f"\n[{timestamp}]\n{body}\n"
+
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(block)
+        os.chmod(path, 0o600)
+        return {"ok": True, "path": path}
+    except Exception as exc:
+        print(f"[journal_export] append_failed: {type(exc).__name__}: {exc}")
+        return {"ok": False, "reason": "append_failed", "error_type": type(exc).__name__}
 
 
 def add_memory_observation(category, memory_key, value, confidence=0.6, subtype=None, stability=None, source_trust=None):
@@ -6961,6 +7001,7 @@ def process_memory_updates(text):
     updates, gratitude_entry = extract_memory_updates(text)
     journal_context = in_gratitude_journal_context()
     journal_analysis = None
+    journal_export = None
 
     for update in updates:
         add_memory_observation(
@@ -6987,7 +7028,11 @@ def process_memory_updates(text):
     journal_entry = gratitude_entry or (text.strip() if journal_context and text.strip() else None)
 
     if journal_entry:
-        add_journal_entry(journal_entry)
+        journal_row = add_journal_entry(journal_entry)
+        journal_export = append_journal_export(
+            journal_entry,
+            created_at=(journal_row or {}).get("created_at"),
+        )
         add_memory_observation(
             "journal",
             "latest_journal",
@@ -7029,6 +7074,7 @@ def process_memory_updates(text):
         "journal_context": journal_context,
         "journal_entry": journal_entry,
         "journal_analysis": journal_analysis,
+        "journal_export": journal_export,
     }
 
 

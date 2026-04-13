@@ -12,6 +12,11 @@ Last updated: 2026-04-12
   - repeat this loop until zero known bugs/UI fixes remain
 
 ## Recently Deployed (Completed)
+- ✅ Automatic journal export on ingest (no AI in export path)
+  - every ingested journal response is now appended verbatim to a single local file (`Jeeves Journal Export`)
+  - each exported block includes a local timestamp (`America/Los_Angeles`)
+  - export path is deterministic and file-based only (no model calls)
+  - export file is permission-locked (`chmod 600`) on write
 - ✅ Alert delivery integrity + auto-retry hardening
   - dedupe now keys off **confirmed delivery** (`alert_outcomes` stage=`delivery`, outcome=`sent`) instead of optimistic pre-send state
   - `sent_to_user` is now marked only after Twilio send success
