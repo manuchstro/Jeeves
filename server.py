@@ -11998,8 +11998,40 @@ def brainstem_home():
     .health-good {{ background: #3c5c45 !important; }}
     .health-bad {{ background: #5f3434 !important; }}
     .health-note {{ margin-top: 6px; font-size: 11px; color: #e8d6af; }}
-    .landing-wrap {{ min-height: calc(100vh - 120px); display:flex; align-items:center; justify-content:center; }}
-    .landing-card {{ position:relative; width:min(860px, 98%); min-height:320px; border-radius:16px; padding:20px; overflow:hidden; display:flex; align-items:center; justify-content:center; }}
+    .commit-sha {{ font-size: 0.95rem; line-height: 1.2; letter-spacing: 0.15px; overflow-wrap:anywhere; }}
+    .landing-wrap {{
+      min-height: calc(100vh - 120px);
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      position: relative;
+      overflow: hidden;
+      border-radius: 16px;
+    }}
+    .landing-wrap::before {{
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        repeating-linear-gradient(0deg, rgba(255,255,255,0.035) 0 1px, transparent 1px 24px),
+        repeating-linear-gradient(90deg, rgba(255,255,255,0.03) 0 1px, transparent 1px 28px),
+        repeating-linear-gradient(32deg, rgba(255,240,210,0.08) 0 1px, transparent 1px 22px),
+        repeating-linear-gradient(148deg, rgba(255,162,0,0.08) 0 1px, transparent 1px 34px),
+        repeating-linear-gradient(62deg, rgba(68,86,76,0.17) 0 2px, transparent 2px 40px),
+        linear-gradient(140deg, #020303 0%, #1e2a23 42%, #0f1512 65%, #020303 100%);
+      animation: landingPlaidFade 2.8s ease forwards;
+      pointer-events: none;
+      z-index: 0;
+    }}
+    .landing-wrap::after {{
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(180deg, rgba(0,0,0,0.22) 0%, rgba(0,0,0,0.45) 100%);
+      pointer-events: none;
+      z-index: 0;
+    }}
+    .landing-card {{ position:relative; z-index:1; width:min(860px, 98%); min-height:320px; border-radius:16px; padding:20px; overflow:hidden; display:flex; align-items:center; justify-content:center; }}
     .landing-copy {{
       max-width: 660px;
       width: min(660px, 96%);
@@ -12041,6 +12073,7 @@ def brainstem_home():
     @keyframes cardIn {{ from {{ opacity: 0; transform: translateY(6px); }} to {{ opacity:1; transform: translateY(0); }} }}
     @keyframes floatA {{ 0%{{transform:translateY(0)}}50%{{transform:translateY(8px)}}100%{{transform:translateY(0)}} }}
     @keyframes floatB {{ 0%{{transform:translateY(0)}}50%{{transform:translateY(-8px)}}100%{{transform:translateY(0)}} }}
+    @keyframes landingPlaidFade {{ from {{ opacity: 1; }} to {{ opacity: 0; }} }}
     @media (max-width: 900px) {{
       .span-8, .span-6, .span-4, .span-3 {{ grid-column: span 12; }}
       .tab-btn {{ padding: 8px 10px; font-size: 0.9rem; }}
@@ -12294,7 +12327,7 @@ async function renderOverview() {{
       <div class="card span-3"><div class="title">Now</div><div class="muted">${{esc(data.now_local || "")}}</div></div>
       <div class="card span-3 ${{commitClass}}">
         <div class="title">Commit</div>
-        <div class="kpi">${{esc((data.deploy||{{}}).commit_sha || "n/a")}}</div>
+        <div class="kpi commit-sha">${{esc((data.deploy||{{}}).commit_sha || "n/a")}}</div>
         <div class="health-note">${{health.healthy ? "System healthy" : esc((health.reasons || []).join(" • "))}}</div>
       </div>
       <div class="card span-3"><div class="title">Alerts 24h</div><div class="kpi">${{esc(((data.counts||{{}}).alerts_24h)||0)}}</div></div>
@@ -12528,6 +12561,10 @@ function startMemoryGrowthAutoRefresh() {{
 
 async function renderMemory() {{
   const target = document.getElementById("section-memory");
+  const existingDetails = target.querySelector("details.expandable");
+  const isInitiallyExpanded = (typeof window.__memoryExpanded === "boolean")
+    ? window.__memoryExpanded
+    : Boolean(existingDetails && existingDetails.open);
   const data = await api("/brainstem/api/memory");
   const sortMode = (window.__memorySortMode || "recency_desc");
   const sorters = {{
@@ -12580,7 +12617,7 @@ async function renderMemory() {{
         <div class="chart-wrap"><canvas id="memory-growth-chart"></canvas></div>
         <div id="memory-growth-meta" class="muted" style="margin-top:8px;"></div>
       </div>
-      <details class="card span-12 expandable">
+      <details class="card span-12 expandable" ${{isInitiallyExpanded ? "open" : ""}}>
         <summary>Memory Explorer</summary>
         <div class="row" style="margin-top:8px;">
           <label for="memory-sort" class="muted" style="min-width:110px;">Sort by</label>
@@ -12600,14 +12637,22 @@ async function renderMemory() {{
       </div>
     </div>
   `;
+  const details = target.querySelector("details.expandable");
+  if (details) {{
+    details.addEventListener("toggle", () => {{
+      window.__memoryExpanded = details.open;
+    }});
+  }}
   setupMemoryGrowth("30d");
   startMemoryGrowthAutoRefresh();
   startForgetCountdowns();
 }}
 
 function setMemorySort(mode) {{
+  const details = document.querySelector("#section-memory details.expandable");
+  if (details) window.__memoryExpanded = details.open;
   window.__memorySortMode = String(mode || "recency_desc");
-  renderMemory();
+  return renderMemory();
 }}
 
 async function memoryFeedback(scope, category, memory_key, action) {{
@@ -12617,12 +12662,14 @@ async function memoryFeedback(scope, category, memory_key, action) {{
       ? "mark this memory inaccurate and queue forget in 1 hour?"
       : "undo last memory feedback?");
   if (!confirm("Are you sure you want to " + confirmText)) return;
+  const details = document.querySelector("#section-memory details.expandable");
+  if (details) window.__memoryExpanded = details.open;
   await api("/brainstem/api/memory/feedback", {{
     method: "POST",
     headers: {{"Content-Type":"application/json"}},
     body: JSON.stringify({{scope, category, memory_key, action}})
   }});
-  renderMemory();
+  await renderMemory();
 }}
 
 let forgetTimerTicker = null;
