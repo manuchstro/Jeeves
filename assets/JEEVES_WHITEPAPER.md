@@ -3,23 +3,26 @@ JEEVES WHITEPAPER
 Version: 2026-04-13
 Source of truth: /Users/manustromberg/Documents/Jeeves/server.py and /Users/manustromberg/Documents/Jeeves/ROADMAP.md
 
-============================================================
-PAPER I: JEEVES AS A HUMAN PRODUCTIVITY SYSTEM (NON-TECHNICAL)
-============================================================
+============================================================================
+PAPER I: JEEVES AS A HUMAN PRODUCTIVITY SYSTEM AND LIFESTYLE ENHANCEMENT AID
+============================================================================
 
 Abstract
-Jeeves is a personal operating system for cognition, workload, and execution. It reduces friction between intention and action by combining three core ideas: persistent memory, live context ingestion, and adaptive communication style. The goal is not to imitate a person. The goal is to increase output quality, reduce decision fatigue, and preserve user trust under real-world noise.
+Jeeves is a personal operating system for cognition, workload, and execution. Jeeves operates on a foundation of three core ideas: persistent memory, live context ingestion, and adaptive communication. As a dynamic Artificial Intelligence (A) agent, Jeeves continuously gathers and safely stores the personal data of the user in an effort to optimize the agent's quality. The user's personal data is stored as a "memory," accessible via Jeeves' brainstem. The user's data is never distributed or exported beyond a single function: dynamic, deterministic query generation for regular news poll. However, this only results in a small number of keywords that are virtually untraceable to the user. The goal of this project is to function autonomously in service of the user's interest(s). A mid-weight personal AI agent such as Jeeves offers a secure store of personal data and broad lifestyle choices to which the user may refer in order to make future choices. 
+
+"To think is easy. To act is hard. But the hardest thing in the world is to act in accordance with your thinking.” - Goethe, Johann Wolfgang von. _Wilhelm Meisters Lehrjahre_. 1796.
 
 1. Problem Statement
 Most assistants fail in practice for predictable reasons:
-- They respond in the moment but do not accumulate stable understanding.
+- They respond in the moment but do not accumulate a natural understanding of the user.
 - They are disconnected from operational context (calendar, inbox, sleep, markets, portfolio truth).
-- They cannot reliably separate high-signal actions from low-signal noise.
-- They overuse language fluency where deterministic behavior is required.
-- They lack user-visible controls for correction, reinforcement, and audit.
+- They cannot reliably separate actionable data from noise.
+- They overuse language fluency where deterministic behavior is required, resulting in unecessary cost and wordy responses.
+- They lack user-visible controls for correction, reinforcement, and self-audit.
+- They lack simple manual overrides for key structures such as data aggregation, scheduled behavior, and user behavior interpretation.
 
 Jeeves addresses these by design:
-- Memory is structured, scored, decayed, reinforced, and auditable.
+- Memory is structured, scored, decayed, reinforced, and auditable (both autonomously and manually).
 - Context is refreshed from external providers and normalized into deterministic features.
 - Alerting uses tiering, filters, dedupe, and delivery retries.
 - Interpretation and response are split so deterministic handlers can bypass unnecessary AI calls.
